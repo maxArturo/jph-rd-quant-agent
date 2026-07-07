@@ -8,3 +8,19 @@ Started: (not yet started)
 - Credentials: never in code or .env — bare HTTP calls through the OneCLI proxy (HTTPS_PROXY + CA cert); management API at http://127.0.0.1:10254.
 - Paper trading only: no rdq-exec-live identity, no code path targeting api.alpaca.markets.
 - All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
+
+## 2026-07-07 20:20 - US-001
+- Implemented repo scaffold: orchestrator/, execution/, research/, data/, ops/, docs/reference/, tests/ (packages get __init__.py; non-package dirs get .gitkeep)
+- pyproject.toml: requires-python >=3.10; dev extras pytest/pyright/ruff; tool config for pytest (with `live` marker for proxy smoke tests), pyright (standard mode, venv=.venv), ruff (E,F,W,I,UP,B; py310; line 100); explicit setuptools package include (flat layout breaks auto-discovery)
+- README.md: standalone constraint (no nanoclaw; OneCLI at http://127.0.0.1:10254 only external service), links to PLAN.md and tasks/prd-rdagent-q-trading.md
+- Makefile: `make check` = ruff check + pyright + pytest; `make venv` bootstraps
+- tests/test_scaffold.py verifies directory layout and README constraints
+- .gitignore for .venv, caches, future state.sqlite
+- Verified: `make check` runs end-to-end and exits 0 (ruff "All checks passed", pyright "0 errors", pytest "2 passed")
+- **Learnings for future iterations:**
+  - Box had no make/shellcheck/python3-venv; passwordless sudo works — installed via `sudo apt-get install -y make shellcheck python3.12-venv`. shellcheck is now available for US-003.
+  - Flat-layout repos need explicit `[tool.setuptools.packages.find] include=[...]` or editable install fails on "Multiple top-level packages" (plans/ dir trips auto-discovery)
+  - Venv lives at .venv; Makefile calls tools via .venv/bin/ directly, no activation needed
+  - pyright 1.1.411 downloaded its node runtime on first run without issue (network OK)
+  - pytest exits 5 on zero collected tests — always keep at least one real test
+---

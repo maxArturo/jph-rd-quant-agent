@@ -1,0 +1,43 @@
+[project]
+name = "rd-agent-q"
+version = "0.1.0"
+description = "RD-Agent(Q) Slack-driven quant research and paper trading system"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*", "execution*", "research*", "data*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.390",
+    "ruff>=0.8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "live: tests that hit real external services through the OneCLI proxy (deselect with '-m \"not live\"')",
+]
+
+[tool.pyright]
+include = ["orchestrator", "execution", "research", "data", "ops", "tests"]
+exclude = ["**/__pycache__", ".venv"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+pythonVersion = "3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
