@@ -7,6 +7,7 @@ Started: (not yet started)
 - Quality gate: `make check` = ruff + pyright + pytest (configured in US-001; use it before every commit).
 - Credentials: never in code or .env — bare HTTP calls through the OneCLI proxy (HTTPS_PROXY + CA cert); management API at http://127.0.0.1:10254.
 - Paper trading only: no rdq-exec-live identity, no code path targeting api.alpaca.markets.
+- Proxied calls from scripts: `onecli run --agent <identifier> -- curl ...`; banner on stderr, command stdout clean. See ops/CLAUDE.md for onecli CLI gotchas (UUID vs identifier, set-secrets replaces list).
 - All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
 
 ## 2026-07-07 20:20 - US-001
@@ -35,4 +36,19 @@ Started: (not yet started)
   - GitHub API reachable from this box (used to date commits); git ls-remote works for upstream SHAs.
   - pip resolved the git install near-instantly — wheel/cache friendly; rerunning install.sh is cheap.
   - rdagent's deps coexist cleanly with our dev tools in one venv (pip check clean; pyright still 0 errors, no slowdown).
+---
+## 2026-07-07 20:50 - US-003
+- ops/setup_onecli.sh: registers rdq-orchestrator, rdq-research, rdq-exec-paper (idempotent — skips existing identifiers; NO rdq-exec-live, and it hard-refuses to assign any secret with the live Alpaca host pattern). Assigns vault secrets by hostPattern per the PLAN.md identity table; warns per missing vault secret and lists them at the end.
+- ops/check_onecli.sh: one bare proxied request per (identity, service) — Anthropic /v1/models, Notion /v1/users/me, Alpaca paper /v2/account, OpenAI /v1/models, FMP /stable/search-symbol. PASS/FAIL per check; exits 1 listing missing secret assignments. Live-isolation proof: rdq-exec-paper vs https://api.alpaca.markets/v2/account must return 401/403 (2xx = hard fail).
+- ops/CLAUDE.md added with onecli CLI gotchas for future ops scripts.
+- Verified end-to-end (recorded outputs):
+  - setup run 1: created all 3 identities, assigned 3/2/2 secrets; run 2: "exists:" for all three, same assignments (idempotent), exit 0 both times.
+  - check run: PASS Anthropic x2 (HTTP 200), Alpaca paper x2 (HTTP 200), FMP (HTTP 200); PASS live isolation (HTTP 401 as required); FAIL Notion + OpenAI ("secret not in vault" — those keys are vaulted in later stories US-004/US-025); exit 1 listing exactly those two missing assignments. Failure behavior is per spec.
+  - shellcheck clean on both scripts; make check green (ruff pass, pyright 0 errors, 5 pytest passed).
+- **Learnings for future iterations:**
+  - OneCLI on this box is v2.2.0; management API reachable at http://127.0.0.1:10254; jq 1.7 + curl + shellcheck preinstalled.
+  - Vaulted today: Anthropic (api.anthropic.com), Alpaca paper key+secret (paper-api.alpaca.markets, two separate secrets — assign BOTH), FMP query-param key (financialmodelingprep.com). NOT vaulted yet: Notion (api.notion.com), OpenAI embeddings (api.openai.com) — US-004/US-025 must vault these (web UI) before their smoke tests pass, then rerun setup_onecli.sh to assign.
+  - `onecli run` banner goes to stderr; capture stdout only for `%{http_code}`. Anthropic GET /v1/models 400s without `anthropic-version: 2023-06-01`.
+  - `onecli agents secrets/set-secrets` want the agent UUID, not the identifier; set-secrets REPLACES the whole list.
+  - Live Alpaca host with no injected creds returns 401 — the isolation proof works today without any live secret existing in the vault.
 ---
