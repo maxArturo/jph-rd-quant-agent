@@ -38,5 +38,9 @@ Requires Python >= 3.10.
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-make check   # ruff + pyright + pytest
+make check           # ruff + pyright + pytest
+research/install.sh  # install RD-Agent at the pinned commit (research/PINNED_COMMIT)
 ```
+
+RD-Agent is installed from a pinned upstream commit rather than declared in
+`pyproject.toml`; see `docs/decisions.md` for the pin and rationale.

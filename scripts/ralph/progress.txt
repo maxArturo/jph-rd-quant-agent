@@ -24,3 +24,15 @@ Started: (not yet started)
   - pyright 1.1.411 downloaded its node runtime on first run without issue (network OK)
   - pytest exits 5 on zero collected tests — always keep at least one real test
 ---
+## 2026-07-07 20:35 - US-002
+- Pinned microsoft/RD-Agent to main HEAD 4f9ecb005881cddc08df0124a2e894c018007679 (2026-05-06; 28 commits past v0.8.0 release, unmoved for ~2 months = current stable). SHA in research/PINNED_COMMIT.
+- research/install.sh (shellcheck-clean) installs `rdagent @ git+...@<SHA>` into .venv, validates the SHA format, verifies import. Deliberately NOT a pyproject dep (heavy tree: litellm/streamlit/docker).
+- docs/decisions.md created with the pin rationale + rebase procedure; README dev section references install.sh.
+- tests/test_rdagent_pin.py: SHA format, `import rdagent` succeeds, and pip's direct_url.json commit_id matches the pin.
+- Verified: install.sh ran end-to-end; `pip check` clean; import exits 0; direct_url.json commit_id == pin; `make check` green (5 passed).
+- **Learnings for future iterations:**
+  - rdagent installs as version 0.8.1.dev28 (setuptools-scm) and `rdagent.__file__` is None (namespace-ish) — check `.venv/.../rdagent-*.dist-info/direct_url.json` for the true installed commit.
+  - GitHub API reachable from this box (used to date commits); git ls-remote works for upstream SHAs.
+  - pip resolved the git install near-instantly — wheel/cache friendly; rerunning install.sh is cheap.
+  - rdagent's deps coexist cleanly with our dev tools in one venv (pip check clean; pyright still 0 errors, no slowdown).
+---
