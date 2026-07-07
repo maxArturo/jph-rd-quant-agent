@@ -1,0 +1,655 @@
+{
+  "project": "rd-agent-q",
+  "branchName": "ralph/rdagent-q-trading",
+  "description": "RD-Agent(Q) Slack-driven quant research and paper trading system - standalone repo; Slack orchestrator (Claude) drives RD-Agent(Q) research loops via server_ui, records to Notion, and a deterministic nightly rebalancer trades an Alpaca PAPER account through the OneCLI gateway. Live trading is out of scope. Source PRD: tasks/prd-rdagent-q-trading.md; architecture: PLAN.md.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Repo scaffold with lint/typecheck/test tooling",
+      "description": "As a developer, I want the repo skeleton and quality tooling so every later story has a stable, checkable base.",
+      "acceptanceCriteria": [
+        "Directories exist: orchestrator/, execution/, research/, data/, ops/, docs/reference/, tests/",
+        "pyproject.toml with Python >=3.10, pytest, and pyright configured (the 'Typecheck passes' criterion in every story means pyright, this is a Python repo); ruff configured",
+        "README.md states the standalone constraint (no nanoclaw dependency; OneCLI at http://127.0.0.1:10254 is the only external service) and links PLAN.md and tasks/prd-rdagent-q-trading.md",
+        "A `make check` (or equivalent script) runs lint + typecheck + pytest and exits 0 on the empty scaffold",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Pin and install RD-Agent",
+      "description": "As a developer, I want RD-Agent installed at a pinned commit so research code has a stable upstream.",
+      "acceptanceCriteria": [
+        "research/PINNED_COMMIT contains the chosen microsoft/RD-Agent commit SHA",
+        "Install path documented and scripted (research/install.sh or pyproject extra) installing rdagent from that pinned commit into the project venv",
+        "python -c 'import rdagent' exits 0 in the venv",
+        "docs/decisions.md records the pinned commit and why",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "OneCLI identity setup and verification scripts",
+      "description": "As a developer, I want scripted OneCLI identity registration and verification so credential scoping is reproducible and provable.",
+      "acceptanceCriteria": [
+        "ops/setup_onecli.sh registers identities rdq-orchestrator, rdq-research, rdq-exec-paper against http://127.0.0.1:10254 (idempotent; NO rdq-exec-live)",
+        "ops/check_onecli.sh makes one bare proxied request per assigned service per identity and reports pass/fail per check; exits nonzero listing missing secret assignments when a check fails",
+        "check_onecli.sh asserts rdq-exec-paper gets 401/403 from https://api.alpaca.markets (live-host isolation proof)",
+        "Both scripts pass shellcheck",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "LLM backend probe (Claude via LiteLLM + embeddings)",
+      "description": "As a developer, I want a scripted probe of RD-Agent's LLM path so the Claude-via-LiteLLM decision is verified before anything depends on it.",
+      "acceptanceCriteria": [
+        "research/.env.example sets CHAT_MODEL=anthropic/claude-sonnet-5, EMBEDDING_MODEL, OPENAI_API_BASE, and placeholder keys (real values injected by OneCLI proxy)",
+        "research/probe_llm.py sends a JSON-mode hypothesis-shaped prompt through LiteLLM and validates the response against a JSON schema; exits 0 on success",
+        "probe_llm.py also performs one embedding call end-to-end through the proxy and asserts a non-empty vector",
+        "Probe outcome (Claude confirmed, or documented fallback to an OpenAI chat model with the failing behavior) recorded in docs/decisions.md",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Vanilla RD-Agent environment check and run wrapper",
+      "description": "As a developer, I want the vanilla fin_factor run scripted with a fast environment check so the engine is proven runnable on this box.",
+      "acceptanceCriteria": [
+        "ops/run_vanilla_factor.sh wraps `onecli run --agent rdq-research -- rdagent fin_factor --loop_n 1` with LOG_TRACE_PATH/WORKSPACE_PATH set",
+        "`rdagent health_check` exits 0 (Docker sudo-less, ports free) when invoked via the script's --check flag",
+        "Script header documents that the first full run downloads cn_data and builds local_qlib:latest (hours); full-run completion criterion: qlib_res.csv with non-null IC exists in the run workspace",
+        "--check mode verified end-to-end (run it and record output in progress notes)",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Slack Bolt Socket Mode skeleton",
+      "description": "As an operator, I want a bot connected to #quant-research over Socket Mode so I can talk to the system with no inbound port.",
+      "acceptanceCriteria": [
+        "orchestrator/app.py starts a Bolt-for-Python Socket Mode app; channel and thread messages reach a handler; handler can reply in-thread",
+        "Token source decided and implemented: OneCLI injection for slack.com verified, else repo-local .env fallback; the decision and evidence recorded in docs/decisions.md",
+        "Config loading (channel id, tokens source) lives in orchestrator/config.py",
+        "Unit tests with a mocked Slack client cover message routing (channel message -> handler, thread reply targets thread_ts)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Orchestrator SQLite state layer",
+      "description": "As a developer, I want a small state store so thread-to-run mappings and the promoted strategy survive restarts.",
+      "acceptanceCriteria": [
+        "orchestrator/state.py creates orchestrator/state.sqlite on startup with tables: directives, runs (thread_ts, session_path, status, universe), promoted_strategy (single row), pending_interactions",
+        "Schema migration runs idempotently on startup (running twice is safe)",
+        "CRUD helpers for each table with unit tests (create, fetch by thread_ts, replace promoted strategy)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Central model router and Claude client wrapper",
+      "description": "As a developer, I want model selection centralized so the tier policy (fable=judgment, haiku=utility) is enforced in one place.",
+      "acceptanceCriteria": [
+        "orchestrator/llm.py exposes judgment() and utility() call paths; judgment uses model claude-fable-5, utility uses claude-haiku-4-5; model IDs appear only in this module/config",
+        "judgment path sends betas=['server-side-fallback-2026-06-01'] with fallbacks=[{'model': 'claude-opus-4-8'}], omits the thinking parameter, uses streaming, and checks stop_reason=='refusal' before reading content",
+        "Tool-use loop helper executes registered tools and feeds tool_result blocks back until end_turn",
+        "Unit tests with a mocked Anthropic client cover: model selection per path, refusal handling branch, tool loop termination",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Conversational core with save_directive tool",
+      "description": "As an operator, I want the bot to refine my raw idea into a structured research directive it persists and echoes back.",
+      "acceptanceCriteria": [
+        "System prompt (quant research desk PM: honest reporting, never trades without explicit approval) lives in orchestrator/prompts.py",
+        "save_directive tool persists {objective, universe_hint, constraints} to the directives table and posts a formatted summary to the thread",
+        "Conversation context reloads from SQLite after process restart (test: create directive, recreate app object, directive retrievable by thread)",
+        "Unit tests with mocked Anthropic + Slack clients cover the idea -> directive -> echo flow",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Orchestrator systemd service",
+      "description": "As an operator, I want the bot supervised so it survives crashes and reboots.",
+      "acceptanceCriteria": [
+        "ops/rdq-orchestrator.service (systemd user unit) runs the bot under the rdq-orchestrator OneCLI identity with Restart=always",
+        "ops/install_services.sh links units into ~/.config/systemd/user/ and daemon-reloads",
+        "systemd-analyze verify passes on the unit file",
+        "Service started once and observed active (record `systemctl --user status` output in progress notes)",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "FMP EOD bars client",
+      "description": "As a developer, I want a typed FMP client so the data pipeline can pull daily bars through the OneCLI proxy.",
+      "acceptanceCriteria": [
+        "data/fmp.py fetches /stable/historical-price-eod/full?symbol=&from=&to= as bare HTTPS (no apikey in code; proxy injects); also wraps splits and dividends endpoints",
+        "Handles 429 with retry-after backoff and 401/403 with an actionable missing-secret error message",
+        "Unit tests with mocked HTTP cover: date windowing, 429 backoff, 401 message",
+        "Live smoke test (marked, skippable offline): AAPL bars for a 1-month window return >15 rows through the proxy",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Price adjustment factor computation",
+      "description": "As a developer, I want split/dividend adjustment factors computed correctly because FMP closes are raw and Qlib needs adjusted prices.",
+      "acceptanceCriteria": [
+        "data/adjust.py computes a per-day adjustment factor series from splits + dividends for a ticker",
+        "Unit tests with fixture data: a 10:1 split produces a 0.1 factor step; dividends adjust proportionally; no-event ticker yields factor 1.0 throughout",
+        "NVDA 2024-06-10 10:1 split fixture test: adjusted close series shows no >20% single-day cliff across the split date while raw close does",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Qlib US data store builder (checkpointed, resumable)",
+      "description": "As a developer, I want FMP data converted into a Qlib bin store so research runs on US names.",
+      "acceptanceCriteria": [
+        "data/build_store.py: ticker list -> FMP fetch -> adjusted prices -> Qlib dump_bin format at ~/.qlib/qlib_data/us_data (calendar, instruments, features)",
+        "Backfill is checkpointed and resumable: unit test simulates a crash mid-list with mocked fetch and asserts rerun continues without duplicate or missing tickers",
+        "Store writes go to a temp dir, validate, then swap (no partial store left on failure) - covered by a unit test",
+        "Smoke test: build a 5-ticker store from fixture bars; qlib.init + D.features returns OHLCV for AAPL with no NaN closes",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Universe generator with liquidity filters",
+      "description": "As a developer, I want instrument lists (default us_liquid, sp500, and custom) so strategies rank within a controlled universe.",
+      "acceptanceCriteria": [
+        "data/make_universe.py --name <n> --tickers <list|file> writes a Qlib instruments file into the store",
+        "Built-in configs in data/config.yaml: us_liquid (min ADV and min price thresholds) and sp500",
+        "Tickers absent from the store are rejected with a printed gap list and nonzero exit",
+        "Unit tests on a fixture store cover: filter thresholds, gap rejection, instruments file format",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Factor source data (daily_pv h5) generation per universe",
+      "description": "As a developer, I want the factor coder's source h5 regenerated from the US store for a given universe.",
+      "acceptanceCriteria": [
+        "data/make_factor_source.py generates daily_pv_all.h5 and daily_pv_debug.h5 for a named universe into a target folder (the future FACTOR_CoSTEER_DATA_FOLDER)",
+        "Output h5 has MultiIndex (datetime, instrument) with OHLCV columns - asserted by test on the fixture store",
+        "Refuses to run for a universe whose instruments file does not exist",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "US market template copies and prompt overrides",
+      "description": "As a developer, I want US-patched copies of RD-Agent's qlib templates so the pinned upstream tree stays pristine.",
+      "acceptanceCriteria": [
+        "research/us_templates/factor_template/ and model_template/ contain copies of the upstream YAMLs with provider_uri -> us_data, region: us, market: us_liquid, S&P500 benchmark, A-share limit_threshold removed, US costs set",
+        "research/app_tpl/ holds prompt overrides for any A-share-specific language found in upstream prompts.yaml (grep results documented in docs/decisions.md)",
+        "A test renders each template YAML (jinja variables stubbed) and asserts provider_uri/region/market/benchmark values",
+        "A test asserts no files under the pinned rdagent install differ from the pinned commit (upstream untouched)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "US fin_quant run wrapper with env wiring",
+      "description": "As a developer, I want a single entrypoint that wires env vars and launches a US-market fin_quant run.",
+      "acceptanceCriteria": [
+        "ops/run_us_quant.sh sets QLIB_QUANT_TRAIN_START..TEST_END, FACTOR_CoSTEER_DATA_FOLDER, APP_TPL, template paths, LOG_TRACE_PATH and launches via `onecli run --agent rdq-research -- rdagent fin_quant`",
+        "--check mode validates every referenced path/env var exists and exits 0 without launching (verified by running it)",
+        "Script supports --loop_n and --all_duration passthrough",
+        "Full-run completion criterion documented in header: qlib_res.csv with non-NaN IC, |ARR|<200%, MDD<0 and mlruns/**/pred.pkl indexed by US tickers",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "RD-Agent control-plane systemd service",
+      "description": "As a developer, I want rdagent server_ui supervised on localhost so the orchestrator has a control API.",
+      "acceptanceCriteria": [
+        "ops/rdq-research.service runs `rdagent server_ui` bound to 127.0.0.1:19899 via the rdq-research OneCLI identity; NO_PROXY covers 127.0.0.1,localhost and the tailnet range",
+        "Unit is NOT exposed via tailscale serve (documented in unit comments; per PLAN.md port table)",
+        "systemd-analyze verify passes; service started once and `curl -s http://127.0.0.1:19899/` returns an HTTP response (record in progress notes)",
+        "install_services.sh updated to include the unit",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "RD-Agent control client (rdagent_client.py)",
+      "description": "As a developer, I want a typed client for server_ui so the orchestrator can start, steer, and inspect research runs.",
+      "acceptanceCriteria": [
+        "orchestrator/rdagent_client.py implements start_run(directive, universe, interaction=True) via POST /trace, pending() via GET /receive, submit(edit) via POST /user_interaction/submit, stop()/resume() via POST /control",
+        "Artifact locator resolves a finished loop's qlib_res.csv, ret.pkl, and workspace path from LOG_TRACE_PATH",
+        "Unit tests run against a stubbed Flask server exercising every method incl. artifact resolution on a fixture log dir",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "start_research tool wiring Slack thread to run",
+      "description": "As an operator, I want 'research X' in a thread to start an RD-Agent run seeded with my directive.",
+      "acceptanceCriteria": [
+        "start_research tool launches a run with the thread's directive as user_instruction and records thread_ts <-> session_path in SQLite runs table",
+        "Duplicate start in the same thread is rejected with a message pointing at the active run",
+        "Unit tests with stubbed rdagent_client cover: successful start (row written), duplicate rejection",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Hypothesis poller with approve/edit/reject buttons",
+      "description": "As an operator, I want pending hypotheses posted to my thread with buttons so I can steer the loop without leaving Slack.",
+      "acceptanceCriteria": [
+        "Background poller checks GET /receive for all active runs and posts each pending hypothesis to its owning thread as Block Kit Approve / Edit / Reject buttons",
+        "Approve submits the hypothesis unchanged; Edit opens a text round-trip and submits operator text merged into the hypothesis dict; Reject requests a new proposal",
+        "Pending interactions persist in SQLite so a restart does not drop them (test: pending row survives poller restart)",
+        "Unit tests with stubbed client + mocked Slack cover all three button actions and poller dedup (same hypothesis not posted twice)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Loop-completion summary with metrics and return chart",
+      "description": "As an operator, I want a metrics summary and equity curve in the thread when a loop finishes.",
+      "acceptanceCriteria": [
+        "On run completion the poller posts IC, ICIR, Rank IC, ARR, IR, MDD, Sharpe parsed from qlib_res.csv",
+        "ret.pkl is rendered to a PNG equity-curve chart (matplotlib, server-side) and uploaded to the thread",
+        "Unit test renders the chart from a fixture ret.pkl and asserts a non-empty PNG file; summary formatter tested against a fixture qlib_res.csv",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "set_universe tool for per-run custom universes",
+      "description": "As an operator, I want ticker/sector ideas mapped to a confirmed custom universe because RD-Agent(Q) ranks cross-sectionally.",
+      "acceptanceCriteria": [
+        "set_universe resolves an idea to a ticker list (operator-supplied or Claude-proposed) and posts it for in-thread confirmation before any data work",
+        "On confirm: validates tickers against the store (gaps reported), calls make_universe + make_factor_source, and renders the run's template copy with market: <custom>",
+        "Warns below 30 tickers (configurable) suggesting peer padding; refuses an all-US universe pointing at us_liquid",
+        "Universe name + tickers stored with the run row in SQLite",
+        "Unit tests cover: gap reporting, min-size warning, all-US refusal, template render with custom market",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "stop_run and resume_run tools",
+      "description": "As an operator, I want to stop and resume research runs from the thread.",
+      "acceptanceCriteria": [
+        "stop_run calls POST /control stop for the thread's run and updates the run row status",
+        "resume_run resumes from the stored session_path and re-activates polling for the thread",
+        "Unit tests with stubbed client cover both paths incl. status transitions",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Notion raw-HTTP client",
+      "description": "As a developer, I want a thin Notion client (proxy-injected auth) so runs and trades can be durably recorded.",
+      "acceptanceCriteria": [
+        "orchestrator/notion_client.py: create_page, query_db, update_page; always sends Notion-Version: 2022-06-28; no Authorization header in code (OneCLI injects)",
+        "Read-after-write retries with bounded backoff for Notion eventual consistency",
+        "Unit tests with mocked HTTP cover all three methods and the retry path",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Notion database bootstrap",
+      "description": "As a developer, I want the five databases created under one parent page with IDs captured in config.",
+      "acceptanceCriteria": [
+        "ops/bootstrap_notion.py creates: Research Ideas, Hypothesis Log, Backtest Results, Decision Log, Trade Ledger with the property schemas defined in docs/reference/notion-schema.md",
+        "docs/reference/notion-schema.md written (schema + one-writer-per-DB convention, adapted from nanoclaw's thesis-trading docs)",
+        "Created DB IDs are written into orchestrator/config.yaml",
+        "Script is idempotent: rerun detects existing DBs by title under the parent page and does not duplicate (unit tested with mocked HTTP)",
+        "Run once against real Notion; queried each created DB successfully (record IDs in progress notes)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Record research runs in Notion end-to-end",
+      "description": "As an operator, I want every run reconstructable from Notion alone.",
+      "acceptanceCriteria": [
+        "New directive -> Research Ideas page (raw idea, refined directive, universe, status, thread link)",
+        "Each hypothesis + operator action -> Hypothesis Log row linked to the idea page",
+        "Each completed experiment -> Backtest Results row (metrics, SOTA flag, workspace path) linked to the idea",
+        "Unit tests with mocked Notion client assert the writes fire at each lifecycle point with correct payloads",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Alpaca paper client",
+      "description": "As a developer, I want a typed Alpaca client (paper host, proxy-injected APCA headers) for account, positions, and orders.",
+      "acceptanceCriteria": [
+        "execution/alpaca_client.py: get_account, get_positions, list_orders, place_order, cancel_order against https://paper-api.alpaca.markets with bare requests (no APCA headers in code)",
+        "Base URL is configurable but defaults to paper; there is no code path that sets the live host in this story",
+        "Unit tests with mocked HTTP cover each method and 401 messaging (missing OneCLI secret)",
+        "Live smoke test (marked): get_account through the proxy returns an account id",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Signal extraction: pred.pkl to target weights",
+      "description": "As a developer, I want tested deterministic code turning a promoted workspace's predictions into target portfolio weights.",
+      "acceptanceCriteria": [
+        "execution/signal.py reads the latest pred.pkl cross-section and replicates TopkDropoutStrategy (topk, n_drop from config) into equal-weight target holdings",
+        "Unit tests with fixture pred.pkl: known scores -> exact expected holdings, including the drop rule and tie handling",
+        "Stale or missing predictions (older than last trading day, or absent) abort loudly with nonzero exit - unit tested; no partial book is ever returned",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Order gate with paper limits",
+      "description": "As a developer, I want deterministic limit checks so no order exceeds configured bounds.",
+      "acceptanceCriteria": [
+        "execution/order_gate.py enforces execution/limits.paper.json: max order notional, max position % of equity, max day orders, max total positions - evaluated against a fresh account/positions snapshot passed in",
+        "Every rejection names the specific violated limit in its error",
+        "Unit tests cover each limit boundary (pass at limit, fail just over) and the rejection messages",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Trading circuit breaker",
+      "description": "As a developer, I want a breaker (halt file, notional cap, drawdown kill-switch) that stops all trading when tripped.",
+      "acceptanceCriteria": [
+        "execution/breaker.py checks: halt file existence, max daily notional, and equity drawdown vs a persisted high-water mark",
+        "Tripped breaker returns a typed reason; high-water mark persists across runs (file-backed, unit tested)",
+        "Unit tests cover: halt file trip, notional trip, drawdown trip, and clean pass updating the high-water mark",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Order diff: positions vs targets to order list",
+      "description": "As a developer, I want the money-touching diff logic exact and fully tested.",
+      "acceptanceCriteria": [
+        "execution/diff.py computes marketable-limit orders from current positions + target weights + account equity (buys and sells, share rounding rule documented in code)",
+        "Unit tests with fixture positions/targets produce the exact expected order list, including: full exit, new entry, rebalance-only delta below a min-notional threshold is skipped",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Strategy promotion flow",
+      "description": "As an operator, I want to explicitly promote a strategy so only deliberate choices ever trade.",
+      "acceptanceCriteria": [
+        "Promote button on a completed run's summary; confirmation step restates universe, topk/n_drop, and headline metrics before accepting",
+        "Promotion pins the workspace path + config into the promoted_strategy SQLite row (replacing any previous, with a Slack notice) and writes a Decision Log row in Notion",
+        "A rebalancer entrypoint check refuses to run when no promoted strategy exists (unit tested)",
+        "Unit tests with mocked Slack/Notion cover: confirm flow, replacement notice, refusal without promotion",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Rebalance pipeline with dry-run",
+      "description": "As an operator, I want the nightly chain assembled end-to-end with a dry-run mode for supervised first runs.",
+      "acceptanceCriteria": [
+        "execution/rebalance.py chains: market-calendar check -> promoted strategy load -> signal -> diff -> gate -> breaker -> submit -> poll fills",
+        "--dry-run prints the exact order list and exits 0 without submitting (integration test with fixtures + mocked Alpaca)",
+        "Aborts without trading when: market closed, predictions stale, halt file present, or gate/breaker rejects - each path unit tested and exits nonzero (except halt which exits 0 with a 'halted' notice)",
+        "Any failure posts the error to the Slack channel (mocked in tests) and exits nonzero",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Trade Ledger writes and daily Slack summary",
+      "description": "As an operator, I want every order and fill in Notion and a daily digest in Slack.",
+      "acceptanceCriteria": [
+        "Rebalancer writes each submitted order and its fill (or rejection) to the Notion Trade Ledger",
+        "Daily summary posted to Slack: orders placed, fills, gate/breaker rejections, account equity",
+        "Unit tests with mocked Notion/Slack assert ledger payloads and summary content from a fixture fill set",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "Data refresh and nightly timers",
+      "description": "As an operator, I want the store refreshed and the rebalance scheduled pre-open, US/Eastern aware.",
+      "acceptanceCriteria": [
+        "data/refresh.py pulls incremental FMP bars since the store's last date and updates the Qlib store (unit tested on the fixture store; idempotent when already current)",
+        "ops/rdq-data-refresh.timer and ops/rdq-rebalance.timer schedule refresh then rebalance before US market open with explicit America/New_York handling; units run as rdq-exec-paper",
+        "systemd-analyze verify passes on all four units; `systemctl --user list-timers` shows both timers scheduled (record in progress notes)",
+        "install_services.sh updated",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "Ledger reconciliation script",
+      "description": "As an operator, I want scripted reconciliation so the paper-trading milestone is checkable.",
+      "acceptanceCriteria": [
+        "ops/reconcile.py compares the Notion Trade Ledger against Alpaca order history for a date range and exits 0 only when they match",
+        "Mismatches are printed with order ids and the differing fields",
+        "Unit tests with fixture ledger/order data cover: clean match, missing ledger row, quantity mismatch",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "Operator halt/resume trading tools",
+      "description": "As an operator, I want to stop trading instantly from Slack.",
+      "acceptanceCriteria": [
+        "halt_trading / resume_trading tools write/remove the breaker halt file, confirm in-thread, and write a Decision Log row",
+        "While halted, rebalance.py exits 0 with a 'halted' notice and no orders (already covered by US-034 path; asserted again via the tool-driven file here)",
+        "Breaker state included in the daily summary",
+        "Unit tests cover both tools and the summary line",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "OneCLI approvals bridge to Slack",
+      "description": "As a developer, I want pending OneCLI approvals surfaced as Slack buttons so the future live-trading gate has a human path.",
+      "acceptanceCriteria": [
+        "Poller long-polls GET {ONECLI_URL}/api/approvals/pending and posts each pending item to the channel with Approve/Deny buttons; the decision is submitted back to OneCLI",
+        "If the pending-approvals API differs from expectations, the fallback (Slack notification only + manual approval in the OneCLI web UI) is implemented and the finding documented in docs/decisions.md",
+        "No approval rules are created for paper hosts (documented)",
+        "Unit tests with mocked OneCLI HTTP cover: pending -> post, approve submit, deny submit",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Flatten script and operator runbook",
+      "description": "As an operator, I want a tested emergency procedure.",
+      "acceptanceCriteria": [
+        "ops/flatten.py cancels open orders and closes all paper positions, then confirms positions are empty via GET /v2/positions",
+        "ops/runbook.md covers: pause research loop, halt rebalancer, flatten positions, rotate keys via OneCLI, audit `tailscale serve status`",
+        "Unit tests with mocked Alpaca cover the cancel+close+verify sequence; live paper smoke run recorded in progress notes",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "Workspace retention sweep",
+      "description": "As an operator, I want disk kept in check without ever deleting the promoted strategy.",
+      "acceptanceCriteria": [
+        "ops/sweep.py deletes non-SOTA, non-promoted workspaces and mlruns older than N days (configurable)",
+        "The promoted strategy's workspace and SOTA workspaces are never deleted - unit tested with fixture directory trees",
+        "ops/rdq-sweep.timer (weekly) added and systemd-analyze verify passes",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-042",
+      "title": "Health check and Tailscale exposure audit",
+      "description": "As an operator, I want one script proving services are up and nothing is publicly exposed.",
+      "acceptanceCriteria": [
+        "ops/health.sh checks all rdq-* services/timers are active, no repo service listens on a non-loopback interface (ss/lsof audit), and `tailscale serve status` matches the PLAN.md port table (19900 tailnet-only when enabled; never funnel)",
+        "ops/expose_traces.sh adds the tailnet-only mapping `tailscale serve --bg --https=19900 http://127.0.0.1:19900` and is referenced from the runbook",
+        "health.sh exits 0 on a healthy box and nonzero naming each failing check (run once and record output in progress notes)",
+        "Scripts pass shellcheck",
+        "Typecheck passes"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

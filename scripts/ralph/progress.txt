@@ -1,0 +1,10 @@
+# Ralph Progress Log
+Started: (not yet started)
+---
+
+## Codebase Patterns
+- Python-only repo (>=3.10). "Typecheck passes" means the Python typechecker (pyright), not TypeScript.
+- Quality gate: `make check` = ruff + pyright + pytest (configured in US-001; use it before every commit).
+- Credentials: never in code or .env — bare HTTP calls through the OneCLI proxy (HTTPS_PROXY + CA cert); management API at http://127.0.0.1:10254.
+- Paper trading only: no rdq-exec-live identity, no code path targeting api.alpaca.markets.
+- All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
