@@ -174,3 +174,14 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - FMP /stable rows come newest-first — client sorts ascending; downstream code can rely on order.
   - FMP closes are RAW/unadjusted; US-012 must build adjustment factors from get_splits + get_dividends (Split.ratio = numerator/denominator, e.g. 10.0 for NVDA 2024-06-10).
   - requests was already in the venv via rdagent but NOT a declared dep — declared now. Check pyproject deps whenever importing something "already available".
+---
+## 2026-07-08 20:55 - US-012
+- data/adjust.py: adjustment_factors(bars, splits, dividends) -> dict[date, float] and adjusted_closes(...) -> ascending (date, adj_close). Backward adjustment: factor 1.0 on the window's last bar; walking backwards, crossing an ex-date multiplies the running factor — split by 1/ratio (10:1 -> 0.1 step), dividend by (prev_close - D)/prev_close where prev_close is the last bar close strictly before the ex-date (proportional). Split+dividend on adjacent/same dates compound multiplicatively.
+- Data-quality guards raise AdjustmentError: duplicate bar dates, non-positive split ratio, negative dividend, dividend >= prev close. Events on/before the first bar or AFTER the last bar are ignored (FMP /dividends lists announced future ex-dates; adjusting today's prices by them would be wrong).
+- Files: data/adjust.py (new), tests/test_adjust.py (18 tests: no-event ticker all-1.0, 10:1 split 0.1 step, compounding splits, reverse split, proportional dividend, prev-close-strictly-before semantics across a non-trading ex-date, combined split+dividend, out-of-window events ignored, unsorted input, error guards, NVDA 2024-06-10 fixture — raw closes cliff ~90% across the split while adjusted max daily move <20%), data/CLAUDE.md (adjustment conventions).
+- Verified: make check green (ruff pass, pyright 0 errors, 126 passed / 1 skipped — 18 new). Direct drive observed: NVDA fixture with split + a 0.01 dividend printed factor 0.099992 pre-split (0.1 x 0.999918 dividend factor), 1.0 on the last bar, adjusted series smooth across 06-10 (120.88 -> 121.79).
+- **Learnings for future iterations:**
+  - Descending-walk trick: iterate bars newest-first and consume events with date > bar.date before assigning the bar's factor — the current bar is then exactly the dividend's prev_close bar, no separate lookup needed.
+  - FMP /dividends can include FUTURE ex-dates (declared, not yet effective) — any consumer of get_dividends must window events to the bar range or stores get silently mis-adjusted.
+  - Ex-dates can fall on non-bar days (halts/weekends for the fixture granularity): "strictly before ex-date" must be by comparison, not by index/adjacency.
+  - US-013: adjusted price = raw * factor; Qlib volume convention = raw volume / factor; keep raw closes + factor column so incremental refresh can re-derive.

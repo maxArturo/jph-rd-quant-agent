@@ -16,3 +16,10 @@
   a JSON *object* (`{"Error Message": ...}`) with HTTP 200-family semantics broken — the
   client raises FmpError on non-list payloads. `Retry-After` may be an HTTP-date; the
   client falls back to exponential backoff.
+- `data/adjust.py` is the ONLY place adjustment math lives: backward adjustment, factor
+  1.0 on the window's last bar, events strictly-before-ex-date get the multiplier
+  (split: 1/ratio; dividend: (prev_close - D)/prev_close using the last bar close before
+  the ex-date). Events dated on/before the first bar or after the last bar are IGNORED —
+  FMP's /dividends can list announced *future* ex-dates, which must not adjust today's
+  store. Adjusted close = raw close * factor; for Qlib volume, divide raw volume by the
+  factor (US-013).

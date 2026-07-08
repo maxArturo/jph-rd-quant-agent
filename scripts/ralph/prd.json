@@ -184,8 +184,8 @@
         "Typecheck passes"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: data/adjust.py adjustment_factors + adjusted_closes — backward adjustment (factor 1.0 on last bar), split 1/ratio step, dividend (prev_close-D)/prev_close proportional, out-of-window events (incl. FMP future ex-dates) ignored. 18 unit tests incl. NVDA 2024-06-10 fixture: raw series cliffs ~90%, adjusted max daily move <20%. Data-quality guards raise AdjustmentError (dup dates, div>=prev close, ratio<=0)."
     },
     {
       "id": "US-013",
