@@ -23,16 +23,21 @@ from orchestrator.poller import (
     HypothesisPoller,
     edited_payload,
     rejection_payload,
+    terminal_status,
 )
 from orchestrator.rdagent_client import (
     KIND_BASE_FEATURES,
     KIND_FEEDBACK,
     KIND_HYPOTHESIS,
     KIND_INIT_PARAMS,
+    ArtifactNotFoundError,
     PendingInteraction,
+    RunArtifacts,
+    RunStatus,
 )
 from orchestrator.state import StateStore
 from tests.test_slack_app import CHANNEL, dispatch_message, make_app, user_message
+from tests.test_summary import write_qlib_res_csv, write_ret_pkl
 
 THREAD = "1751900000.000100"
 TRACE_FOLDER = "/home/user/rdq-runs/server_ui/traces"
@@ -68,6 +73,7 @@ class StubRdAgent:
 
     def __init__(self) -> None:
         self.pending_by_trace: dict[str, list[PendingInteraction]] = {}
+        self.status_by_trace: dict[str, RunStatus] = {}
         self.submitted: list[tuple[str, Any]] = []
         self.fail_submit = False
         self.broken_sessions: set[str] = set()
@@ -85,16 +91,25 @@ class StubRdAgent:
             raise RuntimeError(f"not under the trace folder: {session_path}")
         return str(Path(session_path).relative_to(TRACE_FOLDER))
 
+    def status(self, trace_id: str) -> RunStatus:
+        return self.status_by_trace.get(trace_id, RunStatus(finished=False))
+
 
 class FakeSlack:
     def __init__(self) -> None:
         self.posts: list[dict[str, Any]] = []
+        self.uploads: list[dict[str, Any]] = []
         self.fail = False
 
     def chat_postMessage(self, **kwargs: Any) -> None:  # noqa: N802 - slack_sdk casing
         if self.fail:
             raise RuntimeError("slack down")
         self.posts.append(kwargs)
+
+    def files_upload_v2(self, **kwargs: Any) -> None:  # noqa: N802 - slack_sdk casing
+        if self.fail:
+            raise RuntimeError("slack down")
+        self.uploads.append(kwargs)
 
 
 class RecordingSay:
@@ -253,6 +268,167 @@ def test_broken_run_does_not_starve_others(
     rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
     poller = HypothesisPoller(store, rd, slack, CHANNEL)
     assert poller.poll_once() == 1  # the healthy run still got its post
+
+
+# --- run completion (US-022) ---------------------------------------------------
+
+
+FINISHED_OK = RunStatus(finished=True, end_code=0, error_msg="RD-Agent process has completed.")
+
+
+def make_artifacts(tmp_path: Path, *, with_ret: bool = True) -> RunArtifacts:
+    """A real fixture workspace: qlib_res.csv (+ ret.pkl) on disk."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    csv = write_qlib_res_csv(workspace / "qlib_res.csv")
+    ret = write_ret_pkl(workspace / "ret.pkl") if with_ret else None
+    return RunArtifacts(
+        workspace_path=workspace,
+        qlib_res_csv=csv,
+        ret_pkl=ret,
+        source_pkl=workspace / "source.pkl",
+    )
+
+
+def completion_poller(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, artifacts: RunArtifacts
+) -> HypothesisPoller:
+    return HypothesisPoller(store, rd, slack, CHANNEL, locate=lambda _session: artifacts)
+
+
+def test_finished_run_posts_metrics_summary_and_chart(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path))
+    poller.poll_once()
+
+    (post,) = slack.posts
+    assert post["channel"] == CHANNEL
+    assert post["thread_ts"] == THREAD
+    for label in ("IC", "ICIR", "Rank IC", "ARR", "IR", "MDD", "Sharpe"):
+        assert f"*{label}:*" in post["text"]
+    assert "*IC:* 0.0432" in post["text"]
+    assert "*MDD:* -8.40%" in post["text"]
+
+    (upload,) = slack.uploads
+    assert upload["thread_ts"] == THREAD
+    assert upload["filename"] == "equity_curve.png"
+    assert upload["file"].startswith(b"\x89PNG\r\n\x1a\n")
+
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "completed"
+
+
+def test_finished_run_skips_interaction_polling(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path))
+    assert poller.poll_once() == 0
+    assert store.list_pending_interactions(THREAD) == []  # no buttons for a dead run
+    assert len(slack.posts) == 1  # the summary only
+
+
+def test_completion_is_handled_exactly_once(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path))
+    poller.poll_once()
+    poller.poll_once()  # run is no longer 'running' — nothing reposted
+    assert len(slack.posts) == 1
+    assert len(slack.uploads) == 1
+
+
+def test_finished_without_ret_pkl_posts_summary_without_chart(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path, with_ret=False))
+    poller.poll_once()
+    (post,) = slack.posts
+    assert "*IC:* 0.0432" in post["text"]
+    assert "*Sharpe:* n/a" in post["text"]
+    assert "equity chart unavailable" in post["text"]
+    assert slack.uploads == []
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "completed"
+
+
+def test_corrupt_ret_pkl_still_posts_metrics_and_completes(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    artifacts = make_artifacts(tmp_path)
+    assert artifacts.ret_pkl is not None
+    artifacts.ret_pkl.write_bytes(b"garbage")
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, artifacts)
+    poller.poll_once()
+    (post,) = slack.posts
+    assert "*IC:* 0.0432" in post["text"]  # csv metrics survive the bad pkl
+    assert "*Sharpe:* n/a" in post["text"]
+    assert "equity chart unavailable" in post["text"]
+    assert slack.uploads == []
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "completed"  # no retry loop
+
+
+def test_failed_run_without_artifacts_reports_honestly(
+    poller: HypothesisPoller, store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    # default poller = real locate_artifacts; SESSION does not exist on disk
+    rd.status_by_trace[TRACE_ID] = RunStatus(finished=True, end_code=2, error_msg="boom")
+    poller.poll_once()
+    (post,) = slack.posts
+    assert "failed" in post["text"]
+    assert "boom" in post["text"]
+    assert "No backtest artifacts" in post["text"]
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "failed"
+
+
+def test_stopped_run_is_marked_stopped(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.status_by_trace[TRACE_ID] = RunStatus(
+        finished=True, end_code=-1, error_msg="RD-Agent process was stopped by user."
+    )
+
+    def locate(_session: str | Path) -> RunArtifacts:
+        raise ArtifactNotFoundError("no artifacts for a stopped run")
+
+    poller = HypothesisPoller(store, rd, slack, CHANNEL, locate=locate)
+    poller.poll_once()
+    (post,) = slack.posts
+    assert "stopped" in post["text"]
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "stopped"
+
+
+def test_slack_failure_keeps_run_running_for_retry(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path))
+    slack.fail = True
+    poller.poll_once()  # must not raise (per-run catch) and must not close the run
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "running"
+
+    slack.fail = False
+    poller.poll_once()
+    assert len(slack.posts) == 1
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "completed"
+
+
+def test_terminal_status_mapping() -> None:
+    assert terminal_status(RunStatus(finished=True, end_code=0)) == "completed"
+    assert terminal_status(RunStatus(finished=True, end_code=None)) == "completed"
+    assert terminal_status(RunStatus(finished=True, end_code=-1)) == "stopped"
+    assert terminal_status(RunStatus(finished=True, end_code=137)) == "failed"
 
 
 # --- operator actions ---------------------------------------------------------

@@ -104,3 +104,22 @@
   (no event_callback envelope — interactive payloads ARE the body); Bolt
   injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
   synchronous. See dispatch_action in tests/test_poller.py.
+
+- Run-completion output lives in `orchestrator/summary.py`: `load_metrics`
+  (qlib_res.csv is a pandas Series csv — metric name index, one value
+  column), `format_summary` (the metric-label -> qlib-key mapping lives in
+  METRIC_SPECS; qlib logs NO Sharpe — it is derived from ret.pkl net daily
+  returns, see docs/decisions.md US-022), `render_equity_curve` (matplotlib
+  with the Agg backend selected BEFORE importing pyplot, lazy imports so
+  offline tests stay fast; returns PNG bytes for `files_upload_v2`).
+  ret.pkl is qlib's report_normal_1day DataFrame (columns account/return/
+  turnover/cost/bench/..., trading-day index); treat `cost`/`bench` as
+  optional when consuming it.
+- Poller completion order (US-022): render/parse artifacts FIRST (so
+  deterministically-bad artifacts degrade to an honest message instead of a
+  retry loop), then post summary, upload chart, and update the run row to its
+  terminal status LAST — the status flip is what removes the run from the
+  `running` set, so a transient Slack failure retries the whole completion on
+  the next poll. Terminal mapping from the upstream END message:
+  end_code 0/None -> `completed`, -1 (operator stop) -> `stopped`,
+  else -> `failed` (`terminal_status()` in poller.py).

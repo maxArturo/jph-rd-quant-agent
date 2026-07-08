@@ -21,6 +21,12 @@ and docs/decisions.md):
   them (submits the loop's own feedback unchanged) so runs never deadlock
   waiting on a message nobody sees. ``init_params``/``base_features`` are
   pre-answered by start_run and skipped here.
+
+Run completion (US-022): every poll also checks the run's END status. When a
+run finishes, the poller posts the backtest metrics summary (qlib_res.csv)
+and uploads the equity-curve chart (ret.pkl -> PNG) to the owning thread,
+then moves the run row to its terminal status — which removes it from the
+``running`` set, so completion is handled exactly once.
 """
 
 from __future__ import annotations
@@ -28,14 +34,20 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
+from orchestrator import summary
 from orchestrator.rdagent_client import (
     KIND_BASE_FEATURES,
     KIND_FEEDBACK,
     KIND_HYPOTHESIS,
     KIND_INIT_PARAMS,
+    ArtifactNotFoundError,
     PendingInteraction,
+    RunArtifacts,
+    RunStatus,
+    locate_artifacts,
 )
 from orchestrator.state import PendingInteraction as InteractionRow
 from orchestrator.state import Run, StateStore
@@ -79,11 +91,15 @@ class InteractionClient(Protocol):
 
     def trace_id_of(self, session_path: str) -> str: ...
 
+    def status(self, trace_id: str) -> RunStatus: ...
+
 
 class SlackPoster(Protocol):
-    """The one WebClient method the poller posts through."""
+    """The WebClient methods the poller posts and uploads through."""
 
     def chat_postMessage(self, **kwargs: Any) -> Any: ...  # noqa: N802 - slack_sdk casing
+
+    def files_upload_v2(self, **kwargs: Any) -> Any: ...  # noqa: N802 - slack_sdk casing
 
 
 def format_hypothesis_text(content: dict[str, Any]) -> str:
@@ -131,6 +147,29 @@ def hypothesis_blocks(interaction_id: int, content: dict[str, Any]) -> list[dict
     ]
 
 
+def terminal_status(status: RunStatus) -> str:
+    """runs.status value for a finished run (upstream END end_code semantics).
+
+    end_code 0 = subprocess completed, -1 = stopped by the operator via
+    /control, anything else = the fin_quant subprocess died.
+    """
+    if status.end_code == 0 or status.end_code is None:
+        return "completed"
+    if status.end_code == -1:
+        return "stopped"
+    return "failed"
+
+
+def _completion_headline(status: RunStatus) -> str:
+    kind = terminal_status(status)
+    if kind == "completed":
+        return ":checkered_flag: *Research run complete.*"
+    if kind == "stopped":
+        return ":octagonal_sign: *Research run stopped.*"
+    detail = f" ({status.error_msg})" if status.error_msg else ""
+    return f":x: *Research run failed* (exit code {status.end_code}){detail}."
+
+
 def edited_payload(content: dict[str, Any], operator_text: str) -> dict[str, Any]:
     """The operator's text merged into the hypothesis dict (Edit action)."""
     return {**content, "hypothesis": operator_text.strip()}
@@ -166,12 +205,14 @@ class HypothesisPoller:
         slack: SlackPoster,
         channel_id: str,
         interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
     ) -> None:
         self._store = store
         self._rdagent = rdagent
         self._slack = slack
         self._channel_id = channel_id
         self._interval = interval_seconds
+        self._locate = locate
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -214,6 +255,10 @@ class HypothesisPoller:
 
     def _poll_run(self, run: Run) -> int:
         trace_id = self._rdagent.trace_id_of(run.session_path)
+        status = self._rdagent.status(trace_id)
+        if status.finished:
+            self._handle_completion(run, status)
+            return 0
         posted = 0
         for interaction in self._rdagent.pending(trace_id):
             if interaction.kind in (KIND_INIT_PARAMS, KIND_BASE_FEATURES):
@@ -275,6 +320,73 @@ class HypothesisPoller:
             return
         self._store.resolve_pending_interaction(row.id, "auto_approved")
         logger.info("auto-acknowledged feedback %s for thread %s", interaction.key, run.thread_ts)
+
+    # -- run completion (US-022) ---------------------------------------------
+
+    def _handle_completion(self, run: Run, status: RunStatus) -> None:
+        """Post the metrics summary + equity chart, then close out the run row.
+
+        Order matters: the terminal status update comes LAST — it is what
+        removes the run from the ``running`` set, so a Slack failure leaves
+        the run running and the next poll retries the whole completion (a
+        rare transient failure may repost the summary; better than losing
+        it). Deterministically-bad artifacts (missing/corrupt) never loop:
+        they downgrade to an honest message before anything is posted.
+        """
+        artifacts: RunArtifacts | None = None
+        artifact_problem: str | None = None
+        try:
+            artifacts = self._locate(run.session_path)
+        except (ArtifactNotFoundError, OSError) as exc:
+            artifact_problem = str(exc)
+
+        chart_png: bytes | None = None
+        text = f"{_completion_headline(status)}\n"
+        if artifacts is not None:
+            sharpe: float | None = None
+            if artifacts.ret_pkl is not None:
+                try:
+                    sharpe = summary.compute_sharpe(artifacts.ret_pkl)
+                except summary.SummaryError:
+                    sharpe = None  # Sharpe degrades to n/a; the csv metrics still post
+            try:
+                metrics = summary.load_metrics(artifacts.qlib_res_csv)
+                text += summary.format_summary(
+                    metrics, sharpe, workspace_path=artifacts.workspace_path
+                )
+            except summary.SummaryError as exc:
+                text += f"Backtest artifacts could not be parsed: {exc}"
+            if artifacts.ret_pkl is not None:
+                try:
+                    chart_png = summary.render_equity_curve(
+                        artifacts.ret_pkl, title=f"Equity curve — {run.universe or 'run'}"
+                    )
+                except summary.SummaryError as exc:
+                    text += f"\n_(equity chart unavailable: {exc})_"
+            else:
+                text += "\n_(no ret.pkl in the workspace — equity chart unavailable)_"
+        else:
+            text += (
+                "No backtest artifacts were found for this run"
+                f" — nothing to summarize. ({artifact_problem})"
+            )
+
+        self._slack.chat_postMessage(channel=self._channel_id, thread_ts=run.thread_ts, text=text)
+        if chart_png is not None:
+            self._slack.files_upload_v2(
+                channel=self._channel_id,
+                thread_ts=run.thread_ts,
+                filename="equity_curve.png",
+                title="Equity curve",
+                file=chart_png,
+            )
+        self._store.update_run_status(run.thread_ts, terminal_status(status))
+        logger.info(
+            "run %s finished (end_code=%s) — summary posted to thread %s",
+            run.session_path,
+            status.end_code,
+            run.thread_ts,
+        )
 
     # -- operator actions (Bolt listeners call these) ------------------------
 

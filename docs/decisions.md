@@ -304,3 +304,24 @@ first experiment. Operator steering of feedback is out of US-021 scope.
 the poller processes a run's interactions oldest-first and stops at the first
 hypothesis still awaiting the operator — nothing may jump the queue (e.g. a
 later feedback must not be auto-acked while a hypothesis is pending).
+
+## 2026-07-08 — US-022: Sharpe is derived from ret.pkl (qlib does not log it)
+
+The PRD asks the completion summary to post "IC, ICIR, Rank IC, ARR, IR, MDD,
+Sharpe parsed from qlib_res.csv". The first six exist in qlib_res.csv under
+qlib's real recorder keys (`IC`/`ICIR`/`Rank IC` from SigAnaRecord;
+ARR/IR/MDD as `1day.excess_return_with_cost.{annualized_return,
+information_ratio,max_drawdown}` from risk_analysis) — but **qlib never logs
+a Sharpe metric**, so it cannot be parsed from the csv.
+
+Decision (`orchestrator/summary.py`): Sharpe = annualized Sharpe of the
+strategy's daily *net* return from ret.pkl (`(return - cost).mean() /
+std() * sqrt(252)`), i.e. the absolute-return Sharpe complementing the
+excess-return-based IR. If a sharpe-named key ever appears in the csv it
+wins; with neither source the summary honestly shows `n/a` (as it does for
+any missing metric) rather than substituting IR.
+
+Related rendering choice: the equity curve plots **cumulative sums** of the
+daily strategy net return and benchmark return, matching qlib's own
+summation-accumulation convention (see `qlib.contrib.evaluate.risk_analysis`
+docstring), not compounded products.

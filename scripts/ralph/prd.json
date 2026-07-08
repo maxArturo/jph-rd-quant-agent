@@ -338,8 +338,8 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/summary.py (load_metrics/format_summary/compute_sharpe/render_equity_curve) + poller completion detection (status().finished -> summary post + files_upload_v2 chart -> terminal run status LAST, so Slack failures retry; bad artifacts degrade honestly, never retry-loop). GOTCHA: qlib logs NO Sharpe metric — derived from ret.pkl net daily returns (docs/decisions.md); ARR/IR/MDD keys are 1day.excess_return_with_cost.*. 22 new tests + end-to-end smoke over real HTTP (StubServerUi + real RdAgentClient + real locate_artifacts + real matplotlib render): summary+PNG posted, handled exactly once."
     },
     {
       "id": "US-023",
