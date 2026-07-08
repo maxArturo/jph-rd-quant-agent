@@ -31,6 +31,15 @@
 - `pyqlib>=0.9.7` is a declared project dep (installs clean on py3.12, coexists with
   rdagent). `qlib.init(provider_uri=..., region="us")` + `D.features` is the read path;
   import qlib lazily (multi-second import).
+- Universes: `data/make_universe.py` writes `instruments/<name>.txt` into an EXISTING store
+  (rows are `SYMBOL\tstart\tend` with spans copied from `all.txt`; name `all` is reserved).
+  Built-in universe configs live in `data/config.yaml` (`us_liquid` = min ADV + min price
+  filters, defaults to every store ticker; `sp500` = committed snapshot
+  `data/sp500_tickers.txt`, refresh command in the yaml comment). Qlib resolves a universe
+  via `D.instruments(market="<name>")` — the market string IS the instruments filename.
+- Liquidity math exploits the store's field conventions: stored close * stored volume ==
+  RAW daily dollar volume (factors cancel), and raw price on the last day = close / factor.
+  Don't "fix" filters to de-adjust first.
 - `data/adjust.py` is the ONLY place adjustment math lives: backward adjustment, factor
   1.0 on the window's last bar, events strictly-before-ex-date get the multiplier
   (split: 1/ratio; dividend: (prev_close - D)/prev_close using the last bar close before

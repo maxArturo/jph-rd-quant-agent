@@ -216,8 +216,8 @@
         "Typecheck passes"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: data/make_universe.py + data/config.yaml (us_liquid: min_adv_usd 20M / min_price $5 / adv_window 20; sp500: committed 504-symbol FMP constituent snapshot data/sp500_tickers.txt). Gap list -> stderr + exit 1. 14 unit tests on fixture stores (thresholds at/below limit, split ticker ADV uses raw dollar volume, gap rejection, file format vs all.txt spans, reserved/invalid names). LIVE-verified on a real 3-ticker proxy-built store; qlib D.instruments(market=<name>) resolves the written file."
     },
     {
       "id": "US-015",

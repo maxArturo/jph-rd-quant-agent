@@ -1,0 +1,26 @@
+# Built-in universe configs for data/make_universe.py.
+#
+# A universe entry may define:
+#   min_adv_usd   - reject tickers whose average daily dollar volume (raw
+#                   close * raw volume, computed from the Qlib store) is below
+#                   this, averaged over the last `adv_window` trading days
+#   min_price     - reject tickers whose raw (unadjusted) close on the store's
+#                   last day for that ticker is below this
+#   adv_window    - trading days in the ADV average (default 20)
+#   tickers_file  - default ticker list, path relative to this file
+# Universes without filters keep every requested ticker that exists in the store.
+universes:
+  us_liquid:
+    # Broad liquidity/price-filtered default (roughly Russell-1000-ish) so the
+    # top-k strategy cannot rank into illiquid microcaps. With no --tickers it
+    # considers every ticker in the store.
+    min_adv_usd: 20000000
+    min_price: 5.0
+    adv_window: 20
+  sp500:
+    # Benchmarking universe. Snapshot of S&P 500 constituents fetched from FMP
+    # /stable/sp500-constituent on 2026-07-08 (504 symbols incl. dual share
+    # classes). Refresh: onecli run --agent rdq-research -- curl
+    # https://financialmodelingprep.com/stable/sp500-constituent | jq -r
+    # '.[].symbol' | sort -u > data/sp500_tickers.txt
+    tickers_file: sp500_tickers.txt

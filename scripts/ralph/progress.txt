@@ -197,3 +197,16 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - qlib.init(provider_uri=..., region="us") works offline on a local store; import qlib takes seconds — keep it lazy/inside the one test that needs it.
   - US-014 (make_universe): write instruments/<name>.txt rows as SYMBOL\tstart\tend matching all.txt spans; US-015 (factor source h5): read via qlib D.features on this store.
   - Union-calendar alignment means a ticker missing a day inside its own [first,last] span produces NaN -> validation hard-fails. If a legit halt ever trips this, the fix is an explicit allowlist, not relaxing the guard.
+---
+## 2026-07-08 21:00 - US-014
+- data/make_universe.py: writes instruments/<name>.txt into an existing Qlib store. Built-ins from data/config.yaml: us_liquid (min_adv_usd $20M, min_price $5, adv_window 20; with no --tickers it considers ALL store tickers) and sp500 (tickers_file -> data/sp500_tickers.txt, a committed 504-symbol snapshot fetched live from FMP /stable/sp500-constituent through the proxy on 2026-07-08; refresh one-liner documented in config.yaml). Custom names take --tickers/--tickers-file (CLI overrides config source). Filter rejections print per-ticker reasons; empty-after-filter is an error; names validated ([a-z][a-z0-9_]*, 'all' reserved).
+- Gap handling per spec: any requested ticker absent from instruments/all.txt -> ERROR with the full gap list on stderr, exit 1, nothing written.
+- Filter math: stored close*volume == RAW dollar volume (adjustment factors cancel: close=raw*f, volume=raw/f) and last raw price = close/factor — no de-adjustment pass needed; unit-tested across a 2:1 split.
+- Files: data/make_universe.py (new), data/config.yaml (new), data/sp500_tickers.txt (new), tests/test_make_universe.py (14 tests), pyproject.toml (+pyyaml), data/CLAUDE.md (universe conventions).
+- Verified: make check green (ruff pass, pyright 0 errors, 157 passed / 1 skipped — 14 new). LIVE end-to-end on a real proxy-built 3-ticker store (/tmp/rdq_univ_store): us_liquid default wrote 3 tickers exit 0; custom ai_pair wrote 2; gap case (AVGO,TSM absent) exit 1 with gap list; sp500 vs tiny store exit 1 listing 501 gaps. qlib.init + D.instruments(market="ai_pair") resolved the file: 2 instruments, 82 rows, 0 NaN closes.
+- **Learnings for future iterations:**
+  - Qlib's `market:` param is just the instruments filename — D.instruments(market="ai_pair") reads instruments/ai_pair.txt. US-016/US-023 template renders need only set market: <universe name>.
+  - FMP /stable/sp500-constituent works through the proxy (200, current membership — SpaceX added 2026-07-07). Snapshot committed; regenerate with the jq one-liner in config.yaml when benchmarking matters.
+  - Shell gotcha: PIPESTATUS is clobbered by ANY subsequent command incl. `echo` — capture it on the line immediately after the pipeline or use a redirect + $?.
+  - pyyaml was in the venv (via deps) but undeclared — now declared. pyright bundles typeshed stubs for yaml, no types-PyYAML install needed.
+  - config.yaml tickers_file paths resolve relative to the config file's directory (keeps data/ relocatable); tests point --config at a tmp yaml to test thresholds without touching the real config.
