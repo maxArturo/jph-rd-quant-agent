@@ -223,3 +223,49 @@ template folders — `QlibFactorExperiment`/`QlibModelExperiment` hardcode
 `QLIB_QUANT_*` env-configurable class paths in `rdagent/app/qlib_rd_loop/conf.py`
 (e.g. point `scen`/`*_hypothesis2experiment` at small subclasses in our repo
 that construct `QlibFBWorkspace` with `research/us_templates/...`).
+
+## 2026-07-08 — server_ui control protocol: real endpoints vs PRD sketch (US-019)
+
+**Decision:** `orchestrator/rdagent_client.py` speaks the REAL protocol of the
+pinned upstream `rdagent/log/server/app.py`, not the endpoint names sketched
+in the PRD acceptance criteria. The PRD assumed `POST /trace` starts a run,
+`GET /receive` lists pending interactions, and `POST /control` supports
+stop **and** resume. Upstream reality (verified by reading the pinned source
+and probing the live service):
+
+| Operation | PRD sketch | Actual upstream endpoint |
+|---|---|---|
+| start run | `POST /trace` | `POST /upload` (form: `scenario="Finance Whole Pipeline"`, `loops`, `all_duration`) → `{"id": "<scenario>/<trace_name>"}` |
+| pending interactions | `GET /receive` | `POST /trace` `{"id", "all", "reset"}` — the message poll; each call drains ≤1 pending user-interaction request into the stream as a `tag="user_interaction.request"` message. (`POST /receive` is the *ingestion* endpoint the rdagent subprocess logger pushes messages to.) |
+| answer interaction | `POST /user_interaction/submit` | same (payload = `{"id", "payload"}`) |
+| stop | `POST /control` | same, `action="stop"` only |
+| resume | `POST /control` | **not supported** — upstream 400s `"Only 'stop' action is supported"`. Client `resume()` sends `{"id", "action": "resume", "path"}` and maps that 400 to `UnsupportedActionError`. US-024 must add a resume extension to `research/server_ui.py` (e.g. a `before_request` hook that builds an `RDAgentTask(target_name="fin_quant", kwargs={"path": <session>})`), since the pinned tree cannot be patched. |
+
+**Interaction handshake:** a server-started `fin_quant` run always gets IPC
+queues (`fin_quant` is not in `_TARGETS_WITHOUT_USER_INTERACTION`) and blocks,
+in order, on (1) init params — the response dict updates `plan`, and its
+`user_instruction` key is where the operator directive lands; (2) base
+features — expects a `{name: qlib_expression}` dict back; then on every
+hypothesis and feedback. Requests and responses travel on independent FIFO
+queues, so `start_run()` pre-seeds (1) the directive (+universe constraint)
+and (2) rdagent's default ALPHA20 features immediately after `/upload` —
+the run reaches hypothesis generation without an operator, and hypotheses/
+feedbacks surface via `pending()` for the US-021 poller. `interaction=False`
+cannot disable the queues server-side; the flag is recorded on `RunHandle`
+so pollers know to auto-approve instead of waiting for the operator.
+
+**Artifact locator:** a finished loop's backtest lands in the experiment
+workspace (`qlib_res.csv` + `ret.pkl`, written by the workspace's
+`read_exp_res.py`); the trace→workspace link only exists inside the pickled
+`runner result` FileStorage objects (`experiment_workspace.workspace_path`)
+— the /trace JSON stream does NOT carry workspace paths. `locate_artifacts()`
+therefore unpickles `**/runner result/**/*.pkl` newest-first and returns the
+first workspace containing `qlib_res.csv`.
+
+**WARNING for US-020:** `ops/rdq-research.service` does NOT carry the US env
+wiring from `ops/run_us_quant.sh` (QLIB_QUANT_/QLIB_FACTOR_/QLIB_MODEL_ dates,
+`FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)`, `APP_TPL`, `QLIB_QUANT_*` hook-class
+paths). Server-started runs inherit the *server's* environment, so a
+`start_run()` today would launch a CN-defaults `fin_quant`. US-020 must add
+the env wiring to the unit (Environment=/EnvironmentFile=) before wiring
+`start_research` to this client.

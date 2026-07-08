@@ -292,8 +292,8 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/rdagent_client.py implemented against the REAL upstream protocol (PRD endpoint sketch was wrong — mapping table in docs/decisions.md): start_run=POST /upload + pre-seeds directive-as-user_instruction and ALPHA20 base features; pending()=POST /trace poll filtered to user_interaction.request (stable .key for US-021 dedup); submit=POST /user_interaction/submit; stop=POST /control; resume maps upstream's 400 to UnsupportedActionError until US-024 extends research/server_ui.py. locate_artifacts() resolves workspace/qlib_res.csv/ret.pkl from 'runner result' pkls. 21 tests vs a threaded Flask stub; live-verified against the running service (health/messages/status/error mapping). WARNING for US-020: rdq-research.service lacks the US env wiring — add it before start_research or server-started runs use CN defaults."
     },
     {
       "id": "US-020",

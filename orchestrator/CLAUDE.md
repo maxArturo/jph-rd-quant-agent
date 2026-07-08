@@ -38,6 +38,24 @@
   context must reload from SQLite into the system prompt (in-memory history
   is lost on restart by design).
 
+- All talk to rdagent server_ui goes through `orchestrator/rdagent_client.py`
+  (`RdAgentClient`, default `http://127.0.0.1:19899`). It speaks the REAL
+  upstream protocol, which differs from the PRD sketch — see the endpoint
+  mapping table in docs/decisions.md (US-019 entry). Key semantics: runs
+  start via POST /upload; `pending()` piggybacks on the POST /trace message
+  poll (each poll drains ≤1 pending interaction server-side, and answered
+  requests stay in the stream — dedup with `PendingInteraction.key`, and skip
+  kinds `init_params`/`base_features`, which `start_run()` auto-answers);
+  `submit()` answers the OLDEST unanswered interaction (FIFO queue, not
+  addressed to a specific request); `resume()` raises
+  `UnsupportedActionError` until US-024 extends research/server_ui.py.
+  `locate_artifacts(trace_dir)` unpickles `runner result` pkls — trace dirs
+  for server-started runs live under `~/rdq-runs/server_ui/traces/<trace_id>`,
+  NOT under the LOG_TRACE_PATH convention of the CLI wrappers. Tests: stub
+  the server with a real threaded Flask app (StubServerUi in
+  tests/test_rdagent_client.py — reuse it for poller/tool tests) and pass
+  `base_features={...}` so the client never imports rdagent.
+
 ## Testing Bolt apps (see tests/test_slack_app.py)
 
 - Bolt >=1.15 constructs a NEW real `WebClient` per request in
