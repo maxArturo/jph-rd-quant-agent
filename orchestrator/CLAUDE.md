@@ -83,6 +83,26 @@
   and anything with `bot_id`, or the bot replies to its own replies (loop).
   In-thread reply target: `event.get("thread_ts") or event["ts"]`.
 
+- Custom universes live in `orchestrator/universe.py` (`UniverseService`):
+  `propose()` is validation-only (refusals: built-in/reserved names, all-US
+  ticker sets covering us_liquid or the whole store; warning below
+  `min_size`); `materialize()` does the data work (gap check → instruments
+  file → factor source → template copy with `market: <name>`) and is only
+  called AFTER the operator confirms in-thread. The two-step state lives in
+  the `universes` table (`propose_thread_universe` upserts back to
+  'proposed'; `confirm_thread_universe` flips it), and start_research
+  refuses while a proposal is unconfirmed, then copies name + tickers onto
+  the run row (`runs.universe_tickers`, JSON). Artifact layout mirrors
+  us_liquid: `~/rdq-data/factor_source/<name>` + `~/rdq-data/templates/<name>`
+  — but rdq-research.service still points the run env at us_liquid, so
+  server-spawned runs don't consume them yet (docs/decisions.md US-023).
+  Keep `MARKET_LINE` in sync with research/us_templates conf yamls — the
+  render hard-fails if the anchor line drifts.
+- Schema changes to an EXISTING table cannot ride `CREATE TABLE IF NOT
+  EXISTS` (it skips existing DBs): add the column to `_SCHEMA` for fresh DBs
+  AND a guarded `ALTER TABLE` in `migrate()` (check `PRAGMA table_info`),
+  like `runs.universe_tickers`.
+
 - Hypothesis steering lives in `orchestrator/poller.py` (`HypothesisPoller`):
   one instance per process polls all `running` runs and also owns the button
   handlers (`approve`/`reject`/`request_edit`/`consume_edit_reply`). app.py

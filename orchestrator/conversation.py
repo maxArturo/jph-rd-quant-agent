@@ -14,14 +14,17 @@ never the directive.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from orchestrator import prompts
 from orchestrator.llm import LLMError, ModelRouter, RefusalError, ToolSpec
 from orchestrator.rdagent_client import RunHandle
 from orchestrator.state import Directive, DuplicateRunError, Run, StateStore
+
+if TYPE_CHECKING:
+    from orchestrator.universe import MaterializedUniverse, UniverseProposal
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +50,41 @@ class ResearchLauncher(Protocol):
 
     def stop(self, trace_id: str) -> None: ...
 
+class UniverseManager(Protocol):
+    """What the set_universe tools need from UniverseService (stub-friendly)."""
+
+    def propose(self, name: str, tickers: Sequence[str]) -> UniverseProposal: ...
+
+    def materialize(self, name: str, tickers: Sequence[str]) -> MaterializedUniverse: ...
+
+
 START_RESEARCH_SCHEMA: dict[str, Any] = {
     # No inputs: the run is driven entirely by the thread's saved directive.
+    "type": "object",
+    "properties": {},
+}
+
+SET_UNIVERSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Short lowercase snake_case universe name, e.g. ai_semis.",
+        },
+        "tickers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Explicit US ticker list — the operator's, or your proposal of"
+                " liquid names fitting the idea."
+            ),
+        },
+    },
+    "required": ["name", "tickers"],
+}
+
+CONFIRM_UNIVERSE_SCHEMA: dict[str, Any] = {
+    # No inputs: confirms the thread's stored proposal.
     "type": "object",
     "properties": {},
 }
@@ -108,6 +144,30 @@ def format_run_started(run: Run) -> str:
     )
 
 
+def format_universe_proposal(proposal: UniverseProposal) -> str:
+    """Slack mrkdwn proposal posted for operator confirmation (before data work)."""
+    lines = [
+        f"*Custom universe proposed: `{proposal.name}`* ({len(proposal.tickers)} tickers)",
+        f"`{', '.join(proposal.tickers)}`",
+    ]
+    lines.extend(f":warning: {warning}" for warning in proposal.warnings)
+    lines.append(
+        "Confirm this list and I'll build the universe data; nothing is built until you do."
+    )
+    return "\n".join(lines)
+
+
+def format_universe_ready(materialized: MaterializedUniverse) -> str:
+    """Slack mrkdwn notice posted once the confirmed universe is materialized."""
+    return (
+        f"*Universe `{materialized.name}` is ready* ({len(materialized.tickers)} tickers)\n"
+        f"*Instruments:* `{materialized.instruments_path}`\n"
+        f"*Factor source:* `{materialized.factor_source}`\n"
+        f"*Templates:* `{materialized.templates_dir}` (market: {materialized.name})\n"
+        "start_research in this thread will now use it."
+    )
+
+
 def duplicate_run_message(existing: Run) -> str:
     return (
         f"this thread already has a research run (status: {existing.status}, "
@@ -144,14 +204,20 @@ class ConversationCore:
         store: StateStore,
         router: ModelRouter,
         rdagent: ResearchLauncher | None = None,
+        universes: UniverseManager | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
 
             rdagent = RdAgentClient()
+        if universes is None:
+            from orchestrator.universe import UniverseService
+
+            universes = UniverseService()
         self._store = store
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
+        self._universes: UniverseManager = universes
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(self, thread_ts: str, text: str, say: SayFn) -> str:
@@ -168,6 +234,8 @@ class ConversationCore:
                 [
                     self._save_directive_tool(thread_ts, say),
                     self._start_research_tool(thread_ts, say),
+                    self._set_universe_tool(thread_ts, say),
+                    self._confirm_universe_tool(thread_ts, say),
                 ],
                 system=self._system_prompt(thread_ts),
             )
@@ -233,10 +301,24 @@ class ConversationCore:
             existing = self._store.get_run(thread_ts)
             if existing is not None:
                 raise ValueError(duplicate_run_message(existing))
-            handle = self._rdagent.start_run(directive_instruction(directive), DEFAULT_UNIVERSE)
+            universe = DEFAULT_UNIVERSE
+            tickers: list[str] | None = None
+            record = self._store.get_thread_universe(thread_ts)
+            if record is not None:
+                if record.status != "confirmed":
+                    raise ValueError(
+                        f"universe '{record.name}' is proposed but not confirmed —"
+                        " have the operator confirm the ticker list, then call"
+                        " confirm_universe before starting the research"
+                    )
+                universe = record.name
+                tickers = list(record.tickers)
+            handle = self._rdagent.start_run(directive_instruction(directive), universe)
             session_path = str(self._rdagent.trace_dir(handle.trace_id))
             try:
-                run = self._store.create_run(thread_ts, session_path, universe=DEFAULT_UNIVERSE)
+                run = self._store.create_run(
+                    thread_ts, session_path, universe=universe, universe_tickers=tickers
+                )
             except DuplicateRunError as exc:
                 # Lost a start race — don't leave the just-launched run orphaned.
                 self._rdagent.stop(handle.trace_id)
@@ -258,5 +340,90 @@ class ConversationCore:
                 " asks to start the research."
             ),
             input_schema=START_RESEARCH_SCHEMA,
+            handler=handler,
+        )
+
+    def _set_universe_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            raw = args.get("tickers")
+            if not isinstance(raw, list):
+                raise ValueError("tickers must be a list of symbols")
+            existing = self._store.get_run(thread_ts)
+            if existing is not None:
+                raise ValueError(
+                    f"this thread already has a research run (status: {existing.status})"
+                    " — universes apply to new runs; start a fresh thread for a"
+                    " different universe"
+                )
+            proposal = self._universes.propose(
+                str(args.get("name") or ""), [str(t) for t in raw]
+            )
+            self._store.propose_thread_universe(
+                thread_ts, proposal.name, list(proposal.tickers)
+            )
+            say(text=format_universe_proposal(proposal), thread_ts=thread_ts)
+            logger.info(
+                "proposed universe '%s' (%d tickers) for thread %s",
+                proposal.name,
+                len(proposal.tickers),
+                thread_ts,
+            )
+            return (
+                f"Universe '{proposal.name}' ({len(proposal.tickers)} tickers) was"
+                " posted for confirmation. No data work happened yet — ask the"
+                " operator to confirm the ticker list, and call confirm_universe"
+                " only after they explicitly confirm."
+            )
+
+        return ToolSpec(
+            name="set_universe",
+            description=(
+                "Propose a named custom ticker universe for this thread's future"
+                " research run (when the idea targets specific tickers/sectors"
+                " rather than the broad market). Posts the list for operator"
+                " confirmation; NO data is built until confirm_universe. Proposing"
+                " again replaces the thread's proposal. Broad-market ideas should"
+                " NOT use this — runs default to the built-in us_liquid universe."
+            ),
+            input_schema=SET_UNIVERSE_SCHEMA,
+            handler=handler,
+        )
+
+    def _confirm_universe_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — confirms the thread's stored proposal
+            record = self._store.get_thread_universe(thread_ts)
+            if record is None:
+                raise ValueError(
+                    "no universe proposal exists for this thread — call set_universe"
+                    " first"
+                )
+            if record.status == "confirmed":
+                raise ValueError(
+                    f"universe '{record.name}' is already confirmed for this thread"
+                )
+            materialized = self._universes.materialize(record.name, list(record.tickers))
+            self._store.confirm_thread_universe(thread_ts)
+            say(text=format_universe_ready(materialized), thread_ts=thread_ts)
+            logger.info(
+                "materialized universe '%s' for thread %s", record.name, thread_ts
+            )
+            return (
+                f"Universe '{record.name}' is built (instruments file, factor source,"
+                " US templates rendered with market:"
+                f" {record.name}) and confirmed for this thread. start_research will"
+                " use it. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="confirm_universe",
+            description=(
+                "Materialize this thread's PROPOSED universe after the operator has"
+                " explicitly confirmed the posted ticker list: validates tickers"
+                " against the data store, writes the instruments file, regenerates"
+                " the factor source, and renders the run's template copy. Never call"
+                " it before the operator confirms."
+            ),
+            input_schema=CONFIRM_UNIVERSE_SCHEMA,
             handler=handler,
         )

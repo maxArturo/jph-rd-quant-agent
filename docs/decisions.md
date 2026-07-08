@@ -325,3 +325,34 @@ Related rendering choice: the equity curve plots **cumulative sums** of the
 daily strategy net return and benchmark return, matching qlib's own
 summation-accumulation convention (see `qlib.contrib.evaluate.risk_analysis`
 docstring), not compounded products.
+
+## 2026-07-08 — US-023: custom universes materialize artifacts; per-run env wiring deferred
+
+`set_universe`/`confirm_universe` (orchestrator/universe.py) materialize a
+confirmed custom universe as three artifacts, mirroring the us_liquid layout
+from US-017:
+
+- instruments file: `<store>/instruments/<name>.txt` (data/make_universe)
+- factor source: `~/rdq-data/factor_source/<name>/{data_folder,data_folder_debug}`
+  (data/make_factor_source)
+- template copy: `~/rdq-data/templates/<name>/{factor_template,model_template}` —
+  the US-016 templates with the `market: &market us_liquid` anchor line
+  rewritten to `market: &market <name>` (benchmark stays SPY, which lives in
+  the store but never inside a universe).
+
+**Known gap (deliberate):** ops/rdq-research.service pins
+`FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)` and the us_quant hook templates to
+us_liquid, and server_ui spawns every run from that single environment — so a
+server-started run cannot yet consume a custom universe's factor source or
+template copy (it gets the custom instruments universe only via the seeded
+user_instruction). Per-run environment plumbing needs a server-side change
+(research/server_ui.py, same seam US-024 extends for resume) and is deferred;
+the artifacts are rendered now so that change is pure wiring. Manual runs can
+already point ops/run_us_quant.sh's env overrides at the rendered paths.
+
+Refusal policy: proposals whose ticker set covers `us_liquid` (or the whole
+store) are refused as all-US universes — the built-in us_liquid exists for
+that; built-in/reserved names (us_liquid, sp500, all) cannot be reused.
+Below `min_size` (default 30) tickers the proposal warns and suggests padding
+with liquid sector peers, because RD-Agent(Q) ranks cross-sectionally and a
+thin cross-section makes top-k selection noise.

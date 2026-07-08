@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,8 +39,20 @@ CREATE TABLE IF NOT EXISTS runs (
     session_path TEXT NOT NULL,
     status       TEXT NOT NULL,
     universe     TEXT,
+    universe_tickers TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
+);
+
+-- Per-thread custom universe (US-023): proposed by set_universe, flipped to
+-- 'confirmed' after the operator approves and the data work succeeds.
+CREATE TABLE IF NOT EXISTS universes (
+    thread_ts  TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    tickers    TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'proposed',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 -- Single-row table: id is constrained to 1 so a second strategy can only
@@ -88,6 +100,17 @@ class Run:
     universe: str | None
     created_at: str
     updated_at: str
+    universe_tickers: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class ThreadUniverse:
+    thread_ts: str
+    name: str
+    tickers: tuple[str, ...]
+    status: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -120,11 +143,24 @@ def _directive_from_row(row: sqlite3.Row) -> Directive:
 
 
 def _run_from_row(row: sqlite3.Row) -> Run:
+    tickers = row["universe_tickers"]
     return Run(
         thread_ts=row["thread_ts"],
         session_path=row["session_path"],
         status=row["status"],
         universe=row["universe"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        universe_tickers=None if tickers is None else tuple(json.loads(tickers)),
+    )
+
+
+def _universe_from_row(row: sqlite3.Row) -> ThreadUniverse:
+    return ThreadUniverse(
+        thread_ts=row["thread_ts"],
+        name=row["name"],
+        tickers=tuple(json.loads(row["tickers"])),
+        status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -169,6 +205,11 @@ class StateStore:
         """Create the schema. Idempotent — safe to run on every startup."""
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Column added in US-023; CREATE IF NOT EXISTS skips existing DBs,
+            # so retrofit them with a guarded ALTER (also idempotent).
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            if "universe_tickers" not in columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN universe_tickers TEXT")
 
     # -- directives ---------------------------------------------------------
 
@@ -214,8 +255,10 @@ class StateStore:
         session_path: str,
         universe: str | None = None,
         status: str = "running",
+        universe_tickers: Sequence[str] | None = None,
     ) -> Run:
         now = _utcnow()
+        tickers = None if universe_tickers is None else tuple(universe_tickers)
         run = Run(
             thread_ts=thread_ts,
             session_path=session_path,
@@ -223,13 +266,22 @@ class StateStore:
             universe=universe,
             created_at=now,
             updated_at=now,
+            universe_tickers=tickers,
         )
         try:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO runs (thread_ts, session_path, status, universe, created_at,"
-                    " updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (thread_ts, session_path, status, universe, now, now),
+                    "INSERT INTO runs (thread_ts, session_path, status, universe,"
+                    " universe_tickers, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        thread_ts,
+                        session_path,
+                        status,
+                        universe,
+                        None if tickers is None else json.dumps(list(tickers)),
+                        now,
+                        now,
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
             existing = self.get_run(thread_ts)
@@ -270,6 +322,51 @@ class StateStore:
         """Free a thread for a new run (e.g. after a failed or abandoned one)."""
         with self._connect() as conn:
             conn.execute("DELETE FROM runs WHERE thread_ts = ?", (thread_ts,))
+
+    # -- thread universes (US-023) --------------------------------------------
+
+    def propose_thread_universe(
+        self, thread_ts: str, name: str, tickers: Sequence[str]
+    ) -> ThreadUniverse:
+        """Upsert the thread's universe proposal (re-proposing resets to 'proposed')."""
+        now = _utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO universes (thread_ts, name, tickers, status, created_at,"
+                " updated_at) VALUES (?, ?, ?, 'proposed', ?, ?)"
+                " ON CONFLICT (thread_ts) DO UPDATE SET name = excluded.name,"
+                " tickers = excluded.tickers, status = 'proposed',"
+                " updated_at = excluded.updated_at",
+                (thread_ts, name, json.dumps(list(tickers)), now, now),
+            )
+        universe = self.get_thread_universe(thread_ts)
+        assert universe is not None
+        return universe
+
+    def get_thread_universe(self, thread_ts: str) -> ThreadUniverse | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM universes WHERE thread_ts = ?", (thread_ts,)
+            ).fetchone()
+        return None if row is None else _universe_from_row(row)
+
+    def confirm_thread_universe(self, thread_ts: str) -> ThreadUniverse:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE universes SET status = 'confirmed', updated_at = ?"
+                " WHERE thread_ts = ?",
+                (_utcnow(), thread_ts),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"no universe proposal for thread {thread_ts}")
+        universe = self.get_thread_universe(thread_ts)
+        assert universe is not None
+        return universe
+
+    def delete_thread_universe(self, thread_ts: str) -> None:
+        """Drop the thread's universe (falls back to the built-in default)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM universes WHERE thread_ts = ?", (thread_ts,))
 
     # -- promoted strategy ----------------------------------------------------
 

@@ -355,8 +355,8 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/universe.py UniverseService + set_universe/confirm_universe ToolSpecs. propose = validation only (all-US superset refusal pointing at us_liquid, reserved-name refusal, <30-ticker warning suggesting peer padding, configurable min_size); posted in-thread, persisted in new universes table (status proposed). confirm = gap check vs store (hard error listing gaps) -> make_universe -> make_factor_source -> template copy rendered with market: <name> under ~/rdq-data/templates/<name>. start_research uses the confirmed universe and stores name+tickers on the run row (runs.universe_tickers, guarded ALTER migration). 27 new tests + LIVE smoke (real fable-5 through proxy, real us_data store): full propose->confirm->start flow PASS. KNOWN GAP (docs/decisions.md): rdq-research.service env still pins factor source/templates to us_liquid — server-spawned runs get the custom universe only via the seeded instruction; per-run env plumbing deferred to the server_ui seam (US-024+)."
     },
     {
       "id": "US-024",

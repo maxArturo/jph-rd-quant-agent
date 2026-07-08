@@ -203,3 +203,81 @@ def test_state_survives_store_restart(db_path: Path) -> None:
     promoted = reopened.get_promoted_strategy()
     assert promoted is not None and promoted.workspace_path == "/workspaces/abc"
     assert reopened.list_pending_interactions("111.222") == [pending]
+
+
+# -- thread universes (US-023) -------------------------------------------------
+
+
+def test_thread_universe_propose_get_confirm(store: StateStore) -> None:
+    assert store.get_thread_universe("111.222") is None
+    proposed = store.propose_thread_universe("111.222", "ai_semis", ["NVDA", "AMD"])
+    assert proposed.name == "ai_semis"
+    assert proposed.tickers == ("NVDA", "AMD")
+    assert proposed.status == "proposed"
+
+    confirmed = store.confirm_thread_universe("111.222")
+    assert confirmed.status == "confirmed"
+    assert confirmed.tickers == ("NVDA", "AMD")
+
+
+def test_thread_universe_repropose_resets_to_proposed(store: StateStore) -> None:
+    store.propose_thread_universe("111.222", "ai_semis", ["NVDA", "AMD"])
+    store.confirm_thread_universe("111.222")
+    replaced = store.propose_thread_universe("111.222", "ai_chips", ["NVDA", "AVGO"])
+    assert replaced.name == "ai_chips"
+    assert replaced.status == "proposed"
+    # still a single row per thread
+    with sqlite3.connect(store.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM universes WHERE thread_ts = '111.222'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_thread_universe_confirm_without_proposal_raises(store: StateStore) -> None:
+    with pytest.raises(KeyError):
+        store.confirm_thread_universe("999.999")
+
+
+def test_thread_universe_delete_and_restart_survival(db_path: Path) -> None:
+    store = StateStore(db_path)
+    store.propose_thread_universe("111.222", "ai_semis", ["NVDA", "AMD"])
+    reopened = StateStore(db_path)
+    survived = reopened.get_thread_universe("111.222")
+    assert survived is not None and survived.name == "ai_semis"
+    reopened.delete_thread_universe("111.222")
+    assert reopened.get_thread_universe("111.222") is None
+
+
+def test_run_universe_tickers_roundtrip(store: StateStore) -> None:
+    run = store.create_run(
+        "111.222", "/logs/run1", universe="ai_semis", universe_tickers=["NVDA", "AMD"]
+    )
+    assert run.universe_tickers == ("NVDA", "AMD")
+    fetched = store.get_run("111.222")
+    assert fetched is not None and fetched.universe_tickers == ("NVDA", "AMD")
+
+    bare = store.create_run("333.444", "/logs/run2", universe="us_liquid")
+    assert bare.universe_tickers is None
+    fetched_bare = store.get_run("333.444")
+    assert fetched_bare is not None and fetched_bare.universe_tickers is None
+
+
+def test_migration_adds_universe_tickers_to_legacy_db(db_path: Path) -> None:
+    """DBs created before US-023 lack runs.universe_tickers; migrate() retrofits it."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE runs (thread_ts TEXT PRIMARY KEY, session_path TEXT NOT NULL,"
+            " status TEXT NOT NULL, universe TEXT, created_at TEXT NOT NULL,"
+            " updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO runs VALUES ('111.222', '/logs/run1', 'running', 'us_liquid',"
+            " '2026-01-01', '2026-01-01')"
+        )
+    store = StateStore(db_path)  # migration runs here
+    legacy = store.get_run("111.222")
+    assert legacy is not None and legacy.universe_tickers is None
+    store.create_run("333.444", "/logs/run2", universe_tickers=["NVDA"])
+    fresh = store.get_run("333.444")
+    assert fresh is not None and fresh.universe_tickers == ("NVDA",)
