@@ -18,3 +18,9 @@
 - The stack is OpenAI-free: chat = `anthropic/...`, embeddings = `voyage/...`.
   Never introduce `OPENAI_*` variables; tests/test_probe_llm.py enforces this
   for `.env.example`.
+- rdagent's dep tree is partly unpinned: `pydantic-ai-slim` 2.x breaks the
+  `rdagent` CLI import at our pinned commit, so `install.sh` pins
+  `pydantic-ai-slim[mcp,openai,prefect]==1.107.0` right after installing
+  rdagent. Re-run `research/install.sh` after any pip operation that touches
+  pydantic-ai; `tests/test_run_vanilla_factor.py::test_rdagent_cli_importable`
+  guards the regression.

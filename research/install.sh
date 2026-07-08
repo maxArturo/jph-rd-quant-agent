@@ -33,7 +33,16 @@ fi
 echo "Installing rdagent @ ${SHA} into ${VENV} ..."
 "${VENV}/bin/pip" install --quiet "rdagent @ git+https://github.com/microsoft/RD-Agent@${SHA}"
 
+# rdagent leaves pydantic-ai-slim unpinned; the 2.x line renamed the MCP
+# server classes (MCPServerStreamableHTTP -> MCPToolset) and breaks the
+# `rdagent` CLI import at our pinned commit. Pin the last 1.x release.
+# See docs/decisions.md (2026-07-08 pydantic-ai-slim pin).
+echo "Pinning pydantic-ai-slim to a 1.x release compatible with the rdagent pin ..."
+"${VENV}/bin/pip" install --quiet "pydantic-ai-slim[mcp,openai,prefect]==1.107.0"
+
 echo "Verifying import ..."
 "${VENV}/bin/python" -c "import rdagent; print('rdagent import OK, version:', getattr(rdagent, '__version__', 'unknown'))"
+# The CLI pulls in the full app graph (incl. pydantic_ai) — a stronger check.
+"${VENV}/bin/python" -c "from rdagent.app.cli import app; print('rdagent CLI import OK')"
 
 echo "Done."

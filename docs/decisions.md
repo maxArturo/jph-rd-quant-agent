@@ -145,3 +145,33 @@ research/probe_llm.py`, exit 0):
   (`research/.env.example` documents this).
 - `onecli run` injects `HTTPS_PROXY` + `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`
   etc.; LiteLLM's httpx stack honors them with no extra wiring.
+
+## 2026-07-08 — pydantic-ai-slim pinned to 1.107.0 (US-005)
+
+**Problem:** the `rdagent` CLI crashed on import
+(`ImportError: cannot import name 'MCPServerStreamableHTTP' from
+'pydantic_ai.mcp'`). rdagent's pin leaves `pydantic-ai-slim[mcp,openai,prefect]`
+unpinned; pip resolved it to 2.5.1, and the pydantic-ai 2.x line renamed the
+MCP server classes (`MCPServerStreamableHTTP` → `MCPToolset` family) that
+rdagent 4f9ecb00 imports.
+
+**Decision:** `research/install.sh` now pins
+`pydantic-ai-slim[mcp,openai,prefect]==1.107.0` — the last 1.x release, API-
+compatible with the rdagent pin — immediately after installing rdagent, and
+verifies `from rdagent.app.cli import app` (the full CLI import graph) rather
+than just `import rdagent`. `pip check` is clean with this combination.
+
+**When to revisit:** whenever `research/PINNED_COMMIT` is rebased; if the new
+upstream commit supports pydantic-ai 2.x, drop the extra pin.
+
+## 2026-07-08 — health_check env leg skipped in run_vanilla_factor.sh --check (US-005)
+
+`rdagent health_check`'s env leg (`env_check()`) only understands
+DeepSeek/OpenAI env layouts: with our Anthropic+Voyage variables it takes the
+"no valid configuration" branch and then crashes with `UnboundLocalError`.
+`ops/run_vanilla_factor.sh --check` therefore runs
+`rdagent health_check --no-check-env` (docker + ports, the two things the
+story cares about) and hard-asserts what upstream only logs as warnings
+(sudo-less docker, port 19899 free, onecli gateway + rdq-research identity).
+The LLM leg is covered separately and better by `research/probe_llm.py`
+through the proxy (US-004).

@@ -75,8 +75,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: --check verified end-to-end (health_check + hard asserts, exit 0). PREREQ FIX: rdagent CLI was broken by unpinned pydantic-ai-slim 2.x; install.sh now pins 1.107.0 (docs/decisions.md). health_check env leg skipped by design (upstream crashes on Anthropic+Voyage env; probe_llm.py covers LLM). Full multi-hour fin_factor run NOT executed this iteration — wrapper ready, completion criterion in script header."
     },
     {
       "id": "US-006",

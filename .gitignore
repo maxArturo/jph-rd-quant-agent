@@ -10,3 +10,7 @@ orchestrator/state.sqlite
 # handles every other credential). Never commit real tokens.
 .env
 research/.env
+
+# rdagent writes CWD-relative log traces + selector.log on every invocation
+/log/
+selector.log
