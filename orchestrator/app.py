@@ -29,6 +29,18 @@ class MessageResponder(Protocol):
     def handle_message(self, thread_ts: str, text: str, say: Say) -> str: ...
 
 
+class InteractionHandler(Protocol):
+    """What the app needs from the hypothesis poller (see HypothesisPoller)."""
+
+    def approve(self, interaction_id: int, say: Say) -> None: ...
+
+    def reject(self, interaction_id: int, say: Say) -> None: ...
+
+    def request_edit(self, interaction_id: int, say: Say) -> None: ...
+
+    def consume_edit_reply(self, thread_ts: str, text: str, say: Say) -> bool: ...
+
+
 def _is_actionable_user_message(event: dict[str, Any], channel_id: str) -> bool:
     """True for plain user messages in the target channel (top-level or in-thread)."""
     if event.get("channel") != channel_id:
@@ -41,17 +53,29 @@ def _is_actionable_user_message(event: dict[str, Any], channel_id: str) -> bool:
 
 
 def handle_message(
-    event: dict[str, Any], say: Say, channel_id: str, conversation: MessageResponder
+    event: dict[str, Any],
+    say: Say,
+    channel_id: str,
+    conversation: MessageResponder,
+    interactions: InteractionHandler | None = None,
 ) -> bool:
     """Route one message event to the conversational core. Returns True if handled.
 
     Replies target the message's thread: for a top-level message the reply
     starts a thread on it (thread_ts = its ts); for a threaded message the
     reply stays in that thread (thread_ts = the event's thread_ts).
+
+    When the thread has a hypothesis in the Edit round-trip, the message is
+    the operator's edit text and is consumed by the poller instead of the
+    conversational core.
     """
     if not _is_actionable_user_message(event, channel_id):
         return False
     thread_ts = event.get("thread_ts") or event["ts"]
+    if interactions is not None and interactions.consume_edit_reply(
+        thread_ts, event["text"], say
+    ):
+        return True
     conversation.handle_message(thread_ts, event["text"], say)
     return True
 
@@ -59,6 +83,7 @@ def handle_message(
 def create_app(
     config: SlackConfig,
     conversation: MessageResponder,
+    interactions: InteractionHandler | None = None,
     client: WebClient | None = None,
     token_verification_enabled: bool = True,
     process_before_response: bool = False,
@@ -82,7 +107,31 @@ def create_app(
 
     @app.event("message")
     def _on_message(event: dict[str, Any], say: Say) -> None:
-        handle_message(event, say, config.channel_id, conversation)
+        handle_message(event, say, config.channel_id, conversation, interactions)
+
+    if interactions is not None:
+        # Local alias: pyright does not carry the None-narrowing into closures.
+        handler = interactions
+        # Late import keeps the action-id constants next to their handlers.
+        from orchestrator.poller import ACTION_APPROVE, ACTION_EDIT, ACTION_REJECT
+
+        def _interaction_id(action: dict[str, Any]) -> int:
+            return int(action["value"])
+
+        @app.action(ACTION_APPROVE)
+        def _on_approve(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            handler.approve(_interaction_id(action), say)
+
+        @app.action(ACTION_EDIT)
+        def _on_edit(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            handler.request_edit(_interaction_id(action), say)
+
+        @app.action(ACTION_REJECT)
+        def _on_reject(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            handler.reject(_interaction_id(action), say)
 
     return app
 
@@ -91,12 +140,21 @@ def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
+    from orchestrator.poller import HypothesisPoller
+    from orchestrator.rdagent_client import RdAgentClient
     from orchestrator.state import StateStore
 
     logging.basicConfig(level=logging.INFO)
     config = load_slack_config()
-    conversation = ConversationCore(store=StateStore(), router=ModelRouter())
-    app = create_app(config, conversation)
+    store = StateStore()
+    rdagent = RdAgentClient()
+    # One WebClient shared by Bolt and the background poller (which posts
+    # outside any Bolt request context, so it needs the client directly).
+    web_client = WebClient(token=config.bot_token)
+    conversation = ConversationCore(store=store, router=ModelRouter(), rdagent=rdagent)
+    poller = HypothesisPoller(store, rdagent, slack=web_client, channel_id=config.channel_id)
+    app = create_app(config, conversation, interactions=poller, client=web_client)
+    poller.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
     SocketModeHandler(app, config.app_token).start()
 

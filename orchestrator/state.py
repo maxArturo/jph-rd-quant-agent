@@ -329,6 +329,26 @@ class StateStore:
             resolved_at=None,
         )
 
+    def get_pending_interaction(self, interaction_id: int) -> PendingInteraction | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_interactions WHERE id = ?", (interaction_id,)
+            ).fetchone()
+        return None if row is None else _interaction_from_row(row)
+
+    def get_pending_interaction_by_key(self, interaction_key: str) -> PendingInteraction | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_interactions WHERE interaction_key = ?",
+                (interaction_key,),
+            ).fetchone()
+        return None if row is None else _interaction_from_row(row)
+
+    def delete_pending_interaction(self, interaction_id: int) -> None:
+        """Free an interaction key (e.g. when the Slack post failed and must retry)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pending_interactions WHERE id = ?", (interaction_id,))
+
     def list_pending_interactions(
         self, thread_ts: str | None = None, status: str = "pending"
     ) -> list[PendingInteraction]:

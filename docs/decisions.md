@@ -269,3 +269,38 @@ paths). Server-started runs inherit the *server's* environment, so a
 `start_run()` today would launch a CN-defaults `fin_quant`. US-020 must add
 the env wiring to the unit (Environment=/EnvironmentFile=) before wiring
 `start_research` to this client.
+
+## 2026-07-08 — US-021: Slack hypothesis steering maps onto the upstream queue protocol
+
+The poller (`orchestrator/poller.py`) posts every pending hypothesis as Block
+Kit Approve/Edit/Reject buttons in the run's Slack thread. Mapping the three
+operator actions onto the pinned upstream protocol
+(`RDLoop._interact_hypo`: the answer must be the full hypothesis constructor
+dict — the loop rebuilds via `type(hypo)(**res_dict)`):
+
+- **Approve** submits the request `content` unchanged.
+- **Edit** is an in-thread text round-trip (no modal): the button flips the
+  SQLite row to `editing` and prompts for a reply; the operator's next
+  message in that thread is submitted as `{**content, "hypothesis": <text>}`.
+  Chosen over a Slack modal because the state persists in
+  `pending_interactions` — a restart mid-edit keeps the round-trip alive,
+  whereas modal view state would be lost.
+- **Reject:** the queue protocol has NO regenerate/skip action — every
+  hypothesis request must be answered with a constructible dict, and the loop
+  always proceeds to convert/code/run it. Reject therefore submits the dict
+  with the `hypothesis` text replaced by an explicit operator-rejection
+  instruction ("do not implement it ... propose a materially different
+  hypothesis in the next iteration"). The iteration itself still runs (likely
+  failing fast into `skip_loop_error`), and the rejection lands in the trace,
+  steering the next proposal. A true skip would need a server/loop extension
+  (candidate for the US-024 `research/server_ui.py` work).
+
+**Feedback interactions are auto-acknowledged** (submitted back unchanged,
+row status `auto_approved`): the run blocks on feedback exactly like on
+hypotheses, so leaving them unanswered would deadlock every run after its
+first experiment. Operator steering of feedback is out of US-021 scope.
+
+**FIFO safety:** responses answer the run's *oldest* unanswered request, so
+the poller processes a run's interactions oldest-first and stops at the first
+hypothesis still awaiting the operator — nothing may jump the queue (e.g. a
+later feedback must not be auto-acked while a hypothesis is pending).

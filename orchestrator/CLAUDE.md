@@ -82,3 +82,25 @@
 - Handlers must ignore `subtype` messages (message_changed, channel_join, ...)
   and anything with `bot_id`, or the bot replies to its own replies (loop).
   In-thread reply target: `event.get("thread_ts") or event["ts"]`.
+
+- Hypothesis steering lives in `orchestrator/poller.py` (`HypothesisPoller`):
+  one instance per process polls all `running` runs and also owns the button
+  handlers (`approve`/`reject`/`request_edit`/`consume_edit_reply`). app.py
+  depends on it only via the `InteractionHandler` protocol and registers the
+  Block Kit `hypo_approve`/`hypo_edit`/`hypo_reject` action listeners plus the
+  edit-reply interception (checked BEFORE the conversational core sees a
+  thread message). Lifecycle lives in `pending_interactions.status`:
+  `pending → editing → approved|edited|rejected` (feedback: `auto_approved`);
+  dedup is the schema UNIQUE key, so restarts never repost. Answer FIFO rule:
+  never submit anything for a run while an earlier hypothesis row is still
+  `pending`/`editing` — responses answer the oldest blocked request. If a
+  Slack post or submit fails, free/keep the row so the next poll or click
+  retries (never resolve a row whose submit didn't go through).
+- Reject has no upstream regenerate action — `rejection_payload()` rides the
+  instruction in the hypothesis text (see docs/decisions.md US-021 entry)
+  and MUST keep the exact constructor key set (`type(hypo)(**dict)`).
+- Testing Bolt block actions: dispatch a `{"type": "block_actions", ...}`
+  payload as `BoltRequest(body=json.dumps(payload), mode="socket_mode")`
+  (no event_callback envelope — interactive payloads ARE the body); Bolt
+  injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
+  synchronous. See dispatch_action in tests/test_poller.py.

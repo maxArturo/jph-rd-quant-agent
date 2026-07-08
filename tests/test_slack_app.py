@@ -105,7 +105,9 @@ def test_parse_env_file_missing_file_is_empty(tmp_path: Path) -> None:
 # --- message routing through Bolt ----------------------------------------
 
 
-def make_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock, FakeConversation]:
+def make_app(
+    monkeypatch: pytest.MonkeyPatch, interactions: Any | None = None
+) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
     # Instance attributes Bolt's _init_context reads off the singleton client
@@ -123,6 +125,7 @@ def make_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock, FakeConve
     app = create_app(
         CONFIG,
         conversation,
+        interactions=interactions,
         client=client,
         token_verification_enabled=False,
         process_before_response=True,

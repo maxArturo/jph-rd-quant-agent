@@ -323,8 +323,8 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/poller.py HypothesisPoller — background thread polls all running runs, posts hypotheses as Block Kit Approve/Edit/Reject (dedup = pending_interactions UNIQUE key; restart-safe, verified). Approve submits the dict unchanged; Edit = in-thread text round-trip (status 'editing', next thread reply merged into hypothesis field — intercepted before the conversation core); Reject submits the dict with a rejection instruction in the hypothesis text (upstream queue protocol has NO regenerate action — docs/decisions.md). Feedback interactions auto-acked or runs would deadlock; FIFO guard: nothing submitted while an earlier hypothesis awaits the operator. 21 unit tests incl. real Bolt block_actions dispatch + end-to-end smoke over real HTTP (StubServerUi + real RdAgentClient + real SQLite): post/dedup/approve/edit-after-restart/reject/feedback all PASS."
     },
     {
       "id": "US-022",
