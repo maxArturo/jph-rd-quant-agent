@@ -30,6 +30,19 @@ CHANNEL = "C0TESTCHAN"
 CONFIG = SlackConfig(bot_token="xoxb-test", app_token="xapp-test", channel_id=CHANNEL)
 
 
+class FakeConversation:
+    """Stub MessageResponder: records calls and echoes like the real core."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def handle_message(self, thread_ts: str, text: str, say: Any) -> str:
+        self.calls.append((thread_ts, text))
+        reply = f"Received: {text}"
+        say(text=reply, thread_ts=thread_ts)
+        return reply
+
+
 # --- config loading -------------------------------------------------------
 
 
@@ -92,7 +105,7 @@ def test_parse_env_file_missing_file_is_empty(tmp_path: Path) -> None:
 # --- message routing through Bolt ----------------------------------------
 
 
-def make_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock]:
+def make_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
     # Instance attributes Bolt's _init_context reads off the singleton client
@@ -106,15 +119,20 @@ def make_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock]:
     client.retry_handlers = []
     # process_before_response=True runs listeners synchronously inside
     # dispatch(), so assertions after dispatch never race a worker thread.
+    conversation = FakeConversation()
     app = create_app(
-        CONFIG, client=client, token_verification_enabled=False, process_before_response=True
+        CONFIG,
+        conversation,
+        client=client,
+        token_verification_enabled=False,
+        process_before_response=True,
     )
     # Bolt >=1.15 constructs a NEW WebClient per request in _init_context, so
     # say()/context.client would bypass an injected mock and hit the network.
     # Patch the symbol Bolt instantiates so the per-request client IS the mock.
     # (Patched after App() — its constructor isinstance-checks the same symbol.)
     monkeypatch.setattr("slack_bolt.app.app.WebClient", lambda **_kwargs: client)
-    return app, client
+    return app, client, conversation
 
 
 def dispatch_message(app: App, event: dict[str, Any]) -> None:
@@ -149,8 +167,10 @@ def user_message(text: str, ts: str, thread_ts: str | None = None, **extra: Any)
 def test_channel_message_reaches_handler_and_replies_in_new_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client = make_app(monkeypatch)
+    app, client, conversation = make_app(monkeypatch)
     dispatch_message(app, user_message("momentum idea", ts="1751900000.000100"))
+    # the conversational core received the message keyed by its new thread
+    assert conversation.calls == [("1751900000.000100", "momentum idea")]
     client.chat_postMessage.assert_called_once()
     kwargs = client.chat_postMessage.call_args.kwargs
     assert kwargs["channel"] == CHANNEL
@@ -162,20 +182,23 @@ def test_channel_message_reaches_handler_and_replies_in_new_thread(
 def test_thread_message_reply_targets_existing_thread_ts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, client = make_app(monkeypatch)
+    app, client, conversation = make_app(monkeypatch)
     dispatch_message(
         app,
         user_message("follow-up", ts="1751900010.000200", thread_ts="1751900000.000100"),
     )
+    # core is keyed by the thread, not the message ts
+    assert conversation.calls == [("1751900000.000100", "follow-up")]
     kwargs = client.chat_postMessage.call_args.kwargs
     assert kwargs["thread_ts"] == "1751900000.000100"  # the thread, not the message ts
 
 
 def test_message_in_other_channel_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    app, client = make_app(monkeypatch)
+    app, client, conversation = make_app(monkeypatch)
     event = user_message("hello", ts="1751900020.000300")
     event["channel"] = "C0OTHER"
     dispatch_message(app, event)
+    assert conversation.calls == []
     client.chat_postMessage.assert_not_called()
 
 
@@ -186,8 +209,9 @@ def test_message_in_other_channel_is_ignored(monkeypatch: pytest.MonkeyPatch) ->
 def test_bot_and_subtype_messages_are_ignored(
     extra: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app, client = make_app(monkeypatch)
+    app, client, conversation = make_app(monkeypatch)
     dispatch_message(app, user_message("noise", ts="1751900030.000400", **extra))
+    assert conversation.calls == []
     client.chat_postMessage.assert_not_called()
 
 
@@ -196,17 +220,27 @@ def test_bot_and_subtype_messages_are_ignored(
 
 def test_handle_message_returns_false_without_reply_for_foreign_channel() -> None:
     say = MagicMock()
+    conversation = FakeConversation()
     replied = handle_message(
-        {"channel": "C0OTHER", "text": "x", "ts": "1.2"}, say, channel_id=CHANNEL
+        {"channel": "C0OTHER", "text": "x", "ts": "1.2"},
+        say,
+        channel_id=CHANNEL,
+        conversation=conversation,
     )
     assert replied is False
+    assert conversation.calls == []
     say.assert_not_called()
 
 
 def test_handle_message_replies_true_for_valid_message() -> None:
     say = MagicMock()
+    conversation = FakeConversation()
     replied = handle_message(
-        {"channel": CHANNEL, "text": "x", "ts": "1.2", "user": "U1"}, say, channel_id=CHANNEL
+        {"channel": CHANNEL, "text": "x", "ts": "1.2", "user": "U1"},
+        say,
+        channel_id=CHANNEL,
+        conversation=conversation,
     )
     assert replied is True
+    assert conversation.calls == [("1.2", "x")]
     assert say.call_args.kwargs["thread_ts"] == "1.2"

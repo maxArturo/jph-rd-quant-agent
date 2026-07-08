@@ -138,8 +138,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: prompts.py (PM persona: honest reporting, never trades without explicit approval) + conversation.py ConversationCore on judgment_tool_loop with save_directive ToolSpec (persists via StateStore, posts mrkdwn summary in-thread); saved directive reloads from SQLite into the system prompt every call (restart-safe). app.py now routes messages to the core via a MessageResponder protocol. 9 new unit tests (mocked Anthropic FakeClient + recording say). LIVE smoke via onecli: real fable-5 called save_directive, directive persisted + survived simulated restart."
     },
     {
       "id": "US-010",

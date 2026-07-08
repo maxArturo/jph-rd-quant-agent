@@ -27,6 +27,17 @@
   `client.beta.messages.stream` as a context manager with
   `get_final_message()`, and `client.messages.create`).
 
+- Conversational behavior lives in `orchestrator/conversation.py`
+  (`ConversationCore`) with prompt text in `orchestrator/prompts.py` — add new
+  Slack-facing tools (start_research, set_universe, ...) as `ToolSpec`s built
+  inside ConversationCore (handlers close over `thread_ts` + `say`), not as
+  new Bolt listeners. `app.py` depends only on the `MessageResponder`
+  protocol, so tests stub the core with a plain class (see FakeConversation in
+  tests/test_slack_app.py) and core tests reuse FakeClient from
+  tests/test_llm.py — no MagicMock of Anthropic needed. Durable per-thread
+  context must reload from SQLite into the system prompt (in-memory history
+  is lost on restart by design).
+
 ## Testing Bolt apps (see tests/test_slack_app.py)
 
 - Bolt >=1.15 constructs a NEW real `WebClient` per request in
