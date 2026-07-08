@@ -16,6 +16,21 @@
   a JSON *object* (`{"Error Message": ...}`) with HTTP 200-family semantics broken — the
   client raises FmpError on non-list payloads. `Retry-After` may be an HTTP-date; the
   client falls back to exponential backoff.
+- `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
+  0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
+  little-endian float32 array whose FIRST element is the calendar index of the ticker's
+  first bar; `instruments/<market>.txt` is tab-separated `SYMBOL\tstart\tend`;
+  `calendars/day.txt` is one ISO date per line. Stored prices are ADJUSTED
+  (raw * factor), volume is raw / factor, and a `factor` field is kept so raw values are
+  recoverable (close / factor) — incremental refresh (US-036) needs that.
+- Store builds write to `<target>.tmp`, validate, then swap via `<target>.old`; a failed
+  build/validation must never leave a partial store. Validation hard-fails on NaN
+  close/factor inside a ticker's own span (mid-series source gap) — don't relax silently.
+- Backfill checkpoints live at `<output>.checkpoint/<SYM>.json` keyed by (start, end)
+  window; a window change or corrupt file triggers refetch, same window resumes.
+- `pyqlib>=0.9.7` is a declared project dep (installs clean on py3.12, coexists with
+  rdagent). `qlib.init(provider_uri=..., region="us")` + `D.features` is the read path;
+  import qlib lazily (multi-second import).
 - `data/adjust.py` is the ONLY place adjustment math lives: backward adjustment, factor
   1.0 on the window's last bar, events strictly-before-ex-date get the multiplier
   (split: 1/ratio; dividend: (prev_close - D)/prev_close using the last bar close before

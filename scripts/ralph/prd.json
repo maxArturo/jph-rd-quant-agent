@@ -200,8 +200,8 @@
         "Typecheck passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: data/build_store.py — per-ticker JSON checkpoints keyed by (start,end) window (crash resume unit-tested: rerun refetches only the tail, no dup/missing tickers); temp-dir write -> validate_store -> atomic swap via .old (failure paths unit-tested, no partials). Fields open/high/low/close ADJUSTED, volume raw/factor, factor kept. pyqlib 0.9.7 added as a declared dep. Smoke: 5-ticker fixture store read back via qlib.init + D.features, AAPL OHLCV no NaN closes. LIVE-verified through the proxy: 3-ticker 2-month real build, 41 bars/ticker, 0 NaN closes."
     },
     {
       "id": "US-014",
