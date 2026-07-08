@@ -113,3 +113,15 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - Handler MUST skip subtype/bot_id events or the bot loops on its own replies.
   - Live-Slack usability still needs the human: SLACK_CHANNEL_ID in .env, bot invited to #quant-research, scopes chat:write + channels:history + reactions:write (+files:write later).
 ---
+## 2026-07-08 20:05 - US-007
+- orchestrator/state.py: StateStore with all four tables (directives, runs, promoted_strategy, pending_interactions), idempotent migration run on every construction, typed frozen-dataclass rows, and CRUD helpers: create/get directive (latest per thread), create/get/list/update-status/delete run, set/get promoted strategy (upsert on CHECK(id=1) single row), add/list/resolve pending interactions.
+- Constraints designed for downstream stories: runs.thread_ts is the PK — duplicate create_run raises DuplicateRunError carrying the existing row (US-020 rejection message); pending_interactions.interaction_key is UNIQUE — add returns None on duplicate (US-021 poller dedup); promoted_strategy can never hold two rows (US-033).
+- Files: orchestrator/state.py (new), tests/test_state.py (20 tests: idempotent migration, fetch-by-thread incl. latest-directive-wins, duplicate run rejection, status transitions, single-row promotion replacement asserted via raw COUNT(*), interaction dedup/resolve/thread filter, full restart-survival test), orchestrator/CLAUDE.md (state-layer usage pattern).
+- Verified: make check green (ruff pass, pyright 0 errors, 60 pytest passed — 20 new). Default-path smoke: StateStore() created orchestrator/state.sqlite, directive written, second StateStore() on the same file (simulated restart) migrated idempotently and returned the directive; file confirmed gitignored (git status clean), then removed.
+- **Learnings for future iterations:**
+  - StateStore opens a short-lived sqlite3 connection per method — share ONE instance across Bolt handlers and pollers; never cache a connection across threads.
+  - sqlite3.Row is not a typing Mapping — `Dataclass(**row)` fails pyright; use explicit _x_from_row constructors.
+  - `with closing(sqlite3.connect(...)) as conn, conn:` gives commit-on-success/rollback-on-error AND close; sqlite3's own context manager does not close.
+  - cur.lastrowid is Optional under pyright — assert non-None after INSERT.
+  - Uniqueness/dedup belongs in the schema (PK/UNIQUE + IntegrityError catch), not in check-then-insert code — it stays correct across process restarts and threads.
+---

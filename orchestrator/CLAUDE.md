@@ -7,6 +7,14 @@
 - Slack tokens come from the repo-root `.env` (SLACK_OAUTH_TOKEN xoxb-,
   SLACK_SOCKET_TOKEN xapp-, SLACK_CHANNEL_ID). Never route Slack through the
   OneCLI proxy and never vault these (docs/decisions.md 2026-07-08).
+- Persistent state goes through `orchestrator/state.py` (`StateStore`), not ad
+  hoc sqlite3 calls. It opens a short-lived connection per method, so one
+  instance is safe to share between Bolt handlers and background pollers —
+  never cache a `sqlite3.Connection` across threads. Extend the schema by
+  adding `CREATE ... IF NOT EXISTS` statements to `_SCHEMA` (migration reruns
+  on every startup). Dedup/uniqueness lives in the schema (runs.thread_ts PK
+  → `DuplicateRunError`; pending_interactions.interaction_key UNIQUE → insert
+  returns `None`), so restarts can't double-post.
 
 ## Testing Bolt apps (see tests/test_slack_app.py)
 

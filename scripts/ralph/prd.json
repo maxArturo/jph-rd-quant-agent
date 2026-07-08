@@ -106,8 +106,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/state.py StateStore — idempotent migration (CREATE IF NOT EXISTS, reruns every startup), per-call connections (thread-safe to share one instance), typed dataclass rows. Dedup in schema: runs.thread_ts PK raises DuplicateRunError (US-020); pending_interactions.interaction_key UNIQUE returns None on dup (US-021); promoted_strategy CHECK(id=1) upsert (US-033). 20 unit tests incl. restart survival; default-path startup smoke-verified."
     },
     {
       "id": "US-008",
