@@ -262,8 +262,8 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: ops/run_us_quant.sh (env wiring incl. dates fanned to QLIB_QUANT_/QLIB_FACTOR_/QLIB_MODEL_ — runners re-read the latter two; FACTOR_CoSTEER_DATA_FOLDER(_DEBUG); APP_TPL; LOG_TRACE_PATH) + research/us_quant.py hook classes (QLIB_QUANT_*_HYPOTHESIS2EXPERIMENT -> convert_response re-injects us_templates; upstream FactorExperiment/ModelExperiment are Experiment aliases so concrete Qlib classes matched). --loop_n/--all_duration passthrough. --check verified live exit 0 against a REAL 31-ticker us_data store (2015..2026-06, SPY included; us_liquid=30 stocks, SPY excluded from universe) + factor source at ~/rdq-data/factor_source/us_liquid. Full multi-hour fin_quant run NOT executed; completion criterion in header."
     },
     {
       "id": "US-018",

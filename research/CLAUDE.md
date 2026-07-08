@@ -43,3 +43,18 @@
 - `tests/test_us_templates.py::test_pinned_rdagent_install_unmodified` hashes
   every installed rdagent file against pip's RECORD — any in-place tweak to
   the upstream tree fails `make check`.
+- `us_quant.py` holds the fin_quant hooks: `QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT`
+  / `QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT` point at subclasses whose
+  `convert_response` re-injects `us_templates/` over each new experiment's
+  workspace (filenames match upstream exactly, so replacement is total —
+  `tests/test_us_quant_hooks.py` enforces the filename parity).
+- rdagent's `FactorExperiment`/`ModelExperiment` (components.coder.*) are bare
+  aliases of `Experiment` — `isinstance` cannot tell factor from model. Match
+  the concrete Qlib classes instead, and note `quant_experiment.py` defines
+  its OWN `QlibFactorExperiment`/`QlibModelExperiment` pair distinct from
+  `factor_experiment.py`/`model_experiment.py`'s — cover both.
+- Backtest date segments: the quant scenario prompt reads `QLIB_QUANT_*`, but
+  the factor/model runners re-instantiate `FactorBasePropSetting()` /
+  `ModelBasePropSetting()` and render workspace conf jinja vars from
+  `QLIB_FACTOR_*` / `QLIB_MODEL_*`. Export the SAME dates under all three
+  prefixes (ops/run_us_quant.sh does) or runs silently backtest on CN defaults.
