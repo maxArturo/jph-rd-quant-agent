@@ -91,8 +91,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "UNBLOCKED (2026-07-08): Slack app installed; bot + app tokens are in the repo-root .env as SLACK_OAUTH_TOKEN (xoxb-) and SLACK_SOCKET_TOKEN (xapp-). Use those exact names. .env is now gitignored — keep it that way. HUMAN INPUT STILL NEEDED before the live-Slack smoke test: (1) the #quant-research channel id (add SLACK_CHANNEL_ID to .env), (2) the bot invited to that channel, (3) app scopes chat:write + channels:history + reactions:write, plus files:write (needed later for US-022 chart uploads). Unit tests with a mocked Slack client do not need any of these and are the story's pass criteria."
+      "passes": true,
+      "notes": "DONE 2026-07-08: config.py (.env fallback, ConfigError naming missing vars) + app.py (Socket Mode skeleton, in-thread ack handler) + 15 unit tests routing real BoltRequests through App.dispatch() with a mocked WebClient. Live Socket Mode handshake verified with the real tokens ('Bolt app is running!', session established). STILL NEEDED from human before the bot is usable in-channel: SLACK_CHANNEL_ID in .env, bot invited to #quant-research, scopes chat:write + channels:history + reactions:write (+files:write for US-022). Bolt testing gotchas in orchestrator/CLAUDE.md."
     },
     {
       "id": "US-007",

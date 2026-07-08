@@ -3,7 +3,9 @@ name = "rd-agent-q"
 version = "0.1.0"
 description = "RD-Agent(Q) Slack-driven quant research and paper trading system"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "slack-bolt>=1.20",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

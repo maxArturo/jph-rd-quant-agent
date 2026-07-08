@@ -101,3 +101,15 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - research/.env now exists on this box (copy of .env.example, placeholders only, gitignored) — run wrappers source it.
   - GOTCHA: every rdagent invocation (even --help/health_check) writes a CWD-relative log/<timestamp>/ trace dir and selector.log. Now gitignored (/log/, selector.log) — but avoid `git add -A` blindly after running rdagent from repo root.
 ---
+## 2026-07-08 20:20 - US-006
+- Slack Bolt Socket Mode skeleton: orchestrator/config.py (SlackConfig; process env overrides repo-root .env; ConfigError names the missing var + where to set it; validates xoxb-/xapp- prefixes) and orchestrator/app.py (create_app registers a message handler; replies in-thread via thread_ts = event.thread_ts or event.ts; ignores other channels, subtypes, and bot_id messages; main() starts SocketModeHandler). slack-bolt>=1.20 added to pyproject deps (installed 1.29.0).
+- Token-source decision was already recorded in docs/decisions.md (2026-07-08 ".env fallback" entry) — criterion satisfied, no new entry needed.
+- tests/test_slack_app.py: 15 tests — config loading (file parse, env override, per-var missing errors, prefix swap rejection) + routing through the REAL Bolt dispatcher (App.dispatch with socket_mode BoltRequest): channel msg -> reply threads on its ts; thread msg -> reply targets thread_ts; other-channel/bot_id/subtype ignored; plus direct handle_message unit tests.
+- Verified: make check green (ruff pass, pyright 0 errors, 40 pytest passed). `python -m orchestrator.app` without SLACK_CHANNEL_ID exits 1 with the actionable ConfigError. LIVE smoke: with the real .env tokens + dummy channel id, Socket Mode session established — "A new session has been established", "⚡️ Bolt app is running!" (15s run, then killed). Both tokens work.
+- **Learnings for future iterations:**
+  - Bolt >=1.15 builds a NEW real WebClient per request in App._init_context — App(client=mock) alone is not enough for tests; also monkeypatch slack_bolt.app.app.WebClient (AFTER App() construction — the constructor isinstance-checks that symbol). Full recipe in orchestrator/CLAUDE.md.
+  - MagicMock(spec=WebClient) lacks instance attrs Bolt reads (base_url, timeout, ssl, proxy, headers, logger, retry_handlers) — set them on the mock.
+  - process_before_response=True makes App.dispatch() run listeners synchronously (no test races); leave it False in production once handlers get slow (Slack retries events not acked in ~3s) — relevant for US-009's Claude calls (use lazy listeners or ack-then-work).
+  - Handler MUST skip subtype/bot_id events or the bot loops on its own replies.
+  - Live-Slack usability still needs the human: SLACK_CHANNEL_ID in .env, bot invited to #quant-research, scopes chat:write + channels:history + reactions:write (+files:write later).
+---
