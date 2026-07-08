@@ -19,3 +19,18 @@
 - Scripts must pass shellcheck; use `set -euo pipefail` for setup-style
   scripts, `set -uo pipefail` (no `-e`) for check-style scripts that collect
   failures.
+
+## systemd user units
+
+- Units live in `ops/` and are symlinked into `~/.config/systemd/user/` by
+  `ops/install_services.sh` — append new units/timers to its `UNITS` array
+  (tests/test_services.py asserts every listed unit file exists).
+- Use `%h` for home paths; `WantedBy=default.target` (user manager has no
+  multi-user.target); put `StartLimitIntervalSec` in `[Unit]`, not `[Service]`.
+- `onecli run` injects HTTP(S)_PROXY process-wide but PRESERVES a pre-set
+  NO_PROXY — any service wrapping `onecli run` must `Environment=` a NO_PROXY
+  exemption for hosts that may not transit the proxy (Slack: `slack.com`;
+  urllib suffix-matches, covering wss-primary/files subdomains).
+- From non-login shells (agents, cron) set
+  `XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user` /
+  `systemd-analyze --user verify`, or they can't reach the user manager.

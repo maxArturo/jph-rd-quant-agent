@@ -153,8 +153,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: unit + install_services.sh + 10 tests; systemd-analyze verify OK. LIVE-verified active (running), Socket Mode session established under the unit; Restart=always organically proven (recovered a crash loop). Unit sets NO_PROXY=slack.com so Slack bypasses the onecli-injected proxy. Service left INSTALLED BUT STOPPED: SLACK_CHANNEL_ID in .env is a placeholder (C0000000000) — operator must set the real channel id then `systemctl --user enable --now rdq-orchestrator.service`."
     },
     {
       "id": "US-011",

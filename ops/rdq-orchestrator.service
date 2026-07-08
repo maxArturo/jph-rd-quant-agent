@@ -1,0 +1,36 @@
+# RD-Agent(Q) Slack orchestrator — systemd user unit (US-010).
+#
+# Runs the Bolt Socket Mode bot under the rdq-orchestrator OneCLI identity so
+# Anthropic auth is injected by the local proxy (http://127.0.0.1:10254).
+# Slack tokens + SLACK_CHANNEL_ID come from the repo-root .env, read by
+# orchestrator/config.py (PLAN.md-sanctioned exception: Slack is never
+# proxied through OneCLI).
+#
+# Socket Mode only — no inbound port, nothing to expose via tailscale serve.
+#
+# Install:  ops/install_services.sh
+# Start:    systemctl --user enable --now rdq-orchestrator.service
+# Logs:     journalctl --user -u rdq-orchestrator.service -f
+
+[Unit]
+Description=RD-Agent(Q) Slack orchestrator (Socket Mode bot via rdq-orchestrator OneCLI identity)
+After=network-online.target
+Wants=network-online.target
+# Never park the unit in a permanent 'failed' state during longer Slack or
+# gateway outages; RestartSec below paces the retries.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/rd-agent-q
+# onecli run injects HTTPS_PROXY process-wide, but Slack traffic must NOT
+# transit the OneCLI proxy (docs/decisions.md 2026-07-08). onecli preserves a
+# pre-set NO_PROXY, and urllib suffix-matches it, so slack.com covers
+# wss-primary.slack.com / files.slack.com etc.
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+ExecStart=%h/.local/bin/onecli run --agent rdq-orchestrator -- %h/rd-agent-q/.venv/bin/python -m orchestrator.app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
