@@ -307,8 +307,8 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: start_research ToolSpec in ConversationCore — requires a saved directive, launches via RdAgentClient.start_run(directive_instruction, us_liquid), records thread_ts<->session_path (= str(trace_dir)) in runs; duplicate start rejected pointing at the active run (pre-check + DuplicateRunError race guard that stops the orphan run). PREREQ FIXED: rdq-research.service now carries the full US env (dates x3 prefixes, FACTOR_CoSTEER_*, APP_TPL, hook classes, WORKSPACE_PATH, EnvironmentFile=research/.env) — verified in /proc/<pid>/environ after restart. RdAgentClient.trace_id_of() added (inverse of trace_dir) for US-021/024. 9 new tests + LIVE smoke: real fable-5 called the tool, row written, duplicate rejected in-conversation. No real fin_quant run started (multi-hour)."
     },
     {
       "id": "US-021",

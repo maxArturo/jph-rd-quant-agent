@@ -289,6 +289,20 @@ class RdAgentClient:
         """On-disk trace directory for a server-started run."""
         return self._trace_folder / trace_id
 
+    def trace_id_of(self, session_path: str | Path) -> str:
+        """Inverse of trace_dir: recover the trace id from a stored session path.
+
+        The runs table (US-020) persists thread_ts <-> session_path; pollers
+        and stop/resume tools need the trace id back to address the API.
+        """
+        path = Path(session_path).expanduser()
+        try:
+            return path.relative_to(self._trace_folder).as_posix()
+        except ValueError as exc:
+            raise RdAgentClientError(
+                f"session path {path} is not under the trace folder {self._trace_folder}"
+            ) from exc
+
     def artifacts(self, trace_id: str) -> RunArtifacts:
         return locate_artifacts(self.trace_dir(trace_id))
 

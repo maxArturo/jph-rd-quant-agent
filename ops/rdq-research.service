@@ -37,6 +37,34 @@ Environment="NO_PROXY=127.0.0.1,localhost,100.64.0.0/10" "no_proxy=127.0.0.1,loc
 # server_ui state lives outside the repo; rdagent.log.ui.conf reads these at
 # import time (UI_ env prefix). research/server_ui.py creates both dirs.
 Environment="UI_TRACE_FOLDER=%h/rdq-runs/server_ui/traces" "UI_STATIC_PATH=%h/rdq-runs/server_ui/static"
+
+# --- US-market run environment (US-020) --------------------------------------
+# fin_quant runs spawned via POST /upload inherit this environment; without it
+# they silently backtest with rdagent's CN defaults (csi300, 2008-2020 dates).
+# Values mirror ops/run_us_quant.sh wire_env — tests/test_services.py asserts
+# the date defaults stay in sync with that script.
+# Dates go under all three prefixes: the quant scenario prompt reads
+# QLIB_QUANT_*, but the factor/model runners re-instantiate their own settings
+# and render workspace conf jinja vars from QLIB_FACTOR_* / QLIB_MODEL_*.
+Environment="QLIB_QUANT_TRAIN_START=2016-01-01" "QLIB_QUANT_TRAIN_END=2022-12-31" "QLIB_QUANT_VALID_START=2023-01-01" "QLIB_QUANT_VALID_END=2024-12-31" "QLIB_QUANT_TEST_START=2025-01-01" "QLIB_QUANT_TEST_END=2026-06-30"
+Environment="QLIB_FACTOR_TRAIN_START=2016-01-01" "QLIB_FACTOR_TRAIN_END=2022-12-31" "QLIB_FACTOR_VALID_START=2023-01-01" "QLIB_FACTOR_VALID_END=2024-12-31" "QLIB_FACTOR_TEST_START=2025-01-01" "QLIB_FACTOR_TEST_END=2026-06-30"
+Environment="QLIB_MODEL_TRAIN_START=2016-01-01" "QLIB_MODEL_TRAIN_END=2022-12-31" "QLIB_MODEL_VALID_START=2023-01-01" "QLIB_MODEL_VALID_END=2024-12-31" "QLIB_MODEL_TEST_START=2025-01-01" "QLIB_MODEL_TEST_END=2026-06-30"
+# Factor coder source data (US-015 output) + US prompt overrides (US-016).
+Environment="FACTOR_CoSTEER_DATA_FOLDER=%h/rdq-data/factor_source/us_liquid/data_folder"
+Environment="FACTOR_CoSTEER_DATA_FOLDER_DEBUG=%h/rdq-data/factor_source/us_liquid/data_folder_debug"
+Environment="APP_TPL=%h/rd-agent-q/research/app_tpl"
+# US workspace templates re-injected via env-configurable class paths
+# (APP_TPL cannot redirect the hardcoded template folders; research/us_quant.py).
+Environment="QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT=research.us_quant.USQlibFactorHypothesis2Experiment"
+Environment="QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT=research.us_quant.USQlibModelHypothesis2Experiment"
+# Keep spawned-run workspaces out of the repo, next to the trace state.
+Environment="WORKSPACE_PATH=%h/rdq-runs/server_ui/workspace"
+# LLM backend (CHAT_MODEL/EMBEDDING_MODEL + placeholder keys the proxy
+# overrides). Deliberately NOT optional: a missing file must fail the unit
+# loudly instead of letting spawned runs fall back to rdagent's OpenAI
+# defaults. Copy research/.env.example if this stops the service.
+EnvironmentFile=%h/rd-agent-q/research/.env
+
 ExecStart=%h/.local/bin/onecli run --agent rdq-research -- %h/rd-agent-q/.venv/bin/python -m research.server_ui
 Restart=always
 RestartSec=5

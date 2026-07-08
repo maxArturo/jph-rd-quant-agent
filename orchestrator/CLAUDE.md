@@ -55,6 +55,12 @@
   the server with a real threaded Flask app (StubServerUi in
   tests/test_rdagent_client.py — reuse it for poller/tool tests) and pass
   `base_features={...}` so the client never imports rdagent.
+- Session-path convention (US-020): `runs.session_path` stores
+  `str(client.trace_dir(handle.trace_id))`; recover the trace id for API
+  calls with `client.trace_id_of(session_path)`. Tools that only need
+  start_run/trace_dir/stop should depend on the `ResearchLauncher` protocol
+  in conversation.py (stub-friendly — see StubLauncher in
+  tests/test_conversation.py) rather than the concrete client.
 
 ## Testing Bolt apps (see tests/test_slack_app.py)
 

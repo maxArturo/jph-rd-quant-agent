@@ -34,3 +34,12 @@
 - From non-login shells (agents, cron) set
   `XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user` /
   `systemd-analyze --user verify`, or they can't reach the user manager.
+- `rdq-research.service` duplicates the US run environment from
+  `ops/run_us_quant.sh` `wire_env` (dates under all three QLIB_* prefixes,
+  factor-source folders, APP_TPL, hook-class paths) — fin_quant runs spawned
+  via server_ui `/upload` inherit the SERVICE environment, not the wrapper's.
+  When changing wire_env, change the unit too;
+  `tests/test_services.py::test_unit_dates_match_run_us_quant_defaults`
+  enforces the date sync. After editing any unit: `daemon-reload` + restart,
+  then check `/proc/<MainPID>/environ` — `systemctl show-environment` does
+  NOT reflect per-unit Environment= lines.

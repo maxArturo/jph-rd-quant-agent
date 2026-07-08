@@ -30,6 +30,7 @@ from orchestrator.rdagent_client import (
     ArtifactNotFoundError,
     PendingInteraction,
     RdAgentClient,
+    RdAgentClientError,
     RdAgentServerError,
     UnsupportedActionError,
     classify_interaction,
@@ -422,3 +423,17 @@ def test_client_artifacts_resolves_under_trace_folder(
     workspace = _make_workspace(tmp_path, "ws1")
     _write_runner_result(tmp_path / trace_id, workspace, "2026-07-08_10-00-00-000000")
     assert client.artifacts(trace_id).workspace_path == workspace
+
+
+def test_trace_id_of_round_trips_trace_dir(tmp_path: Path, stub: StubServerUi) -> None:
+    """US-020 stores session_path = str(trace_dir); later stories recover the id."""
+    client = make_client(stub, trace_folder=tmp_path)
+    trace_id = "Finance Whole Pipeline/2026-07-08_22-00-00"
+    session_path = str(client.trace_dir(trace_id))
+    assert client.trace_id_of(session_path) == trace_id
+
+
+def test_trace_id_of_rejects_foreign_paths(tmp_path: Path, stub: StubServerUi) -> None:
+    client = make_client(stub, trace_folder=tmp_path / "traces")
+    with pytest.raises(RdAgentClientError, match="not under the trace folder"):
+        client.trace_id_of(tmp_path / "elsewhere" / "run")

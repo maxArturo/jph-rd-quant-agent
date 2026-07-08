@@ -1,6 +1,7 @@
-"""US-009: conversational core — idea -> directive -> echo, with mocked
-Anthropic (FakeClient from tests/test_llm.py) and mocked Slack (a recording
-say callable). No network anywhere.
+"""US-009: conversational core — idea -> directive -> echo; US-020:
+start_research — directive -> run row + duplicate rejection. Mocked Anthropic
+(FakeClient from tests/test_llm.py), mocked Slack (a recording say callable),
+stubbed rdagent client (StubLauncher). No network anywhere.
 """
 
 from __future__ import annotations
@@ -10,12 +11,16 @@ from typing import Any
 
 from orchestrator import prompts
 from orchestrator.conversation import (
+    DEFAULT_UNIVERSE,
     REFUSAL_REPLY,
     ConversationCore,
+    directive_instruction,
     format_directive_summary,
+    format_run_started,
 )
 from orchestrator.llm import ModelRouter
-from orchestrator.state import StateStore
+from orchestrator.rdagent_client import RunHandle
+from orchestrator.state import Run, StateStore
 from tests.test_llm import (
     FakeClient,
     RefusalMessage,
@@ -37,9 +42,39 @@ class RecordingSay:
         self.calls.append({"text": text, "thread_ts": thread_ts})
 
 
-def make_core(tmp_path: Path, client: FakeClient) -> tuple[ConversationCore, StateStore]:
+class StubLauncher:
+    """Stubbed rdagent_client: records start_run/stop, deterministic trace ids."""
+
+    TRACE_FOLDER = Path("/stub-traces")
+
+    def __init__(self) -> None:
+        self.started: list[dict[str, str]] = []
+        self.stopped: list[str] = []
+
+    def start_run(self, directive: str, universe: str) -> RunHandle:
+        self.started.append({"directive": directive, "universe": universe})
+        trace_id = f"Finance Whole Pipeline/trace_{len(self.started)}"
+        return RunHandle(
+            trace_id=trace_id, directive=directive, universe=universe, interaction=True
+        )
+
+    def trace_dir(self, trace_id: str) -> Path:
+        return self.TRACE_FOLDER / trace_id
+
+    def stop(self, trace_id: str) -> None:
+        self.stopped.append(trace_id)
+
+
+def make_core(
+    tmp_path: Path, client: FakeClient, launcher: StubLauncher | None = None
+) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
-    return ConversationCore(store=store, router=ModelRouter(client=client)), store
+    core = ConversationCore(
+        store=store,
+        router=ModelRouter(client=client),
+        rdagent=launcher if launcher is not None else StubLauncher(),
+    )
+    return core, store
 
 
 def save_directive_script(final_reply: str = "Directive saved — ready to research.") -> list[Any]:
@@ -234,3 +269,131 @@ def test_refusal_posts_notice_and_keeps_history_clean(tmp_path: Path) -> None:
     assert client.stream_calls[1]["messages"] == [
         {"role": "user", "content": "ok, a real idea"}
     ]
+
+
+# --- start_research (US-020) --------------------------------------------------
+
+
+def start_research_script(final_reply: str = "Run started — watch this thread.") -> list[Any]:
+    """Model turn 1: call start_research; turn 2: confirm in text."""
+    return [
+        message("tool_use", [tool_use_block("tu_sr", "start_research", {})]),
+        message("end_turn", [text_block(final_reply)]),
+    ]
+
+
+def test_start_research_launches_run_and_writes_row(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=start_research_script())
+    launcher = StubLauncher()
+    core, store = make_core(tmp_path, client, launcher)
+    store.create_directive(
+        THREAD,
+        objective="Test whether 12-1 momentum beats SPY",
+        universe_hint="US large caps",
+        constraints="long-only, monthly rebalance",
+    )
+    say = RecordingSay()
+
+    reply = core.handle_message(THREAD, "research it", say)
+
+    # the run was launched with the thread's directive as user_instruction
+    assert launcher.started == [
+        {
+            "directive": (
+                "Test whether 12-1 momentum beats SPY\nConstraints: long-only, monthly rebalance"
+            ),
+            "universe": DEFAULT_UNIVERSE,
+        }
+    ]
+
+    # thread_ts <-> session_path recorded in the runs table
+    run = store.get_run(THREAD)
+    assert run is not None
+    assert run.session_path == str(
+        StubLauncher.TRACE_FOLDER / "Finance Whole Pipeline/trace_1"
+    )
+    assert run.status == "running"
+    assert run.universe == DEFAULT_UNIVERSE
+
+    # start notice posted in-thread, then the model's final reply
+    assert [c["thread_ts"] for c in say.calls] == [THREAD, THREAD]
+    assert say.calls[0]["text"] == format_run_started(run)
+    assert reply == "Run started — watch this thread."
+    assert launcher.stopped == []
+
+
+def test_directive_instruction_omits_missing_constraints(tmp_path: Path) -> None:
+    store = StateStore(db_path=tmp_path / "state.sqlite")
+    bare = store.create_directive(THREAD, objective="Objective only")
+    assert directive_instruction(bare) == "Objective only"
+
+
+def test_start_research_without_directive_is_rejected(tmp_path: Path) -> None:
+    client = FakeClient(
+        judgment_messages=start_research_script("Save a directive first.")
+    )
+    launcher = StubLauncher()
+    core, store = make_core(tmp_path, client, launcher)
+
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    assert launcher.started == []
+    assert store.get_run(THREAD) is None
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "save_directive" in tool_result["content"]
+
+
+def test_duplicate_start_rejected_pointing_at_active_run(tmp_path: Path) -> None:
+    client = FakeClient(
+        judgment_messages=start_research_script("A run is already going here.")
+    )
+    launcher = StubLauncher()
+    core, store = make_core(tmp_path, client, launcher)
+    store.create_directive(THREAD, objective="Momentum on US large caps")
+    existing = store.create_run(THREAD, "/stub-traces/existing/run", universe="us_liquid")
+
+    core.handle_message(THREAD, "research it again", RecordingSay())
+
+    # nothing new was launched; the existing row is untouched
+    assert launcher.started == []
+    assert store.get_run(THREAD) == existing
+
+    # the rejection points the model at the active run
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert existing.session_path in tool_result["content"]
+    assert existing.status in tool_result["content"]
+
+
+class RaceyStore(StateStore):
+    """Simulates a concurrent start: the duplicate pre-check misses the other
+    run (first get_run returns None), then create_run hits the PK conflict."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path=db_path)
+        self._get_run_calls = 0
+
+    def get_run(self, thread_ts: str) -> Run | None:
+        self._get_run_calls += 1
+        if self._get_run_calls == 1:
+            return None
+        return super().get_run(thread_ts)
+
+
+def test_lost_start_race_stops_the_orphan_run(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=start_research_script("Already running."))
+    launcher = StubLauncher()
+    store = RaceyStore(db_path=tmp_path / "state.sqlite")
+    core = ConversationCore(store=store, router=ModelRouter(client=client), rdagent=launcher)
+    store.create_directive(THREAD, objective="Momentum on US large caps")
+    existing = store.create_run(THREAD, "/stub-traces/winner/run", universe="us_liquid")
+
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    # the racing run WAS launched, then stopped when the insert conflicted
+    assert len(launcher.started) == 1
+    assert launcher.stopped == ["Finance Whole Pipeline/trace_1"]
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert existing.session_path in tool_result["content"]

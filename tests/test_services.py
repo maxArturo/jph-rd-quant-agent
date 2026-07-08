@@ -1,8 +1,9 @@
-"""Offline tests for the systemd units (US-010, US-018) + install script."""
+"""Offline tests for the systemd units (US-010, US-018, US-020) + install script."""
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 UNIT = REPO_ROOT / "ops" / "rdq-orchestrator.service"
 RESEARCH_UNIT = REPO_ROOT / "ops" / "rdq-research.service"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
+RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
 
 
 def _systemd_analyze_verify(unit: Path) -> None:
@@ -101,6 +103,46 @@ class TestResearchUnit:
         assert "[Install]" in text
         assert "WantedBy=default.target" in text
         assert "WorkingDirectory=%h/rd-agent-q" in text
+
+    def test_us_run_env_wiring(self) -> None:
+        """US-020: fin_quant runs spawned via /upload must inherit the US-market
+        environment, or they silently backtest with rdagent's CN defaults."""
+        text = RESEARCH_UNIT.read_text()
+        assert "FACTOR_CoSTEER_DATA_FOLDER=%h/rdq-data/factor_source/us_liquid/data_folder" in text
+        assert (
+            "FACTOR_CoSTEER_DATA_FOLDER_DEBUG="
+            "%h/rdq-data/factor_source/us_liquid/data_folder_debug"
+        ) in text
+        assert "APP_TPL=%h/rd-agent-q/research/app_tpl" in text
+        assert (
+            "QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT="
+            "research.us_quant.USQlibFactorHypothesis2Experiment"
+        ) in text
+        assert (
+            "QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT="
+            "research.us_quant.USQlibModelHypothesis2Experiment"
+        ) in text
+        assert "WORKSPACE_PATH=%h/rdq-runs/server_ui/workspace" in text
+        # LLM backend env for spawned runs; NOT optional (no '-' prefix) so a
+        # missing file fails loudly instead of falling back to OpenAI defaults.
+        assert "EnvironmentFile=%h/rd-agent-q/research/.env" in text
+        assert "EnvironmentFile=-" not in text
+
+    def test_unit_dates_match_run_us_quant_defaults(self) -> None:
+        """The unit duplicates wire_env's date defaults (all three prefixes);
+        this catches drift between ops/run_us_quant.sh and the unit."""
+        script_defaults = dict(
+            re.findall(r"RDQ_((?:TRAIN|VALID|TEST)_(?:START|END)):-(\d{4}-\d{2}-\d{2})",
+                       RUN_US_QUANT.read_text())
+        )
+        assert len(script_defaults) == 6, script_defaults
+        unit_text = RESEARCH_UNIT.read_text()
+        for prefix in ("QLIB_QUANT", "QLIB_FACTOR", "QLIB_MODEL"):
+            for segment, date in script_defaults.items():
+                assert f'"{prefix}_{segment}={date}"' in unit_text, (
+                    f"{prefix}_{segment} missing or out of sync with "
+                    f"run_us_quant.sh default {date}"
+                )
 
     @pytest.mark.skipif(
         shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
