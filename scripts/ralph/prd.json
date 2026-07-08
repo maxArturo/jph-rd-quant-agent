@@ -60,8 +60,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "UNBLOCKED (2026-07-08): the Voyage AI key is now vaulted in OneCLI for host api.voyageai.com. Anthropic was already vaulted. Rerun ops/setup_onecli.sh first so rdq-research gets the Voyage secret assigned (it was skipped while unvaulted), then ops/check_onecli.sh should PASS the Voyage embedding probe. Real keys inject via the proxy; research/.env.example keeps placeholders only."
+      "passes": true,
+      "notes": "DONE 2026-07-08: Claude via LiteLLM CONFIRMED (no fallback needed). probe_llm.py exits 0 through the proxy: schema-valid JSON hypothesis from anthropic/claude-sonnet-5 + 1024-dim Voyage vector. Gotchas recorded in docs/decisions.md and research/CLAUDE.md (temperature must be omitted for claude-sonnet-5; JSON mode may emit ```json fences)."
     },
     {
       "id": "US-005",

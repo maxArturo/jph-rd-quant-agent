@@ -116,3 +116,32 @@ with the "JPH NanoClaw Connection" integration; a bare proxied
 returns HTTP 200 with the page object (title "Automated AI Quant Investment").
 US-026's live bootstrap and all real Notion writes are unblocked. No remaining
 human action for Notion.
+
+## 2026-07-08 — LLM backend probe outcome: Claude via LiteLLM CONFIRMED (US-004)
+
+**Decision:** RD-Agent's LLM backend is confirmed as
+`CHAT_MODEL=anthropic/claude-sonnet-5` + `EMBEDDING_MODEL=voyage/voyage-3.5-lite`,
+both through LiteLLM 1.91.0 (the version rdagent's pin installs) and the
+OneCLI proxy under the `rdq-research` identity. No fallback provider needed.
+
+**Evidence** (`onecli run --agent rdq-research -- .venv/bin/python
+research/probe_llm.py`, exit 0):
+- Chat: JSON-mode (`response_format={"type": "json_object"}`) hypothesis
+  prompt returned a JSON object that validates against the probe's
+  hypothesis schema (`hypothesis`/`rationale`/`confidence`).
+- Embeddings: one `voyage/voyage-3.5-lite` call returned a 1024-dim float
+  vector end-to-end through the proxy.
+
+**Behaviors found (encode these in later stories):**
+- LiteLLM rejects `temperature` != 1 for `claude-sonnet-5`
+  (`UnsupportedParamsError` — it treats it as a reasoning model). Omit the
+  parameter (or set `litellm.drop_params = True`) anywhere RD-Agent configs
+  let us control it.
+- Anthropic JSON mode via LiteLLM may still wrap the object in ```json
+  fences; parse tolerantly (see `extract_json_object` in
+  `research/probe_llm.py`).
+- Placeholder API keys work: the proxy overrides auth headers, so
+  `ANTHROPIC_API_KEY`/`VOYAGE_API_KEY` only need to be non-empty client-side
+  (`research/.env.example` documents this).
+- `onecli run` injects `HTTPS_PROXY` + `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`
+  etc.; LiteLLM's httpx stack honors them with no extra wiring.

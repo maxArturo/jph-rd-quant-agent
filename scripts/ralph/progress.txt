@@ -9,6 +9,7 @@ Started: (not yet started)
 - Paper trading only: no rdq-exec-live identity, no code path targeting api.alpaca.markets.
 - Proxied calls from scripts: `onecli run --agent <identifier> -- curl ...`; banner on stderr, command stdout clean. See ops/CLAUDE.md for onecli CLI gotchas (UUID vs identifier, set-secrets replaces list).
 - All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
+- LLM calls go through LiteLLM under `onecli run` (placeholder keys OK — proxy overrides headers). claude-sonnet-5 rejects temperature!=1; JSON mode may return ```json fences. See research/CLAUDE.md.
 
 ## 2026-07-07 20:20 - US-001
 - Implemented repo scaffold: orchestrator/, execution/, research/, data/, ops/, docs/reference/, tests/ (packages get __init__.py; non-package dirs get .gitkeep)
@@ -69,4 +70,19 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - OneCLI can inject auth for a host via a *connector integration* that never shows in `onecli secrets list`. Prove auth by making a real proxied request (200 vs 401), not by grepping the secrets list.
   - A valid Notion integration token != page access. GET the parent page: 404 object_not_found means the page isn't shared with the integration yet (Notion UI: page -> ... -> Connections). Parent page is now SHARED — GET /v1/pages/<id> returns 200 (verified 2026-07-08). No human blocker remains for Notion.
   - Slack tokens intentionally bypass OneCLI (chat-scoped, PLAN.md-sanctioned exception). Read them from .env; never add them to the vault.
+---
+## 2026-07-08 19:45 - US-004
+- LLM backend probe: Claude via LiteLLM CONFIRMED end-to-end through the OneCLI proxy; no fallback provider needed. Outcome + gotchas recorded in docs/decisions.md.
+- Files: research/.env.example (CHAT_MODEL=anthropic/claude-sonnet-5, EMBEDDING_MODEL=voyage/voyage-3.5-lite, placeholder keys, zero OpenAI vars), research/probe_llm.py (JSON-mode hypothesis prompt validated against a jsonschema + one Voyage embedding call; exit 0/1), tests/test_probe_llm.py (18 tests total in repo now; helpers + .env.example contract), research/CLAUDE.md (new), docs/decisions.md (probe outcome entry).
+- Pre-step per story notes: reran ops/setup_onecli.sh — rdq-research now has 3 secrets (Anthropic, Voyage, FMP); ops/check_onecli.sh PASSes the Voyage probe (HTTP 200). Only remaining check FAIL is the known-false-alarm Notion vault check (connector-injected auth, see US-026 notes).
+- Verified: `onecli run --agent rdq-research -- .venv/bin/python research/probe_llm.py` → "PASS chat [anthropic/claude-sonnet-5]: schema-valid hypothesis (confidence=0.62)" + "PASS embedding [voyage/voyage-3.5-lite]: 1024-dim vector", exit 0. make check green (ruff pass, pyright 0 errors, 18 pytest passed).
+- **Learnings for future iterations:**
+  - LiteLLM 1.91.0 raises UnsupportedParamsError for temperature!=1 on claude-sonnet-5 (treats it as a reasoning model) — omit temperature or set litellm.drop_params=True. Will matter when configuring RD-Agent itself (US-017).
+  - Anthropic JSON mode via LiteLLM can still return ```json-fenced output; parse tolerantly (research/probe_llm.extract_json_object) and budget max_tokens (a truncated reply = invalid JSON).
+  - Proxy header injection OVERRIDES client-sent auth headers — placeholder ANTHROPIC_API_KEY/VOYAGE_API_KEY values work fine through onecli run.
+  - `onecli run` injects HTTPS_PROXY + SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE etc.; httpx (LiteLLM) needs no extra wiring.
+  - Voyage voyage-3.5-lite returns 1024-dim vectors.
+  - `import litellm` takes seconds — import it lazily inside functions so offline tests/pyright stay fast.
+  - ops/check_onecli.sh short-circuits to FAIL when a host has no vault secret — it never probes connector-injected hosts like api.notion.com. If US-026 wants that check green, teach it to probe regardless of vault state (decisions.md already documents the connector).
+  - make check runs ALL pytest markers incl. `live` — any future live-marked test should self-skip (e.g. unless RDQ_LIVE_TESTS=1) or make check gets slow/flaky and burns tokens.
 ---
