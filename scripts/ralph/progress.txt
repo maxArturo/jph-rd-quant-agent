@@ -163,3 +163,14 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - systemctl --user / systemd-analyze --user need XDG_RUNTIME_DIR=/run/user/$(id -u) from agent shells (it's unset here); user units use WantedBy=default.target; StartLimitIntervalSec belongs in [Unit].
   - systemd user session on this box is healthy (`is-system-running` → running) and hosts other nanoclaw services; `Loaded: ... linked` is the expected state for ln -sfn-installed units.
   - journalctl --user -u rdq-orchestrator.service is where bot logs go; grep -v tokens when pasting.
+## 2026-07-08 20:45 - US-011
+- data/fmp.py: FmpClient for the FMP /stable API through the OneCLI proxy — get_eod_bars(symbol, start, end) hitting /historical-price-eod/full?symbol=&from=&to=, get_splits (/splits), get_dividends (/dividends). Bare HTTPS: zero apikey in code/env/params (proxy injects for rdq-research). Typed frozen dataclasses (EodBar, Split with .ratio, Dividend); all lists returned ascending by date.
+- Error handling: 429 retried honoring Retry-After (numeric) with exponential fallback (2*2^attempt) up to max_retries, then FmpRateLimitError; 401/403 raise FmpAuthError telling the operator exactly what to do (run under `onecli run --agent rdq-research`, vault+assign via ops/setup_onecli.sh, verify with check_onecli.sh); non-list JSON payloads (FMP's error-object shape) raise FmpError.
+- Files: data/fmp.py (new), tests/test_fmp.py (15 unit + 1 live), data/CLAUDE.md (new), pyproject.toml (+requests>=2.31 — was only transitively present via rdagent).
+- Verified: make check green (ruff pass, pyright 0 errors, 107 passed / 1 skipped). LIVE smoke through proxy: `RDQ_LIVE_TESTS=1 onecli run --agent rdq-research -- pytest -m live tests/test_fmp.py` → 1 passed (AAPL 2026-05-01..31 returned >15 ascending in-window bars, all closes >0).
+- **Learnings for future iterations:**
+  - Live-marked tests now follow the self-skip pattern: @pytest.mark.live + skipif RDQ_LIVE_TESTS!=1 (make check stays offline-green). Copy this for US-028's Alpaca smoke.
+  - Testability via injection, not monkeypatching: FmpClient(session=FakeSession, sleep=list.append) — reuse FakeSession/FakeResponse from tests/test_fmp.py for other HTTP clients (US-025 Notion, US-028 Alpaca).
+  - FMP /stable rows come newest-first — client sorts ascending; downstream code can rely on order.
+  - FMP closes are RAW/unadjusted; US-012 must build adjustment factors from get_splits + get_dividends (Split.ratio = numerator/denominator, e.g. 10.0 for NVDA 2024-06-10).
+  - requests was already in the venv via rdagent but NOT a declared dep — declared now. Check pyproject deps whenever importing something "already available".

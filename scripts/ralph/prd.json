@@ -169,8 +169,8 @@
         "Typecheck passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: data/fmp.py FmpClient (EOD bars /historical-price-eod/full with from/to windowing, splits, dividends; all bare HTTPS, proxy injects key). 429 honors Retry-After (exponential fallback), 401/403 raise FmpAuthError naming the onecli identity + setup script. 15 unit tests + live smoke PASSED through the proxy (AAPL May-2026, >15 rows). Live tests self-skip unless RDQ_LIVE_TESTS=1. Rows return ascending; closes are RAW — US-012 adjusts."
     },
     {
       "id": "US-012",
