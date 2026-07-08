@@ -14,7 +14,7 @@ Findings from inspecting nanoclaw and RD-Agent before writing this plan:
 2. **Gotcha:** newly registered OneCLI agents start in `selective` secret mode with **zero secrets assigned** — every new agent identity needs `onecli agents set-secrets --id <id> --secret-ids ...` (or `set-secret-mode --mode all`) or every API call 401s.
 3. **RD-Agent(Q) ships a ready-made control plane** — `rdagent server_ui` (Flask, port 19899, `rdagent/log/server/app.py`) runs research loops as subprocesses with human-in-the-loop interaction queues, exposed over HTTP: `POST /trace` (start run, `interaction: true`, seed with `user_instruction`), `GET /receive` (pending hypothesis/feedback dicts), `POST /user_interaction/submit` (apply user edits), `POST /control` (stop/resume). **Our Slack orchestrator is a thin client of this API — no RD-Agent fork needed for the interaction layer.**
 4. **RD-Agent(Q) does NOT support US equities out of the box.** Templates hardcode Qlib China A-share data (`csi300`, `SH000300`, A-share trading rules). Qlib itself supports `region: us`; the port is confined to data prep + two template directories (Phase 2). This is the single most invasive change in the plan.
-5. **RD-Agent's internal LLM is LiteLLM-based** (`CHAT_MODEL`, `OPENAI_API_BASE`, `EMBEDDING_MODEL`) and **requires JSON mode + an embedding model**. Anthropic works for chat via LiteLLM, but has no embeddings API — an OpenAI(-compatible) embedding endpoint is required regardless. Both keys go in the OneCLI vault and are injected via the proxy.
+5. **RD-Agent's internal LLM is LiteLLM-based** (`CHAT_MODEL`, `EMBEDDING_MODEL`) and **requires JSON mode + an embedding model**. Anthropic works for chat via LiteLLM, but has no embeddings API — a separate embedding provider is required regardless. *Decided: Voyage AI* (`voyage/voyage-3.5-lite`, LiteLLM-native, Anthropic's recommended embedding partner; zero droplet RAM vs. ~0.5–1.2GB for a self-hosted embedder, and effectively free at our call volume — 200M-token free tier). No OpenAI dependency anywhere. Both keys (Anthropic + Voyage) go in the OneCLI vault and are injected via the proxy.
 6. RD-Agent runs experiments in **Docker** (auto-built `local_qlib:latest`, `qrun` backtests inside), so everything here runs as **host processes** — no container orchestration layer at all in v1. MIT licensed; upstream activity has slowed in 2026 but the quant scenario is stable — **pin a commit**.
 7. **Reference patterns to copy out of nanoclaw** (into `docs/reference/` or directly into our code, while the repo is still available):
    - Alpaca raw-fetch client with paper/live split + deterministic order gate: `container/agent-runner/src/mcp-servers/alpaca/` (`server.ts`, `gate.ts`, `policy/limits.{paper,live}.json`)
@@ -85,7 +85,7 @@ rd-agent-q/
 | Identity | Secrets assigned | Used by |
 |---|---|---|
 | `rdq-orchestrator` | Anthropic, Notion, Alpaca **paper** (read-mostly) | Slack bot / Claude layer |
-| `rdq-research` | Anthropic (chat, via LiteLLM) + OpenAI-compatible embedding key + FMP (data builds) | RD-Agent service + data pipeline |
+| `rdq-research` | Anthropic (chat, via LiteLLM) + Voyage embedding key + FMP (data builds) | RD-Agent service + data pipeline |
 | `rdq-exec-paper` | Alpaca **paper** | rebalancer (default) |
 | `rdq-exec-live` | Alpaca **live** | rebalancer, only after Phase 6 sign-off |
 
@@ -115,15 +115,15 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 
 1. Scaffold this repo (layout above); vendor or pip-pin RD-Agent at the current stable commit; Python ≥3.10 venv.
 2. Register OneCLI identities (table above); vault the LLM keys; assign secrets (remember the selective-mode gotcha).
-3. RD-Agent `.env`: `CHAT_MODEL`, `EMBEDDING_MODEL`, `OPENAI_API_BASE`, placeholder `OPENAI_API_KEY` (proxy injects the real one), `WORKSPACE_PATH`, `LOG_TRACE_PATH`. Launch pattern: `onecli run --agent rdq-research -- rdagent ...`.
-   - *Decided:* RD-Agent's internal chat model is **Claude via LiteLLM**. Phase 0 includes a spike verifying LiteLLM JSON-mode behavior with Claude on RD-Agent's hypothesis prompts; an OpenAI-compatible **embedding** endpoint is still required (Anthropic has none). If the spike fails, fall back to an OpenAI chat model internally.
+3. RD-Agent `.env`: `CHAT_MODEL=anthropic/claude-sonnet-5`, `EMBEDDING_MODEL=voyage/voyage-3.5-lite`, placeholder `ANTHROPIC_API_KEY` + `VOYAGE_API_KEY` (proxy injects the real ones), `WORKSPACE_PATH`, `LOG_TRACE_PATH`. Launch pattern: `onecli run --agent rdq-research -- rdagent ...`.
+   - *Decided:* RD-Agent's internal chat model is **Claude via LiteLLM**. Phase 0 includes a spike verifying LiteLLM JSON-mode behavior with Claude on RD-Agent's hypothesis prompts; a separate **embedding** provider is still required (Anthropic has none) — *decided: Voyage AI* (see finding #5; no OpenAI anywhere). If the JSON-mode spike fails, the fallback is another LiteLLM-supported chat provider — document the failing behavior in `docs/decisions.md` before switching.
    - **Model-tier policy (match model to stakes):**
      | Workload | Model | Why |
      |---|---|---|
      | Orchestrator conversational layer — directive refinement, hypothesis relay/edit synthesis, promotion & trade-approval context | `claude-fable-5` | High-stakes judgment; ship with server-side fallback to `claude-opus-4-8` (`fallbacks` param + `server-side-fallback-2026-06-01` beta) and `stop_reason: "refusal"` handling. Note: Fable 5 requires the org to have ≥30-day data retention. |
      | RD-Agent internal loop (`CHAT_MODEL=anthropic/claude-sonnet-5`) — hypothesis gen + Co-STEER code evolution | `claude-sonnet-5` | High call volume, mostly code generation; near-Opus coding quality at ~⅓ the cost of Fable. RD-Agent has one global `CHAT_MODEL`; a LiteLLM-router split (Fable for hypothesis prompts, Sonnet for coding) is a possible later refinement, not v1. |
      | Orchestrator utility calls — Slack formatting, loop-log summarization for thread updates, ticker-list extraction | `claude-haiku-4-5` | Cheap, fast, no judgment required. |
-     | Embeddings (RD-Agent requirement) | OpenAI-compatible endpoint | Anthropic has no embeddings API. |
+     | Embeddings (RD-Agent requirement) | `voyage/voyage-3.5-lite` (Voyage AI) | Anthropic has no embeddings API; Voyage is its recommended partner, LiteLLM-native, no OpenAI dependency. |
 4. `rdagent health_check` (Docker sudo-less, ports free). First run downloads cn_data + builds `local_qlib:latest` — slow; budget for it.
 5. **Milestone:** `rdagent fin_factor --loop_n 1` completes on default China data; trace visible in `rdagent ui`.
 

@@ -10,7 +10,7 @@ The repo must be **independent of nanoclaw** — nanoclaw is reference material 
 
 **Key decisions (settled):**
 - PRD scope: the entire plan, **but live trading is out of scope** (paper only; live enablement gets its own PRD).
-- RD-Agent's internal LLM: **Claude via LiteLLM**, with an OpenAI-compatible embedding endpoint (Anthropic has no embeddings API). Phase 0 spike verifies JSON-mode; documented fallback is an OpenAI chat model.
+- RD-Agent's internal LLM: **Claude via LiteLLM**, with **Voyage AI** for embeddings (`voyage/voyage-3.5-lite` — Anthropic has no embeddings API; no OpenAI anywhere, see docs/decisions.md 2026-07-07). Phase 0 spike verifies JSON-mode; documented fallback is another LiteLLM-supported chat provider.
 - **Model tiers — match model to stakes** (exact IDs; do not add date suffixes):
   - `claude-fable-5` — orchestrator conversational layer only (high-stakes judgment: directive refinement, hypothesis relay/edits, promotion and trade-approval context). Always paired with server-side fallback to `claude-opus-4-8` and `stop_reason: "refusal"` handling; requires org data retention ≥30 days.
   - `claude-sonnet-5` — RD-Agent internal loop (`CHAT_MODEL=anthropic/claude-sonnet-5`): high-volume hypothesis/code generation, near-Opus coding quality at ~⅓ Fable's price.
@@ -54,9 +54,9 @@ Ordered = implementation order. Stories marked **[gate]** block everything after
 **Description:** As a developer, I want to verify RD-Agent's loop works with Claude as `CHAT_MODEL` before building on it.
 
 **Acceptance Criteria:**
-- [ ] `research/.env` sets `CHAT_MODEL=anthropic/claude-sonnet-5`, an embedding endpoint (`EMBEDDING_MODEL=...`), and OneCLI-proxy env; placeholder API keys only
+- [ ] `research/.env` sets `CHAT_MODEL=anthropic/claude-sonnet-5`, `EMBEDDING_MODEL=voyage/voyage-3.5-lite`, and OneCLI-proxy env; placeholder API keys only (`ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`)
 - [ ] A scripted probe exercises RD-Agent's LLM path (JSON-mode hypothesis-shaped prompt) and gets schema-valid JSON back through LiteLLM
-- [ ] Outcome recorded in `docs/decisions.md`: Claude confirmed, OR fallback to an OpenAI chat model documented with the failing behavior
+- [ ] Outcome recorded in `docs/decisions.md`: Claude confirmed, OR fallback to another LiteLLM-supported chat provider documented with the failing behavior
 - [ ] Embedding call verified end-to-end through the OneCLI proxy
 
 #### US-004: [gate] Vanilla RD-Agent loop completes
@@ -330,7 +330,7 @@ Ordered = implementation order. Stories marked **[gate]** block everything after
 ## 9. Open Questions
 
 1. **FMP tier coverage:** does the current FMP plan include the adjusted-EOD variant and enough request volume for a ~1000-ticker, 10-year backfill? (Verify in US-008 before hardening the design; fallback is computing adjustment factors from splits/dividends endpoints.)
-2. **Claude JSON-mode via LiteLLM:** US-003 spike outcome — if RD-Agent's stricter JSON-mode paths misbehave with Claude, is the fallback OpenAI model acceptable long-term, or do we patch prompts via `APP_TPL`?
+2. **Claude JSON-mode via LiteLLM:** US-003 spike outcome — if RD-Agent's stricter JSON-mode paths misbehave with Claude, do we fall back to another LiteLLM-supported chat provider, or patch prompts via `APP_TPL`?
 3. **Slack tokens through OneCLI:** injection for `slack.com` Web API + `apps.connections.open` is plausible but unverified (US-005).
 4. **OneCLI approvals API shape** for a non-nanoclaw client (US-022) — endpoint semantics for submitting an approval decision need confirmation against the running gateway version.
 5. **Universe minimum size:** default warning threshold is 30 names — tune after the first few sector runs?

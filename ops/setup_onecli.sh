@@ -5,7 +5,7 @@
 #
 # Identities created:
 #   rdq-orchestrator  Anthropic + Notion + Alpaca paper  (Slack bot / Claude layer)
-#   rdq-research      Anthropic + embeddings + FMP       (RD-Agent + data pipeline)
+#   rdq-research      Anthropic + Voyage embeddings + FMP (RD-Agent + data pipeline)
 #   rdq-exec-paper    Alpaca paper                       (nightly rebalancer)
 #
 # Deliberately NO rdq-exec-live: live trading is out of scope for this repo.
@@ -33,7 +33,7 @@ declare -A IDENTITY_NAMES=(
 # identity -> space-separated host patterns whose vault secrets it gets
 declare -A IDENTITY_HOSTS=(
   [rdq-orchestrator]="api.anthropic.com api.notion.com paper-api.alpaca.markets"
-  [rdq-research]="api.anthropic.com api.openai.com financialmodelingprep.com"
+  [rdq-research]="api.anthropic.com api.voyageai.com financialmodelingprep.com"
   [rdq-exec-paper]="paper-api.alpaca.markets"
 )
 

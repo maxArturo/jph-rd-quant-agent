@@ -53,15 +53,15 @@
       "title": "LLM backend probe (Claude via LiteLLM + embeddings)",
       "description": "As a developer, I want a scripted probe of RD-Agent's LLM path so the Claude-via-LiteLLM decision is verified before anything depends on it.",
       "acceptanceCriteria": [
-        "research/.env.example sets CHAT_MODEL=anthropic/claude-sonnet-5, EMBEDDING_MODEL, OPENAI_API_BASE, and placeholder keys (real values injected by OneCLI proxy)",
+        "research/.env.example sets CHAT_MODEL=anthropic/claude-sonnet-5, EMBEDDING_MODEL=voyage/voyage-3.5-lite, and placeholder ANTHROPIC_API_KEY + VOYAGE_API_KEY (real values injected by OneCLI proxy; no OpenAI variables anywhere)",
         "research/probe_llm.py sends a JSON-mode hypothesis-shaped prompt through LiteLLM and validates the response against a JSON schema; exits 0 on success",
-        "probe_llm.py also performs one embedding call end-to-end through the proxy and asserts a non-empty vector",
-        "Probe outcome (Claude confirmed, or documented fallback to an OpenAI chat model with the failing behavior) recorded in docs/decisions.md",
+        "probe_llm.py also performs one Voyage embedding call (voyage/voyage-3.5-lite via LiteLLM) end-to-end through the proxy and asserts a non-empty vector",
+        "Probe outcome (Claude confirmed, or documented fallback to another LiteLLM-supported chat provider with the failing behavior) recorded in docs/decisions.md",
         "Typecheck passes"
       ],
       "priority": 4,
       "passes": false,
-      "notes": ""
+      "notes": "UNBLOCKED (2026-07-08): the Voyage AI key is now vaulted in OneCLI for host api.voyageai.com. Anthropic was already vaulted. Rerun ops/setup_onecli.sh first so rdq-research gets the Voyage secret assigned (it was skipped while unvaulted), then ops/check_onecli.sh should PASS the Voyage embedding probe. Real keys inject via the proxy; research/.env.example keeps placeholders only."
     },
     {
       "id": "US-005",
@@ -84,15 +84,15 @@
       "description": "As an operator, I want a bot connected to #quant-research over Socket Mode so I can talk to the system with no inbound port.",
       "acceptanceCriteria": [
         "orchestrator/app.py starts a Bolt-for-Python Socket Mode app; channel and thread messages reach a handler; handler can reply in-thread",
-        "Token source decided and implemented: OneCLI injection for slack.com verified, else repo-local .env fallback; the decision and evidence recorded in docs/decisions.md",
-        "Config loading (channel id, tokens source) lives in orchestrator/config.py",
+        "Token source DECIDED: repo-local .env fallback (chat tokens only, not brokerage keys — acceptable per PLAN.md). Read SLACK_OAUTH_TOKEN (xoxb- bot token) and SLACK_SOCKET_TOKEN (xapp- app-level token) from the repo-root .env; .env is gitignored and must never be committed. Do NOT route Slack through the OneCLI proxy. Record the decision and rationale in docs/decisions.md",
+        "Config loading (channel id, token source) lives in orchestrator/config.py; loads the two tokens from .env and the target channel from SLACK_CHANNEL_ID (see story notes) with a clear error if unset",
         "Unit tests with a mocked Slack client cover message routing (channel message -> handler, thread reply targets thread_ts)",
         "Tests pass",
         "Typecheck passes"
       ],
       "priority": 6,
       "passes": false,
-      "notes": ""
+      "notes": "UNBLOCKED (2026-07-08): Slack app installed; bot + app tokens are in the repo-root .env as SLACK_OAUTH_TOKEN (xoxb-) and SLACK_SOCKET_TOKEN (xapp-). Use those exact names. .env is now gitignored — keep it that way. HUMAN INPUT STILL NEEDED before the live-Slack smoke test: (1) the #quant-research channel id (add SLACK_CHANNEL_ID to .env), (2) the bot invited to that channel, (3) app scopes chat:write + channels:history + reactions:write, plus files:write (needed later for US-022 chart uploads). Unit tests with a mocked Slack client do not need any of these and are the story's pass criteria."
     },
     {
       "id": "US-007",
@@ -403,7 +403,7 @@
       ],
       "priority": 26,
       "passes": false,
-      "notes": ""
+      "notes": "Parent page provided by operator: 'Automated AI Quant Investment', page id 3979b1a4-36cf-8046-baa5-cc14c1ca7665 (URL https://app.notion.com/p/Automated-AI-Quant-Investment-3979b1a436cf8046baa5cc14c1ca7665). bootstrap_notion.py must create the five DBs under this page (make it configurable, default to this id). AUTH: Notion is injected by OneCLI via a connector integration ('JPH NanoClaw Connection'), NOT a vaulted secret — bare proxied GET /v1/users/me as rdq-orchestrator returns 200 (verified 2026-07-08). It does NOT show in `onecli secrets list`, so setup_onecli.sh prints a harmless WARN about no api.notion.com secret — ignore it; do not vault a Notion key. Parent page is SHARED with the integration (verified 2026-07-08: bare proxied GET /v1/pages/<id> as rdq-orchestrator returns 200 with the page object). No human blocker remains for Notion — the live bootstrap and real writes are fully unblocked."
     },
     {
       "id": "US-027",

@@ -19,15 +19,17 @@ ONECLI_URL="${ONECLI_URL:-http://127.0.0.1:10254}"
 LIVE_ALPACA_URL="https://api.alpaca.markets/v2/account"
 CURL_TIMEOUT=30
 
-# identity|host pattern|probe URL|optional extra header
+# identity|host pattern|probe URL|optional extra header|optional POST body
+# (Voyage has no GET endpoint, so its auth check is a minimal 1-token
+# embedding POST — free-tier cost is negligible.)
 CHECKS=(
-  "rdq-orchestrator|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01"
-  "rdq-orchestrator|api.notion.com|https://api.notion.com/v1/users/me|Notion-Version: 2022-06-28"
-  "rdq-orchestrator|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account|"
-  "rdq-research|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01"
-  "rdq-research|api.openai.com|https://api.openai.com/v1/models|"
-  "rdq-research|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL|"
-  "rdq-exec-paper|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account|"
+  "rdq-orchestrator|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01|"
+  "rdq-orchestrator|api.notion.com|https://api.notion.com/v1/users/me|Notion-Version: 2022-06-28|"
+  "rdq-orchestrator|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account||"
+  "rdq-research|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01|"
+  "rdq-research|api.voyageai.com|https://api.voyageai.com/v1/embeddings|Content-Type: application/json|{\"model\":\"voyage-3.5-lite\",\"input\":\"ping\"}"
+  "rdq-research|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"
+  "rdq-exec-paper|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account||"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -41,10 +43,12 @@ agents_json=$(onecli agents list) || die "onecli agents list failed"
 secrets_json=$(onecli secrets list) || die "onecli secrets list failed"
 
 # Proxied request via the identity; prints the HTTP status code only.
-probe() { # probe <identity> <url> [extra-header]
-  local identity=$1 url=$2 header=${3:-}
+# A non-empty <post-body> switches the request to POST with that JSON body.
+probe() { # probe <identity> <url> [extra-header] [post-body]
+  local identity=$1 url=$2 header=${3:-} body=${4:-}
   local args=(-s -o /dev/null -w '%{http_code}' --max-time "$CURL_TIMEOUT")
   [[ -n "$header" ]] && args+=(-H "$header")
+  [[ -n "$body" ]] && args+=(-X POST -d "$body")
   onecli run --agent "$identity" -- curl "${args[@]}" "$url" 2>/dev/null
 }
 
@@ -72,7 +76,7 @@ assigned_for() { # assigned_for <identity> -> newline-separated secret ids
 }
 
 for check in "${CHECKS[@]}"; do
-  IFS='|' read -r identity host url header <<<"$check"
+  IFS='|' read -r identity host url header body <<<"$check"
   label="$identity -> $host"
 
   assigned=$(assigned_for "$identity")
@@ -100,7 +104,7 @@ for check in "${CHECKS[@]}"; do
     continue
   fi
 
-  code=$(probe "$identity" "$url" "$header")
+  code=$(probe "$identity" "$url" "$header" "$body")
   case "$code" in
     2??) echo "PASS  $label  (HTTP $code)" ;;
     401 | 403)

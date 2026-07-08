@@ -35,10 +35,10 @@ onecli agents set-secrets --id <agent-id> --secret-ids <id1>,<id2>,...
 | Identity | Needs secrets for |
 |---|---|
 | `rdq-orchestrator` | Anthropic (`api.anthropic.com`), Notion (`api.notion.com`), Alpaca **paper** (`paper-api.alpaca.markets`), Slack (`slack.com`, if OneCLI injection works — see step 3) |
-| `rdq-research` | Anthropic, OpenAI-compatible **embedding** endpoint, FMP (`financialmodelingprep.com`) |
+| `rdq-research` | Anthropic, Voyage **embedding** key (`api.voyageai.com`), FMP (`financialmodelingprep.com`) |
 | `rdq-exec-paper` | Alpaca **paper** only. Deliberately NOT live keys, NOT anything else. |
 
-- [ ] Vault the embedding-endpoint key if not already present (Anthropic has no embeddings API).
+- [ ] Vault the Voyage embedding key (`VOYAGE_API_KEY`, host `api.voyageai.com`) if not already present (Anthropic has no embeddings API; Voyage decided 2026-07-07 — see docs/decisions.md).
 - [ ] Confirm **no** `rdq-exec-live` identity exists and no live Alpaca secret is assigned anywhere.
 - [ ] Confirm the Anthropic org has **≥30-day data retention** (Fable 5 400s under ZDR).
 - [ ] After assignment, `ops/check_onecli.sh` should exit 0 — including the check that

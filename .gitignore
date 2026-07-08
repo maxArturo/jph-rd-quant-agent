@@ -5,3 +5,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 orchestrator/state.sqlite
+
+# Secrets — Slack chat tokens live here (documented .env fallback; OneCLI
+# handles every other credential). Never commit real tokens.
+.env
+research/.env
