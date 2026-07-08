@@ -11,6 +11,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="${HOME}/.config/systemd/user"
 UNITS=(
   rdq-orchestrator.service
+  rdq-research.service
 )
 
 mkdir -p "$UNIT_DIR"

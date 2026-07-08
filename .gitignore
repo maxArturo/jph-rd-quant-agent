@@ -14,3 +14,7 @@ research/.env
 # rdagent writes CWD-relative log traces + selector.log on every invocation
 /log/
 selector.log
+# rdagent ui/server_ui default CWD-relative state dir (production points
+# UI_TRACE_FOLDER/UI_STATIC_PATH outside the repo; this guards manual runs)
+/git_ignore_folder/
+

@@ -277,8 +277,8 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: ops/rdq-research.service live and ENABLED (active (running); curl / -> 404 HTTP response, /test -> 200 JSON; ss shows 127.0.0.1:19899 only). KEY FINDING: upstream `rdagent server_ui` main() binds 0.0.0.0 — unit launches research/server_ui.py, a loopback-forced replica of main() (pinned tree unmodified). UI_TRACE_FOLDER/UI_STATIC_PATH -> ~/rdq-runs/server_ui/. NO_PROXY=127.0.0.1,localhost,100.64.0.0/10. Not in tailscale serve (verified live). install_services.sh updated; 24 unit tests incl. subprocess end-to-end bind check."
     },
     {
       "id": "US-019",

@@ -1,0 +1,45 @@
+# RD-Agent(Q) research control plane — systemd user unit (US-018).
+#
+# Runs the rdagent server_ui Flask control API (POST /trace, GET /receive,
+# POST /user_interaction/submit, POST /control) on 127.0.0.1:19899 under the
+# rdq-research OneCLI identity, so the research loops it spawns get
+# Anthropic/Voyage/FMP auth injected by the proxy (http://127.0.0.1:10254).
+#
+# NOT exposed via tailscale serve — per the PLAN.md port table, server_ui has
+# known flask-cors advisories and stays dark: the orchestrator talks to it
+# over localhost only. The human-facing trace viewer (`rdagent ui`, :19900)
+# is the only research UI ever exposed, and then tailnet-only (US-042);
+# nothing on this box is ever exposed with `tailscale funnel`.
+#
+# Upstream `rdagent server_ui` binds 0.0.0.0; research/server_ui.py replicates
+# its main() bound to loopback (the pinned upstream tree stays unmodified).
+#
+# Install:  ops/install_services.sh
+# Start:    systemctl --user enable --now rdq-research.service
+# Logs:     journalctl --user -u rdq-research.service -f
+
+[Unit]
+Description=RD-Agent(Q) research control plane (rdagent server_ui on 127.0.0.1:19899 via rdq-research OneCLI identity)
+After=network-online.target
+Wants=network-online.target
+# Never park the unit in a permanent 'failed' state during longer gateway
+# outages; RestartSec below paces the retries.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/rd-agent-q
+# onecli run injects HTTPS_PROXY process-wide, and onecli preserves a pre-set
+# NO_PROXY. Loopback control traffic (orchestrator -> :19899, spawned loops ->
+# local mlflow/qlib services) and tailnet peers (100.64.0.0/10 CGNAT range)
+# must not transit the OneCLI proxy.
+Environment="NO_PROXY=127.0.0.1,localhost,100.64.0.0/10" "no_proxy=127.0.0.1,localhost,100.64.0.0/10"
+# server_ui state lives outside the repo; rdagent.log.ui.conf reads these at
+# import time (UI_ env prefix). research/server_ui.py creates both dirs.
+Environment="UI_TRACE_FOLDER=%h/rdq-runs/server_ui/traces" "UI_STATIC_PATH=%h/rdq-runs/server_ui/static"
+ExecStart=%h/.local/bin/onecli run --agent rdq-research -- %h/rd-agent-q/.venv/bin/python -m research.server_ui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

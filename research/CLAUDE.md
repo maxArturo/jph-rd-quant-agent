@@ -58,3 +58,9 @@
   `ModelBasePropSetting()` and render workspace conf jinja vars from
   `QLIB_FACTOR_*` / `QLIB_MODEL_*`. Export the SAME dates under all three
   prefixes (ops/run_us_quant.sh does) or runs silently backtest on CN defaults.
+- server_ui: launch via `python -m research.server_ui` (or
+  ops/rdq-research.service), NEVER `rdagent server_ui` directly — upstream
+  `main()` binds Flask to 0.0.0.0; the wrapper forces 127.0.0.1. The `UI_`
+  env vars (UI_TRACE_FOLDER, UI_STATIC_PATH) are read at import time of
+  `rdagent.log.ui.conf` and default to CWD-relative `./git_ignore_folder/` —
+  set them (the unit points at ~/rdq-runs/server_ui/) before import.
