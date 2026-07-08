@@ -122,8 +122,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: orchestrator/llm.py ModelRouter — judgment() streams claude-fable-5 with betas=[server-side-fallback-2026-06-01] + fallbacks=[claude-opus-4-8], no thinking param, RefusalError raised before content is read; utility() = claude-haiku-4-5; judgment_tool_loop() executes ToolSpec handlers until end_turn (handler errors -> is_error tool_result). 13 unit tests incl. a grep test enforcing model IDs live only in llm.py. LIVE-verified through OneCLI proxy: all three paths returned end_turn (fable-5 access + fallback beta confirmed working with the vaulted key)."
     },
     {
       "id": "US-009",

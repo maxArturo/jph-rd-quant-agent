@@ -16,6 +16,17 @@
   → `DuplicateRunError`; pending_interactions.interaction_key UNIQUE → insert
   returns `None`), so restarts can't double-post.
 
+- All orchestrator LLM calls go through `orchestrator/llm.py` (`ModelRouter`):
+  `judgment()` = claude-fable-5 (streamed, server-side refusal fallback to
+  opus-4-8), `utility()` = claude-haiku-4-5, `judgment_tool_loop()` for tool
+  use. Model IDs must not appear anywhere else — tests/test_llm.py greps for
+  them. Never pass a `thinking` parameter (fable-5 400s on any explicit
+  config). Refusals surface as `RefusalError`; check `stop_reason` before
+  reading `content` on any hand-rolled call. `ModelRouter(client=...)` accepts
+  a fake client for tests (see FakeClient in tests/test_llm.py — stub
+  `client.beta.messages.stream` as a context manager with
+  `get_final_message()`, and `client.messages.create`).
+
 ## Testing Bolt apps (see tests/test_slack_app.py)
 
 - Bolt >=1.15 constructs a NEW real `WebClient` per request in
