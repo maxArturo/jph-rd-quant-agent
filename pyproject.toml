@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26",
     "pyqlib>=0.9.7",
     "pyyaml>=6.0",
+    "jinja2>=3.1",
 ]
 
 [build-system]
@@ -35,7 +36,9 @@ markers = [
 
 [tool.pyright]
 include = ["orchestrator", "execution", "research", "data", "ops", "tests"]
-exclude = ["**/__pycache__", ".venv"]
+# research/us_templates holds byte-identical upstream file copies (enforced by
+# tests/test_us_templates.py) — never lint/typecheck or "fix" them.
+exclude = ["**/__pycache__", ".venv", "research/us_templates"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
@@ -44,7 +47,7 @@ pythonVersion = "3.10"
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-extend-exclude = [".venv"]
+extend-exclude = [".venv", "research/us_templates"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

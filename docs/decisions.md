@@ -175,3 +175,51 @@ story cares about) and hard-asserts what upstream only logs as warnings
 (sudo-less docker, port 19899 free, onecli gateway + rdq-research identity).
 The LLM leg is covered separately and better by `research/probe_llm.py`
 through the proxy (US-004).
+
+## 2026-07-08 — US templates + APP_TPL prompt overrides (US-016)
+
+**Goal:** point RD-Agent's qlib scenario at US data without editing the pinned
+upstream tree. Two mechanisms: (1) full copies of the two workspace template
+folders under `research/us_templates/` with US values patched in, (2) partial
+prompt overrides under `research/app_tpl/` loaded via RD-Agent's `APP_TPL`
+setting (env var `APP_TPL`, `RDAgentSettings.app_tpl` — no env prefix).
+
+**Grep audit for A-share-specific language** (pinned rdagent 4f9ecb00;
+`grep -riE 'csi|a-share|china|chinese|SH000300|cn_data|yuan|RMB' --include='*.yaml'`
+over `rdagent/scenarios/qlib`, `rdagent/components/coder`,
+`rdagent/app/qlib_rd_loop`):
+
+| location | finding | handling |
+|---|---|---|
+| `experiment/factor_template/*.yaml`, `experiment/model_template/*.yaml` (5 files) | `cn_data`, `csi300`, `SH000300`, `limit_threshold: 0.095`, CN costs | patched copies in `research/us_templates/` |
+| `experiment/prompts.yaml` → `qlib_factor_experiment_setting`, `qlib_model_experiment_setting` | "CSI300" dataset row in the experiment-setting tables | overridden in `research/app_tpl/scenarios/qlib/experiment/prompts.yaml` ("US stocks (us_liquid universe)") |
+| `factor_experiment_loader/prompts.yaml` → `factor_viability_system`, `factor_relevance_system`, `factor_duplicate_system` | "daily frequency strategy in China A-share market" | overridden in `research/app_tpl/scenarios/qlib/factor_experiment_loader/prompts.yaml` ("the US equity market") |
+| `factor_experiment_loader/prompts.yaml` → `classify_system_chinese` | Chinese-language classifier prompt | NOT overridden — dead code; only `classify_system` is referenced (`pdf_loader.py`) |
+| everything else (incl. top-level `scenarios/qlib/prompts.yaml`, factor/model coder prompts) | no matches | — |
+
+**Template YAML decisions:**
+- **Benchmark `SPY`** (S&P 500 ETF), not the `^GSPC` index: qlib resolves the
+  benchmark as an instrument in the store, and `SPY` flows through the existing
+  FMP bars/splits/dividends pipeline like any stock symbol. Consequence: the
+  us_data store build must include `SPY` (US-017 checks this).
+- **Costs:** `open_cost: 0.0005`, `close_cost: 0.0005` (5 bps/side as a
+  spread+slippage proxy; Alpaca is commission-free so a symmetric estimate
+  replaces CN's asymmetric commission+stamp-duty 5/15 bps), `min_cost: 0`
+  (no per-order minimum). `deal_price: close` and `account` unchanged.
+- **`limit_threshold` removed** (A-share ±10 % daily price limit); qlib's
+  `region: us` defaults it to `None`, and `trade_unit` to 1 (no board lots).
+
+**APP_TPL mechanics (verified live):** `load_content()` prepends
+`<app_tpl>/scenarios/qlib/.../prompts.yaml` to the search list; an absolute
+`APP_TPL` path works (`Path / absolute-str` yields the absolute path). A
+missing key in the override file raises `KeyError` internally and falls
+through to upstream — so override files hold ONLY the overridden keys.
+Regenerate overrides after a re-pin by re-extracting the keys from upstream
+and re-applying the phrase substitutions above (tests re-audit the text).
+
+**Consumption note for US-017/US-023:** `APP_TPL` does NOT cover the workspace
+template folders — `QlibFactorExperiment`/`QlibModelExperiment` hardcode
+`Path(__file__).parent / "factor_template"`. The supported hook is the
+`QLIB_QUANT_*` env-configurable class paths in `rdagent/app/qlib_rd_loop/conf.py`
+(e.g. point `scen`/`*_hypothesis2experiment` at small subclasses in our repo
+that construct `QlibFBWorkspace` with `research/us_templates/...`).

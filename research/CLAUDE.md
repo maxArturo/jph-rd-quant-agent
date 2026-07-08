@@ -24,3 +24,22 @@
   rdagent. Re-run `research/install.sh` after any pip operation that touches
   pydantic-ai; `tests/test_run_vanilla_factor.py::test_rdagent_cli_importable`
   guards the regression.
+
+## US-market customization (never edit the pinned rdagent tree)
+
+- `us_templates/` = patched copies of the two upstream workspace template
+  folders. Only `conf_*.yaml` differ; `read_exp_res.py`/`README.md` must stay
+  byte-identical to upstream (tests enforce it) — the dirs are excluded from
+  ruff/pyright in pyproject.toml for that reason. Never run autofixers there.
+- `app_tpl/` = partial prompt overrides loaded via the `APP_TPL` env var
+  (`RDAgentSettings.app_tpl`, no env prefix; an absolute path works). Override
+  files hold ONLY the overridden keys — rdagent's `load_content` falls through
+  to upstream on missing keys. Mirror the upstream path under `app_tpl/`
+  (e.g. `app_tpl/scenarios/qlib/experiment/prompts.yaml`).
+- `APP_TPL` does NOT redirect the workspace template folders — upstream
+  hardcodes `Path(__file__).parent / "factor_template"` in the experiment
+  classes. The supported injection point is the env-configurable class paths
+  in `rdagent/app/qlib_rd_loop/conf.py` (`QLIB_QUANT_*` etc.).
+- `tests/test_us_templates.py::test_pinned_rdagent_install_unmodified` hashes
+  every installed rdagent file against pip's RECORD — any in-place tweak to
+  the upstream tree fails `make check`.

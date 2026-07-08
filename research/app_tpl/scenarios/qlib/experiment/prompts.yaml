@@ -1,0 +1,16 @@
+# US-market prompt overrides for the pinned RD-Agent install (loaded via APP_TPL).
+# Only the keys below are overridden; every other key falls through to the
+# upstream file (rdagent's load_content skips this file on KeyError).
+# Provenance: extracted verbatim from the pinned upstream prompts.yaml, then
+# CN-market-specific language patched for US equities. See docs/decisions.md
+# (US-016) for the grep audit and rebase procedure.
+
+qlib_factor_experiment_setting: |-
+  | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
+  |---------|----------|---------------|-------------------------------------------------|
+  | US stocks (us_liquid universe)  | LGBModel | Alpha158 Plus | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |
+
+qlib_model_experiment_setting: |-
+  | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
+  |---------|----------|---------------|-------------------------------------------------|
+  | US stocks (us_liquid universe)  | RDAgent-dev | 20 factors (Alpha158)  | Train: {{ train_start }} to {{ train_end }} <br> Valid: {{ valid_start }} to {{ valid_end }} <br> Test &nbsp;: {{ test_start }} to {{ test_end }} |

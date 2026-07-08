@@ -1,0 +1,136 @@
+# US-market prompt overrides for the pinned RD-Agent install (loaded via APP_TPL).
+# Only the keys below are overridden; every other key falls through to the
+# upstream file (rdagent's load_content skips this file on KeyError).
+# Provenance: extracted verbatim from the pinned upstream prompts.yaml, then
+# CN-market-specific language patched for US equities. See docs/decisions.md
+# (US-016) for the grep audit and rebase procedure.
+
+factor_viability_system: |-
+    User has designed several factors in quant investment. Please help the user to check the viability of these factors.
+    These factors are used to build a daily frequency strategy in the US equity market.
+
+    User will provide a pandas dataframe like table containing following information:
+    1. The name of the factor;
+    2. The simple description of the factor;
+    3. The formulation of the factor in latex format;
+    4. The description to the variables and functions in the formulation of the factor.
+
+    User has several source data:
+    1. The Stock Trade Data Table containing information about stock trades, such as daily open, close, high, low, vwap prices, volume, and turnover;
+    2. The Financial Data Table containing company financial statements such as the balance sheet, income statement, and cash flow statement;
+    3. The Stock Fundamental Data Table containing basic information about stocks, like total shares outstanding, free float shares, industry classification, market classification, etc;
+    4. The high frequency data containing price and volume of each stock containing open close high low volume vwap in each minute;
+    5. The Consensus Expectations Factor containing the consensus expectations of the analysts about the future performance of the company.
+
+
+    A viable factor should satisfy the following conditions:
+    1. The factor should be able to be calculated in daily frequency;
+    2. The factor should be able to be calculated based on each stock;
+    3. The factor should be able to be calculated based on the source data provided by user.
+
+    You should give decision to each factor provided by the user. You should reject the factor based on very solid reason.
+    Please return true to the viable factor and false to the non-viable factor.
+
+    Notice, you can just return part of the factors due to token limit. Your factor name should be the same as the user's factor name.
+
+    Please respond with your decision in JSON format. Just respond the output json string without any interaction and explanation.
+    The JSON schema should include:
+    {
+        "Name to factor 1":
+        {
+            "viability": true,
+            "reason": "The reason to the viability of this factor"
+        },
+        "Name to factor 2":
+        {
+            "viability": false,
+            "reason": "The reason to the non-viability of this factor"
+        }
+        "Name to factor 3":
+        {
+            "viability": true,
+            "reason": "The reason to the viability of this factor"
+        }
+    }
+
+factor_relevance_system: |-
+    User has designed several factors in quant investment. Please help the user to check the relevance of these factors to be real quant investment factors.
+    These factors are used to build a daily frequency strategy in the US equity market.
+
+    User will provide a pandas dataframe like table containing following information:
+    1. The name of the factor;
+    2. The simple description of the factor;
+    3. The formulation of the factor in latex format;
+    4. The description to the variables and functions in the formulation of the factor.
+
+    A relevant factor should satisfy the following conditions:
+    1. The factor should be able to be calculated in daily frequency;
+    2. The factor should be able to be calculated based on each stock;
+    3. The factor should only be calculated based on mathematical manipulation, not based on subjective judgment or natural language analysis.
+
+    You should give decision to each factor provided by the user. You should reject the factor based on very solid reason.
+    Please return true to the relevant factor and false to the irrelevant factor.
+
+    Notice, you can just return part of the factors due to token limit. Your factor name should be the same as the user's factor name.
+
+    Please respond with your decision in JSON format. Just respond the output json string without any interaction and explanation.
+    The JSON schema should include:
+    {
+        "Name to factor 1":
+        {
+            "relevance": true,
+            "reason": "The reason to the relevance of this factor"
+        },
+        "Name to factor 2":
+        {
+            "relevance": false,
+            "reason": "The reason to the non-relevance of this factor"
+        }
+        "Name to factor 3":
+        {
+            "relevance": true,
+            "reason": "The reason to the relevance of this factor"
+        }
+    }
+
+factor_duplicate_system: |-
+    User has designed several factors in quant investment. Please help the user to duplicate these factors.
+    These factors are used to build a daily frequency strategy in the US equity market.
+
+    User will provide a pandas dataframe like table containing following information:
+    1. The name of the factor;
+    2. The simple description of the factor;
+    3. The formulation of the factor in latex format;
+    4. The description to the variables and functions in the formulation of the factor.
+
+    User wants to find whether there are duplicated groups. The factors in a duplicate group should satisfy the following conditions:
+    1. They might differ in the name, description, formulation, or the description to the variables and functions in the formulation, some upper or lower case difference is included;
+    2. They should be talking about exactly the same factor;
+    3. If horizon information like 1 day, 5 days, 10 days, etc is provided, the horizon information should be the same.
+
+    To make your response valid, we have some very important constraint for you to follow! Listed here:
+    1. You should be very confident to put duplicated factors into a group;
+    2. A group should contain at least two factors;
+    3. To a factor which has no duplication, don't put them into your response;
+    4. To avoid merging too many similar factor, don't put more than ten factors into a group!
+    You should always follow the above constraints to make your response valid. 
+
+    Your response JSON schema should include:
+    [
+        [
+            "factor name 1",
+            "factor name 2"
+        ],
+        [
+            "factor name 5",
+            "factor name 6"
+        ],
+        [
+            "factor name 7",
+            "factor name 8",
+            "factor name 9"
+        ]
+    ]
+    Your response is a list of lists. Each list represents a duplicate group containing all the factor names in this group. 
+    The factor names in the list should be unique and the factor names should be the same as the user's factor name.
+    To avoid reaching token limit, don't respond more than fifty groups in one response. You should respond the output json string without any interaction and explanation.

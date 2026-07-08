@@ -247,8 +247,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: research/us_templates/{factor,model}_template (5 YAMLs patched: us_data/region us/us_liquid/SPY benchmark/limit_threshold removed/5bps costs+min_cost 0; read_exp_res.py+README byte-identical to upstream, dirs excluded from ruff/pyright) + research/app_tpl partial prompt overrides (2 experiment_setting keys, 3 factor_experiment_loader keys; classify_system_chinese is dead code, not overridden). Grep audit + SPY/cost rationale in docs/decisions.md. 16 tests incl. jinja-stubbed renders, pip-RECORD hash proof upstream untouched, and live APP_TPL resolution through rdagent's load_content (override + fallthrough). GOTCHA for US-017: APP_TPL does NOT redirect workspace template folders (hardcoded); use QLIB_QUANT_* class-path envs. Store must include SPY."
     },
     {
       "id": "US-017",
