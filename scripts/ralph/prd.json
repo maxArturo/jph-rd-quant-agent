@@ -231,8 +231,8 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-08: data/make_factor_source.py — universe -> daily_pv_all.h5 + daily_pv_debug.h5 (key='data', MultiIndex (datetime, instrument), $open/$close/$high/$low/$volume/$factor float32) PLUS consumable data_folder/ and data_folder_debug/ subdirs (daily_pv.h5 + README.md) that US-017 points FACTOR_CoSTEER_DATA_FOLDER(_DEBUG) at. Missing universe instruments file -> FactorSourceError, exit 1, nothing written. 12 unit tests incl. qlib D.features parity; LIVE-verified on the real proxy-built store (123 rows, 0 NaN, float32)."
     },
     {
       "id": "US-016",

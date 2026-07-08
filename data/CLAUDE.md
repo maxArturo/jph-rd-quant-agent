@@ -40,6 +40,19 @@
 - Liquidity math exploits the store's field conventions: stored close * stored volume ==
   RAW daily dollar volume (factors cancel), and raw price on the last day = close / factor.
   Don't "fix" filters to de-adjust first.
+- Factor source h5 (`data/make_factor_source.py`): RD-Agent's factor coder consumes a
+  FOLDER (env `FACTOR_CoSTEER_DATA_FOLDER` / `..._DEBUG`) whose files are ALL linked into
+  each factor workspace; the LLM prompt describes the DEBUG folder's files by name. Both
+  folders must therefore hold the SAME filename `daily_pv.h5` + a README.md explaining
+  `pd.read_hdf(..., key="data")`. Our generator writes `daily_pv_all.h5`/`daily_pv_debug.h5`
+  at the output root (upstream generate.py naming) plus ready-to-point `data_folder/` and
+  `data_folder_debug/` subfolders — US-017 sets the env vars to those subfolders.
+- The daily_pv frame contract (upstream parity, tested against qlib `D.features`):
+  MultiIndex `(datetime, instrument)`, float32 columns
+  `$open/$close/$high/$low/$volume/$factor`, rows only inside each instrument's own span.
+  Reading the store bins directly with numpy reproduces `D.features(...).swaplevel()
+  .sort_index()` exactly and avoids the multi-second qlib import — but note
+  `pd.DataFrame.to_hdf` APPENDS to an existing file; unlink first when regenerating.
 - `data/adjust.py` is the ONLY place adjustment math lives: backward adjustment, factor
   1.0 on the window's last bar, events strictly-before-ex-date get the multiplier
   (split: 1/ratio; dividend: (prev_close - D)/prev_close using the last bar close before
