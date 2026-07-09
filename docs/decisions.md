@@ -425,3 +425,52 @@ orders are already live at Alpaca) but never silent: failures accumulate in
 `TradeLedger.failures` and are appended to the daily Slack summary as
 WARNING lines, and `ops/reconcile.py` (US-037) exists to catch any rows that
 were lost anyway.
+
+## 2026-07-09 — US-039: OneCLI approvals bridge — API verified, gateway-URL nuance, no paper approval rules
+
+**Finding: the pending-approvals API matches PLAN.md's expectations with one
+nuance — it lives on the GATEWAY url, not the management API.** Probing
+`GET http://127.0.0.1:10254/api/approvals/pending` (the PLAN sketch) returns
+404. The real surface (confirmed both live against onecli 2.2.0 and in
+`@onecli-sh/sdk`'s ApprovalClient, nanoclaw's reference implementation):
+
+1. `GET {ONECLI_URL}/api/gateway-url` → `{"url": "http://localhost:10255"}`
+   (resolve once, cache — verified live).
+2. `GET {gateway}/api/approvals/pending[?exclude=id,id]` long-polls: the
+   server holds the connection up to ~30s, returning
+   `{"requests": [...], "timeoutSeconds": 180}` (verified live: empty list,
+   ~6s hold; client timeout must exceed the hold — we use 35s like the SDK).
+   Request objects are camelCase: `id, method, url, host, path, headers,
+   bodyPreview, agent{id,name,externalId}, createdAt, expiresAt`.
+3. `POST {gateway}/api/approvals/{id}/decision` with
+   `{"decision": "approve"|"deny"}`. 410 = already expired server-side
+   (denied by timeout) — tolerated, reported to the operator as expiry.
+   Unknown id returns 404 (verified live).
+
+Since the API works as expected, the primary path (Slack Approve/Deny
+buttons in `orchestrator/approvals.py`) is the implementation; the web-UI
+fallback survives as graceful degradation — any decision-submit failure
+posts the error in Slack and points the operator at the OneCLI web UI at
+:10254, which can always decide manually (notification-only mode).
+
+**No approval rules exist for paper hosts, and none may ever be created.**
+Approval rules are the future LIVE-trading gate (PLAN.md Phase 6): a rule on
+`api.alpaca.markets` will hold every live order until a human taps Approve.
+Paper trading (`paper-api.alpaca.markets`) must stay autonomous — the nightly
+rebalancer runs unattended pre-open; an approval rule on a paper host would
+deadlock it against a 3-minute approval timeout. With no rules configured the
+pending list stays empty and the bridge idles. (Approval rules are created in
+the OneCLI web UI only; the CLI has no command for them.)
+
+**Restart/persistence choice:** posted-approval state is in-memory only.
+Pending approvals expire in ~3 minutes (`timeoutSeconds: 180`), so SQLite
+persistence buys nothing; after a restart the next poll re-lists anything
+still pending and it is simply re-posted. Decisions are submitted by request
+id alone (carried in the button value), so clicks on messages posted before
+a restart still land.
+
+**Proxy hygiene:** the bridge's calls to :10254/:10255 are local management
+traffic and must not transit the credential proxy that `onecli run` injects —
+the client sets `session.trust_env = False`, and rdq-orchestrator.service's
+NO_PROXY now also covers `127.0.0.1,localhost` (which the RdAgentClient calls
+to :19899 benefit from too).

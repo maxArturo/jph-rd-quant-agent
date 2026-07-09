@@ -26,8 +26,10 @@ WorkingDirectory=%h/rd-agent-q
 # onecli run injects HTTPS_PROXY process-wide, but Slack traffic must NOT
 # transit the OneCLI proxy (docs/decisions.md 2026-07-08). onecli preserves a
 # pre-set NO_PROXY, and urllib suffix-matches it, so slack.com covers
-# wss-primary.slack.com / files.slack.com etc.
-Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+# wss-primary.slack.com / files.slack.com etc. Local control-plane calls
+# (rdagent server_ui :19899, OneCLI management/approvals :10254/:10255)
+# must bypass the proxy too (US-039).
+Environment="NO_PROXY=slack.com,127.0.0.1,localhost" "no_proxy=slack.com,127.0.0.1,localhost"
 ExecStart=%h/.local/bin/onecli run --agent rdq-orchestrator -- %h/rd-agent-q/.venv/bin/python -m orchestrator.app
 Restart=always
 RestartSec=5

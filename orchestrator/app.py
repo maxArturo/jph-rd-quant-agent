@@ -51,6 +51,14 @@ class PromotionHandler(Protocol):
     def cancel_promotion(self, thread_ts: str, say: Say) -> None: ...
 
 
+class ApprovalsHandler(Protocol):
+    """What the app needs from the OneCLI approvals bridge (see ApprovalsBridge)."""
+
+    def approve(self, request_id: str, say: Say) -> None: ...
+
+    def deny(self, request_id: str, say: Say) -> None: ...
+
+
 def _is_actionable_user_message(event: dict[str, Any], channel_id: str) -> bool:
     """True for plain user messages in the target channel (top-level or in-thread)."""
     if event.get("channel") != channel_id:
@@ -95,6 +103,7 @@ def create_app(
     conversation: MessageResponder,
     interactions: InteractionHandler | None = None,
     promotions: PromotionHandler | None = None,
+    approvals: ApprovalsHandler | None = None,
     client: WebClient | None = None,
     token_verification_enabled: bool = True,
     process_before_response: bool = False,
@@ -167,11 +176,27 @@ def create_app(
             ack()
             promoter.cancel_promotion(str(action["value"]), say)
 
+    if approvals is not None:
+        approver = approvals
+        from orchestrator.approvals import ACTION_ONECLI_APPROVE, ACTION_ONECLI_DENY
+
+        @app.action(ACTION_ONECLI_APPROVE)
+        def _on_onecli_approve(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            approver.approve(str(action["value"]), say)
+
+        @app.action(ACTION_ONECLI_DENY)
+        def _on_onecli_deny(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            approver.deny(str(action["value"]), say)
+
     return app
 
 
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
+    from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
+    from orchestrator.config import load_onecli_url
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
     from orchestrator.notion_client import NotionClient
@@ -215,10 +240,21 @@ def main() -> None:
         store, rdagent, slack=web_client, channel_id=config.channel_id, recorder=recorder
     )
     promotions = PromotionFlow(store, recorder=recorder)
+    approvals = ApprovalsBridge(
+        OneCliApprovalsClient(base_url=load_onecli_url()),
+        slack=web_client,
+        channel_id=config.channel_id,
+    )
     app = create_app(
-        config, conversation, interactions=poller, promotions=promotions, client=web_client
+        config,
+        conversation,
+        interactions=poller,
+        promotions=promotions,
+        approvals=approvals,
+        client=web_client,
     )
     poller.start()
+    approvals.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
     SocketModeHandler(app, config.app_token).start()
 

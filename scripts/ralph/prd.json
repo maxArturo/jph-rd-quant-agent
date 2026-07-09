@@ -603,8 +603,8 @@
         "Typecheck passes"
       ],
       "priority": 39,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: orchestrator/approvals.py ApprovalsBridge + OneCliApprovalsClient — API matched PLAN expectations with one nuance: approvals live on the GATEWAY url (:10255), resolved via GET {ONECLI_URL}/api/gateway-url (verified live; docs/decisions.md). Long-poll /api/approvals/pending?exclude= -> channel post with onecli_approve/onecli_deny buttons (value = request id, so clicks survive restarts); decision POST /api/approvals/<id>/decision, 410 = expired (reported), other failures post the web-UI fallback pointer. In-memory dedup only (approvals expire in ~180s). No approval rules for paper hosts (documented — a paper rule would deadlock the unattended rebalancer). Unit NO_PROXY widened to 127.0.0.1,localhost; client sets trust_env=False. 26 unit tests + live gateway probes + end-to-end smoke over real HTTP (stub gateway): post/dedup/exclude/approve-submit all PASS."
     },
     {
       "id": "US-040",

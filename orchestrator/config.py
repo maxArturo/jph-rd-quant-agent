@@ -21,6 +21,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 
+# OneCLI management API (approvals bridge, US-039). Local, unauthenticated.
+DEFAULT_ONECLI_URL = "http://127.0.0.1:10254"
+
 
 class ConfigError(RuntimeError):
     """A required configuration value is missing or malformed."""
@@ -104,3 +107,13 @@ def load_slack_config(
             "SLACK_SOCKET_TOKEN must be an xapp- app-level token (got a non-xapp value)."
         )
     return SlackConfig(bot_token=bot_token, app_token=app_token, channel_id=channel_id)
+
+
+def load_onecli_url(
+    env_file: Path = DEFAULT_ENV_FILE,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """OneCLI management API base URL (ONECLI_URL; defaults to the local gateway)."""
+    env = os.environ if environ is None else environ
+    file_values = parse_env_file(env_file)
+    return env.get("ONECLI_URL") or file_values.get("ONECLI_URL") or DEFAULT_ONECLI_URL

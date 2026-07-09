@@ -57,14 +57,17 @@ class TestOrchestratorUnit:
     def test_restart_always(self) -> None:
         assert "Restart=always" in UNIT.read_text()
 
-    def test_slack_bypasses_onecli_proxy(self) -> None:
+    def test_slack_and_local_control_plane_bypass_onecli_proxy(self) -> None:
         """docs/decisions.md: Slack is never routed through the OneCLI proxy.
 
-        onecli run injects HTTPS_PROXY process-wide, so the unit must exempt
-        slack.com (urllib suffix-matches NO_PROXY, covering *.slack.com).
+        onecli run injects HTTP(S)_PROXY process-wide, so the unit must exempt
+        slack.com (urllib suffix-matches NO_PROXY, covering *.slack.com) and
+        the local control-plane hosts (rdagent server_ui :19899, OneCLI
+        management/approvals :10254/:10255 — US-039).
         """
         text = UNIT.read_text()
-        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+        for var in ("NO_PROXY", "no_proxy"):
+            assert f'"{var}=slack.com,127.0.0.1,localhost"' in text
 
     def test_installable_user_unit(self) -> None:
         text = UNIT.read_text()

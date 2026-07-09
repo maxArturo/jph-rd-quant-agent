@@ -222,3 +222,21 @@
   `promoted`. The rebalancer-side check is `execution/promoted.py` —
   keep the pinned config keys (universe/universe_tickers/topk/n_drop/
   thread_ts/session_path) in sync with what US-034 consumes.
+
+- OneCLI approvals bridge (US-039) lives in `orchestrator/approvals.py`
+  (`ApprovalsBridge` + `OneCliApprovalsClient`): a second background thread
+  (started alongside the poller in app.py main) long-polls the gateway's
+  pending credential approvals and posts them to the CHANNEL (not a thread)
+  as `onecli_approve`/`onecli_deny` buttons, routed via the
+  `ApprovalsHandler` protocol. The approvals endpoints live on the GATEWAY
+  url (:10255), resolved once via `GET {ONECLI_URL}/api/gateway-url` — never
+  hardcode the gateway port (docs/decisions.md 2026-07-09). Decisions are
+  submitted by request id alone (the button value), so posted-approval state
+  stays in-memory: approvals expire in ~3 min and a restart just re-posts
+  still-pending ones. 410 on decision submit = expired (report, don't
+  raise); any other submit failure posts the OneCLI web-UI fallback pointer.
+  Calls to :10254/:10255 are local management traffic: the client sets
+  `session.trust_env = False` so `onecli run`'s injected HTTP(S)_PROXY never
+  captures them. NEVER create an approval rule for a paper host — rules are
+  the future live-trading gate; one on paper would deadlock the unattended
+  nightly rebalancer.
