@@ -91,6 +91,17 @@
   Trade Ledger row MUST archive it afterwards, or reconcile flags it as an
   orphan forever (archived pages are invisible to Notion queries — that is
   the sanctioned cleanup mechanism, not deletion).
+- `ops/health.sh` (US-042) is the box audit: rdq unit states + loopback audit +
+  tailscale exposure vs the PLAN.md §1 allowlist. When adding a unit, add it to
+  BOTH install_services.sh UNITS and the matching health.sh list
+  (LONG_RUNNING / TIMERS / ONESHOTS) — tests/test_health.py cross-checks them.
+  Gotchas baked in: oneshot units are healthy when "inactive" (only `is-failed`
+  == failed is a failure), and `tailscale serve` terminates TLS on the TAILNET
+  interface (100.64.0.0/10 / fd7a:115c:a1e0::), so an allowed serve port bound
+  there is sanctioned, not a leak — 19899 has no allowed mapping and fails
+  everywhere. Scripts calling systemctl/ss/tailscale by bare name are testable
+  end-to-end with PATH-shimmed stub binaries (tests/test_health.py pattern) —
+  both exit paths get real coverage without touching box state.
 - `ops/sweep.py` (US-041) derives SOTA **offline from the trace logs**: the
   FileStorage layout is `<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl`, and a
   loop's `feedback` pkl (`.decision` attr) pairs with its `runner result` pkl

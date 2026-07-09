@@ -108,6 +108,21 @@ Not in the vault:
 
 ## 5. Audit Tailscale exposure
 
+Scripted audit (also checks every rdq-* unit and that nothing repo-owned
+listens beyond loopback) — exit 0 healthy, nonzero naming each failing check:
+
+```sh
+ops/health.sh
+```
+
+To expose the rdagent trace viewer to the tailnet (the only mapping this
+repo is allowed to add — tailnet-only, per the PLAN.md §1 port table):
+
+```sh
+ops/expose_traces.sh                  # tailscale serve --bg --https=19900 http://127.0.0.1:19900
+tailscale serve --https=19900 off     # remove when monitoring is done
+```
+
 `tailscale serve status` is the source of truth for what this box exposes.
 Audit it against the PLAN.md §1 port table:
 

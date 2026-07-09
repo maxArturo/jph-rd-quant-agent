@@ -648,8 +648,8 @@
         "Typecheck passes"
       ],
       "priority": 42,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: ops/health.sh (rdq unit states: long-running active / timers active / oneshots not-failed; loopback audit of rdq cgroup PIDs + repo ports 19899/19900 with a tailnet-interface exemption for ALLOWED serve ports only; tailscale serve vs PLAN.md allowlist 443/3100/19900, never funnel, 19899 never served) + ops/expose_traces.sh (idempotent tailnet-only 19900 mapping, verifies tailnet-only + no funnel after) + runbook section 5 references both. Both shellcheck-clean. LIVE: full expose->health-green->remove cycle run (baseline restored); health.sh honest run exits 1 naming exactly the two open operator items (orchestrator inactive pending real SLACK_CHANNEL_ID; rdq-rebalance failed = expected no-promoted-strategy abort). Exit-0 path + every failure branch proven by 19 PATH-shimmed stub-binary tests (tests/test_health.py)."
     }
   ]
 }
