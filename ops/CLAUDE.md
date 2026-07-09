@@ -65,3 +65,11 @@
   hosts bare and reports "via app connection" on 2xx; setup_onecli.sh's
   "no vault secret for host api.notion.com" WARN is expected and harmless
   (docs/decisions.md 2026-07-08 + 2026-07-09).
+- Timer-driven jobs (US-036 pattern): `Type=oneshot` service with NO `[Install]`
+  section + a matching `.timer` with `WantedBy=timers.target` — enable the
+  TIMER, never the service. Schedule market-relative jobs with an explicit
+  timezone in the calendar spec (`OnCalendar=Mon..Fri 06:30 America/New_York`;
+  sanity-check with `systemd-analyze calendar "<spec>"`). Persistent=true only
+  when a missed run is harmless to catch up (data refresh: idempotent);
+  trading jobs use Persistent=false so a boot mid-day doesn't fire a stale
+  pre-open rebalance.

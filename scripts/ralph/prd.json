@@ -556,8 +556,8 @@
         "Typecheck passes"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: data/refresh.py — per-ticker incremental pull (raw bars recovered from the bins: raw=stored/factor), full split/dividend refetch + factor recompute, rebuild via build_store's atomic swap; NEW build_store extra_instruments= param carries universe files across the rebuild (spans refreshed) — without it a rebuild deletes us_liquid.txt. Default --end = yesterday ET (an open session would land a partial bar). Idempotent: nothing new -> store byte-for-byte untouched. Timers: rdq-data-refresh 06:30 / rdq-rebalance 08:00, both 'Mon..Fri HH:MM America/New_York', refresh Persistent=true / rebalance Persistent=false (deliberate); oneshot services under onecli rdq-exec-paper (FMP secret NEWLY assigned to rdq-exec-paper via setup_onecli.sh; check_onecli.sh gained the probe — all 10 checks PASS). systemd-analyze verify OK x4; both timers ENABLED and listed in list-timers. LIVE: real 31-ticker store refreshed +155 bars (2026-06-30 -> 2026-07-08), rerun 'already current', qlib read 0 NaN, us_liquid intact."
     },
     {
       "id": "US-037",

@@ -1,0 +1,30 @@
+# RD-Agent(Q) nightly paper rebalance — systemd user unit (US-036).
+#
+# Runs the US-034 pipeline (`python -m execution.rebalance`) under the
+# rdq-exec-paper OneCLI identity: the proxy injects the Alpaca paper secrets
+# and the Notion app connection (Trade Ledger). The pipeline itself guards
+# every unsafe state — market closed, no promoted strategy, stale
+# predictions, gate/breaker rejections, operator halt — so a scheduled run
+# on a bad day aborts loudly (Slack notice) instead of trading.
+#
+# Slack notices must NOT transit the OneCLI proxy (docs/decisions.md
+# 2026-07-08); onecli preserves a pre-set NO_PROXY and urllib suffix-matches
+# it, covering *.slack.com.
+#
+# Started by rdq-rebalance.timer (weekday pre-open, America/New_York);
+# no [Install] section on purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-rebalance.timer
+# Logs:     journalctl --user -u rdq-rebalance.service
+
+[Unit]
+Description=RD-Agent(Q) nightly paper rebalance (Alpaca paper via rdq-exec-paper OneCLI identity)
+After=network-online.target rdq-data-refresh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+ExecStart=%h/.local/bin/onecli run --agent rdq-exec-paper -- %h/rd-agent-q/.venv/bin/python -m execution.rebalance

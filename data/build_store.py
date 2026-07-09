@@ -27,7 +27,7 @@ import math
 import os
 import shutil
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -181,8 +181,18 @@ def _write_bin(path: Path, start_index: int, values: Sequence[float] | np.ndarra
     ).tofile(path)
 
 
-def build_store(bundles: Sequence[TickerBundle], target: Path) -> None:
-    """Write a Qlib bin store for the bundles: temp dir -> validate -> swap."""
+def build_store(
+    bundles: Sequence[TickerBundle],
+    target: Path,
+    extra_instruments: Mapping[str, Sequence[str]] | None = None,
+) -> None:
+    """Write a Qlib bin store for the bundles: temp dir -> validate -> swap.
+
+    extra_instruments maps additional universe names to their ticker lists
+    (data/refresh.py uses this to carry make_universe files across a rebuild);
+    each file is written with spans refreshed from the new bundles, inside the
+    same atomic swap as the rest of the store.
+    """
     if not bundles:
         raise BuildError("no tickers to build a store from")
     for bundle in bundles:
@@ -209,9 +219,11 @@ def build_store(bundles: Sequence[TickerBundle], target: Path) -> None:
             "".join(f"{day.isoformat()}\n" for day in calendar)
         )
         instrument_lines = []
+        spans: dict[str, tuple[date, date]] = {}
         for bundle in bundles:
             ordered = sorted(bundle.bars, key=lambda b: b.date)
             first, last = ordered[0].date, ordered[-1].date
+            spans[bundle.symbol] = (first, last)
             instrument_lines.append(f"{bundle.symbol}\t{first.isoformat()}\t{last.isoformat()}\n")
             feature_dir = tmp / "features" / bundle.symbol.lower()
             feature_dir.mkdir(parents=True)
@@ -223,6 +235,20 @@ def build_store(bundles: Sequence[TickerBundle], target: Path) -> None:
                     values[positions[day] - start_index] = value
                 _write_bin(feature_dir / f"{field}.{FREQ}.bin", start_index, values)
         (tmp / "instruments" / f"{MARKET_ALL}.txt").write_text("".join(instrument_lines))
+        for name, universe_symbols in (extra_instruments or {}).items():
+            if name == MARKET_ALL:
+                raise BuildError(f"universe name {name!r} is reserved for the full store")
+            unknown = [s for s in universe_symbols if s not in spans]
+            if unknown:
+                raise BuildError(
+                    f"universe {name!r} references tickers not in the store: {sorted(unknown)}"
+                )
+            (tmp / "instruments" / f"{name}.txt").write_text(
+                "".join(
+                    f"{s}\t{spans[s][0].isoformat()}\t{spans[s][1].isoformat()}\n"
+                    for s in universe_symbols
+                )
+            )
         validate_store(tmp, [bundle.symbol for bundle in bundles])
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)

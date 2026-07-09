@@ -1,0 +1,21 @@
+# Weekday pre-open trigger for rdq-rebalance.service (US-036).
+#
+# 08:00 America/New_York — explicitly timezone-qualified so US DST shifts
+# never drift the run relative to the 09:30 ET open. Runs AFTER
+# rdq-data-refresh.timer (06:30 ET) so the store already holds the previous
+# session's bars; day limit orders submitted pre-open rest until the open.
+#
+# Persistent=false ON PURPOSE: a rebalance missed while the box was down
+# must be skipped, not fired at an arbitrary later time of day — trading is
+# a scheduled pre-open act, and the next weekday run picks up naturally.
+
+[Unit]
+Description=Weekday 08:00 America/New_York trigger for the paper rebalance
+
+[Timer]
+OnCalendar=Mon..Fri 08:00 America/New_York
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

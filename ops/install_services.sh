@@ -12,6 +12,10 @@ UNIT_DIR="${HOME}/.config/systemd/user"
 UNITS=(
   rdq-orchestrator.service
   rdq-research.service
+  rdq-data-refresh.service
+  rdq-data-refresh.timer
+  rdq-rebalance.service
+  rdq-rebalance.timer
 )
 
 mkdir -p "$UNIT_DIR"

@@ -1,4 +1,4 @@
-"""Offline tests for the systemd units (US-010, US-018, US-020) + install script."""
+"""Offline tests for the systemd units (US-010, US-018, US-020, US-036) + install script."""
 
 from __future__ import annotations
 
@@ -13,8 +13,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNIT = REPO_ROOT / "ops" / "rdq-orchestrator.service"
 RESEARCH_UNIT = REPO_ROOT / "ops" / "rdq-research.service"
+REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-data-refresh.service"
+REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-data-refresh.timer"
+REBALANCE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance.service"
+REBALANCE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance.timer"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
+
+
+def timer_schedule(timer: Path) -> tuple[str, str]:
+    """(day spec, HH:MM) from the timer's OnCalendar= line."""
+    match = re.search(
+        r"^OnCalendar=(\S+) (\d{2}:\d{2}) America/New_York$", timer.read_text(), re.MULTILINE
+    )
+    assert match, f"{timer.name} needs 'OnCalendar=<days> HH:MM America/New_York'"
+    return match.group(1), match.group(2)
 
 
 def _systemd_analyze_verify(unit: Path) -> None:
@@ -151,6 +164,78 @@ class TestResearchUnit:
         _systemd_analyze_verify(RESEARCH_UNIT)
 
 
+class TestRefreshUnits:
+    def test_exist(self) -> None:
+        assert REFRESH_UNIT.is_file()
+        assert REFRESH_TIMER.is_file()
+
+    def test_runs_refresh_under_exec_paper_identity(self) -> None:
+        """AC: units run as rdq-exec-paper (FMP key injected by the proxy)."""
+        text = REFRESH_UNIT.read_text()
+        assert "onecli run --agent rdq-exec-paper" in text
+        assert "python -m data.refresh" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+
+    def test_timer_weekday_preopen_new_york(self) -> None:
+        """AC: explicit America/New_York handling, scheduled before market open."""
+        days, hhmm = timer_schedule(REFRESH_TIMER)
+        assert days == "Mon..Fri"
+        assert hhmm < "09:30"
+        # missed refreshes are harmless to catch up (incremental + idempotent)
+        assert "Persistent=true" in REFRESH_TIMER.read_text()
+        assert "WantedBy=timers.target" in REFRESH_TIMER.read_text()
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(REFRESH_UNIT)
+        _systemd_analyze_verify(REFRESH_TIMER)
+
+
+class TestRebalanceUnits:
+    def test_exist(self) -> None:
+        assert REBALANCE_UNIT.is_file()
+        assert REBALANCE_TIMER.is_file()
+
+    def test_runs_rebalance_under_exec_paper_identity(self) -> None:
+        text = REBALANCE_UNIT.read_text()
+        assert "onecli run --agent rdq-exec-paper" in text
+        assert "python -m execution.rebalance" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+
+    def test_slack_bypasses_onecli_proxy(self) -> None:
+        """The rebalancer posts abort notices + the daily summary to Slack,
+        which must never transit the OneCLI proxy (docs/decisions.md)."""
+        text = REBALANCE_UNIT.read_text()
+        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+
+    def test_timer_weekday_preopen_new_york(self) -> None:
+        days, hhmm = timer_schedule(REBALANCE_TIMER)
+        assert days == "Mon..Fri"
+        assert hhmm < "09:30"
+        # a rebalance missed while the box was down must be skipped, not
+        # fired at an arbitrary later time of day
+        assert "Persistent=false" in REBALANCE_TIMER.read_text()
+        assert "WantedBy=timers.target" in REBALANCE_TIMER.read_text()
+
+    def test_refresh_scheduled_before_rebalance(self) -> None:
+        """AC ordering: refresh runs first so the rebalance prices off a store
+        that already holds the previous session's bars."""
+        _, refresh_time = timer_schedule(REFRESH_TIMER)
+        _, rebalance_time = timer_schedule(REBALANCE_TIMER)
+        assert refresh_time < rebalance_time
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(REBALANCE_UNIT)
+        _systemd_analyze_verify(REBALANCE_TIMER)
+
+
 class TestInstallScript:
     def test_exists_and_executable(self) -> None:
         assert INSTALL.is_file()
@@ -160,6 +245,10 @@ class TestInstallScript:
         text = INSTALL.read_text()
         assert "rdq-orchestrator.service" in text
         assert "rdq-research.service" in text
+        assert "rdq-data-refresh.service" in text
+        assert "rdq-data-refresh.timer" in text
+        assert "rdq-rebalance.service" in text
+        assert "rdq-rebalance.timer" in text
         assert ".config/systemd/user" in text
         assert "daemon-reload" in text
 

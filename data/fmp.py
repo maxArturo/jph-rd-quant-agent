@@ -2,8 +2,8 @@
 
 All requests are bare HTTPS: no apikey appears in code, env, or params. The
 OneCLI proxy injects the query-param key when the process runs under
-`onecli run --agent rdq-research` (the identity with the
-financialmodelingprep.com secret assignment).
+`onecli run --agent rdq-research` or `--agent rdq-exec-paper` (the identities
+with the financialmodelingprep.com secret assignment).
 """
 
 from __future__ import annotations
@@ -180,7 +180,8 @@ class FmpClient:
             if status in (401, 403):
                 raise FmpAuthError(
                     f"FMP returned {status} for {path}: no valid apikey was injected. "
-                    "Run this process under `onecli run --agent rdq-research` and make "
+                    "Run this process under `onecli run --agent rdq-research` (or "
+                    "rdq-exec-paper for the nightly refresh) and make "
                     "sure the financialmodelingprep.com secret is vaulted and assigned "
                     "(ops/setup_onecli.sh, then verify with ops/check_onecli.sh). "
                     f"Body: {response.text[:200]}"

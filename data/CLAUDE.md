@@ -60,3 +60,13 @@
   FMP's /dividends can list announced *future* ex-dates, which must not adjust today's
   store. Adjusted close = raw close * factor; for Qlib volume, divide raw volume by the
   factor (US-013).
+- Incremental refresh (`data/refresh.py`, US-036): recovers RAW bars from the
+  store bins (raw price = stored/factor, raw volume = stored*factor), pulls only
+  bars after each ticker's own last date, refetches full split/dividend history,
+  and rebuilds through `build_store` — so a split landing between refreshes
+  re-scales the whole history correctly. `build_store(..., extra_instruments=)`
+  carries make_universe files across the rebuild (spans refreshed) inside the
+  same atomic swap; without it a rebuild DELETES `instruments/<universe>.txt`.
+  Default `--end` is *yesterday* in America/New_York, never today — FMP's EOD
+  endpoint returns a partial bar for an in-progress session. When nothing is
+  new, the store is left byte-for-byte untouched (safe to run any time).

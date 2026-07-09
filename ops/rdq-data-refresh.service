@@ -1,0 +1,24 @@
+# RD-Agent(Q) nightly Qlib store refresh — systemd user unit (US-036).
+#
+# Pulls incremental FMP bars into ~/.qlib/qlib_data/us_data via
+# `python -m data.refresh` under the rdq-exec-paper OneCLI identity (the
+# proxy injects the FMP key; financialmodelingprep.com is assigned to
+# rdq-exec-paper by ops/setup_onecli.sh). Idempotent: an already-current
+# store is left untouched and the run exits 0.
+#
+# Started by rdq-data-refresh.timer (weekday pre-open, America/New_York);
+# no [Install] section on purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-data-refresh.timer
+# Logs:     journalctl --user -u rdq-data-refresh.service
+
+[Unit]
+Description=RD-Agent(Q) incremental Qlib store refresh (FMP via rdq-exec-paper OneCLI identity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=%h/.local/bin/onecli run --agent rdq-exec-paper -- %h/rd-agent-q/.venv/bin/python -m data.refresh

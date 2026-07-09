@@ -31,6 +31,7 @@ CHECKS=(
   "rdq-research|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"
   "rdq-exec-paper|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account||"
   "rdq-exec-paper|api.notion.com|https://api.notion.com/v1/users/me|Notion-Version: 2022-06-28|"
+  "rdq-exec-paper|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }

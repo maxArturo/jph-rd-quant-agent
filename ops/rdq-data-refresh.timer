@@ -1,0 +1,20 @@
+# Weekday pre-open trigger for rdq-data-refresh.service (US-036).
+#
+# 06:30 America/New_York — explicitly timezone-qualified so US DST shifts
+# never drift the run relative to the market session. Runs BEFORE
+# rdq-rebalance.timer (08:00 ET) so the rebalance prices off a store that
+# already holds the previous session's bars.
+#
+# Persistent=true: a refresh missed while the box was down is harmless to
+# catch up (the pull is incremental and idempotent), so run it on boot.
+
+[Unit]
+Description=Weekday 06:30 America/New_York trigger for the Qlib store refresh
+
+[Timer]
+OnCalendar=Mon..Fri 06:30 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
