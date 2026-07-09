@@ -79,6 +79,36 @@
   calendar entry on/before as_of (`~/.qlib/qlib_data/us_data/calendars/
   day.txt`). Predictions are made FROM day T FOR T+1, so pred dated the last
   completed trading day is fresh for a pre-open rebalance.
+- `execution/rebalance.py` is the pipeline assembly (US-034): market calendar
+  -> promoted load -> signal -> diff -> gate -> breaker -> submit -> poll
+  fills. `run_rebalance()` returns the process exit code — 0 for traded /
+  dry-run / nothing-to-trade / operator halt, 1 for every
+  abort-without-trading (the reason is posted via the injected `notify`
+  callable AND printed). Known aborts are the `_ABORT_ERRORS` tuple; anything
+  else notifies then re-raises (bugs must crash loudly). Keep new failure
+  modes inside that contract.
+- Rebalance conventions downstream stories rely on: the trading-day check is
+  Alpaca `GET /v2/calendar` (the qlib store calendar ends at the last built
+  bar and cannot say whether *today* trades); "today" for the day-order count
+  and traded notional means `submitted_at` converted to America/New_York;
+  `client_order_id` is `rdq-<YYYY-MM-DD>-<side>-<symbol>` so a same-day rerun
+  is rejected by Alpaca's uniqueness check instead of doubling the book;
+  reference prices come from the store's latest close/factor with
+  `Position.current_price` as the held-name fallback. A dry run still runs
+  the gate and breaker (and can seed/raise the HWM) — it only skips
+  submission.
+- Slack from the rebalancer is a plain `slack_sdk.WebClient` notifier
+  (`slack_notifier()`, lazy import — never Bolt in execution/); tests inject
+  a list-append notify. The future service unit needs the same
+  NO_PROXY=slack.com trick as rdq-orchestrator.service. `--no-slack` swaps in
+  a stderr notifier for supervised local runs; without it, missing Slack
+  config refuses to run at all.
+- Testing the pipeline: tests/test_rebalance.py's `FakeBroker`/`RoutedSession`
+  route (method, path) -> handler through the REAL `AlpacaClient` parsing
+  (integration per the AC) — reuse them for US-035/036 instead of stubbing
+  the client. Fixture helpers `write_bins` (store price bins) there and
+  `write_pred`/`write_calendar`/`write_conf` in tests/test_signal.py compose
+  into a full promoted-strategy environment in a tmp dir.
 - The rebalancer's entrypoint check is `execution/promoted.py`
   (`load_promoted_strategy()`): it refuses with `NoPromotedStrategyError`
   when the orchestrator state DB is absent (it must NEVER create it from the

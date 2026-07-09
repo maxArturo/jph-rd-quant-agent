@@ -15,6 +15,7 @@ from execution.alpaca_client import (
     AlpacaClient,
     AlpacaError,
     AlpacaRateLimitError,
+    CalendarDay,
     Order,
     Position,
 )
@@ -301,6 +302,25 @@ class TestCancelOrder:
         )
         with pytest.raises(AlpacaError, match="not cancelable"):
             client.cancel_order("ord-1")
+
+
+class TestGetCalendar:
+    def test_parses_trading_days_and_passes_range(self) -> None:
+        import datetime as dt
+
+        client, session, _ = make_client(
+            [FakeResponse(200, [{"date": "2026-07-09", "open": "09:30", "close": "16:00"}])]
+        )
+        days = client.get_calendar(dt.date(2026, 7, 9), dt.date(2026, 7, 9))
+        assert days == [CalendarDay(date="2026-07-09", open="09:30", close="16:00")]
+        assert session.calls[0]["url"] == f"{BASE_URL}/v2/calendar"
+        assert session.calls[0]["params"] == {"start": "2026-07-09", "end": "2026-07-09"}
+
+    def test_closed_day_returns_empty_list(self) -> None:
+        import datetime as dt
+
+        client, _, _ = make_client([FakeResponse(200, [])])
+        assert client.get_calendar(dt.date(2026, 7, 4), dt.date(2026, 7, 4)) == []
 
 
 class TestErrorsAndRetries:

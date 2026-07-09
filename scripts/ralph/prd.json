@@ -525,8 +525,8 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/rebalance.py run_rebalance() chains calendar->promoted->signal->diff->gate->breaker->submit->poll exactly per AC. Trading-day check = Alpaca GET /v2/calendar (new AlpacaClient.get_calendar — store calendar can't answer 'today'); prices = store close/factor w/ position current_price fallback; 'today' = submitted_at in America/New_York; client_order_id rdq-<date>-<side>-<symbol> dedupes same-day reruns. All aborts notify Slack + exit 1 except HALT_FILE (exit 0 'halted'); unexpected exceptions notify then re-raise. --dry-run runs gate+breaker then prints the exact order list, exit 0, no submission. 26 new tests (FakeBroker over the REAL client) + LIVE read-only dry run through the proxy: real calendar/account ($100k), exact expected plan printed, halt exit 0, CLI no-promoted refusal exit 1."
     },
     {
       "id": "US-035",

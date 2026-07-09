@@ -18,6 +18,7 @@ may have been accepted) and blind retries could double-submit.
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -67,6 +68,15 @@ class Position:
     avg_entry_price: float
     current_price: float | None
     market_value: float | None
+
+
+@dataclass(frozen=True)
+class CalendarDay:
+    """One trading day from GET /v2/calendar."""
+
+    date: str  # YYYY-MM-DD
+    open: str  # market open, "09:30"
+    close: str  # market close, "16:00"
 
 
 @dataclass(frozen=True)
@@ -231,6 +241,26 @@ class AlpacaClient:
             payload["client_order_id"] = client_order_id
         row = self._request("POST", "/v2/orders", json_payload=payload)
         return _parse_order(self._expect_dict(row, "/v2/orders"))
+
+    def get_calendar(self, start: dt.date, end: dt.date) -> list[CalendarDay]:
+        """GET /v2/calendar: trading days within [start, end], inclusive.
+
+        Non-trading days (weekends, holidays) simply have no entry — a
+        single-day query returns an empty list when the market is closed
+        that day.
+        """
+        params = {"start": start.isoformat(), "end": end.isoformat()}
+        rows = self._expect_list(
+            self._request("GET", "/v2/calendar", params=params), "/v2/calendar"
+        )
+        return [
+            CalendarDay(
+                date=str(row["date"]),
+                open=str(row.get("open", "")),
+                close=str(row.get("close", "")),
+            )
+            for row in rows
+        ]
 
     def cancel_order(self, order_id: str) -> None:
         """DELETE /v2/orders/{id}: cancel one order (204 on success)."""
