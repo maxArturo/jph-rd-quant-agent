@@ -86,6 +86,23 @@
   records `.request(method, url, json=, headers=)` — a superset of the
   test_fmp.py GET-only fake).
 
+- Lifecycle recording into Notion goes through `orchestrator/notion_recorder.py`
+  (`NotionRecorder`, US-027) — the single write funnel for Research Ideas /
+  Hypothesis Log / Backtest Results. It is best-effort BY DESIGN: every
+  `record_*` method logs-and-swallows its own failures (a Notion outage must
+  never break Slack flows or the poller), so call sites never wrap it in
+  try/except — but also never rely on its return value for control flow.
+  Page-id mappings live in StateStore's `notion_pages` table (kind `idea`
+  keyed by thread_ts, kind `hypothesis` keyed by interaction_key); use
+  `get_notion_page`/`set_notion_page`, never re-query Notion to find a page.
+  Backtest Results rows are written at FEEDBACK auto-ack time (one feedback =
+  one completed experiment; its `decision` field is the SOTA flag), not at
+  run END. Recorder property names must match
+  docs/reference/notion-schema.md; metric properties reuse
+  summary.METRIC_SPECS labels. Tests: real recorder + NotionClient over
+  FakeSession (tests/test_notion_recorder.py) — recorder failures are
+  invisible to callers, so assert on `session.calls` payloads, not behavior.
+
 - Notion database ids live in `orchestrator/config.yaml` under
   `notion.databases.{research_ideas,hypothesis_log,backtest_results,
   decision_log,trade_ledger}` — written (and rewritten) by

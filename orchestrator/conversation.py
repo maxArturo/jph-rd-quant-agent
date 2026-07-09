@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from orchestrator import prompts
 from orchestrator.llm import LLMError, ModelRouter, RefusalError, ToolSpec
+from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import RunHandle
 from orchestrator.state import Directive, DuplicateRunError, Run, StateStore
 
@@ -255,6 +256,7 @@ class ConversationCore:
         router: ModelRouter,
         rdagent: ResearchLauncher | None = None,
         universes: UniverseManager | None = None,
+        recorder: NotionRecorder | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -268,6 +270,8 @@ class ConversationCore:
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
         self._universes: UniverseManager = universes
+        # Optional Notion audit trail (US-027); None disables recording.
+        self._recorder = recorder
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(self, thread_ts: str, text: str, say: SayFn) -> str:
@@ -324,6 +328,13 @@ class ConversationCore:
                 constraints=_clean_optional(args.get("constraints")),
             )
             say(text=format_directive_summary(directive), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_idea(
+                    thread_ts,
+                    raw_idea=self._raw_idea(thread_ts) or objective,
+                    directive=directive,
+                    universe=self._confirmed_universe_name(thread_ts) or DEFAULT_UNIVERSE,
+                )
             logger.info("saved directive #%s for thread %s", directive.id, thread_ts)
             return (
                 f"Directive #{directive.id} saved for this thread and the summary"
@@ -376,6 +387,8 @@ class ConversationCore:
                 self._rdagent.stop(handle.trace_id)
                 raise ValueError(duplicate_run_message(exc.existing)) from exc
             say(text=format_run_started(run), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_idea_status(thread_ts, "researching", universe=universe)
             logger.info("started research run %s for thread %s", handle.trace_id, thread_ts)
             return (
                 f"Research run started (trace {handle.trace_id}) and recorded for this"
@@ -410,6 +423,8 @@ class ConversationCore:
             cancelled = self._cancel_open_interactions(thread_ts)
             run = self._store.update_run_status(thread_ts, "stopped")
             say(text=format_run_stopped(run, cancelled), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_idea_status(thread_ts, "stopped")
             logger.info("stopped research run %s for thread %s", run.session_path, thread_ts)
             return (
                 "The research run was stopped and its row marked 'stopped'; the"
@@ -456,6 +471,8 @@ class ConversationCore:
             )
             run = self._store.update_run_status(thread_ts, "running")
             say(text=format_run_resumed(run), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_idea_status(thread_ts, "researching")
             logger.info("resumed research run %s for thread %s", run.session_path, thread_ts)
             return (
                 "The run was resumed from its stored session and its row is"
@@ -485,8 +502,28 @@ class ConversationCore:
         for status in ("pending", "editing"):
             for row in self._store.list_pending_interactions(thread_ts, status=status):
                 self._store.resolve_pending_interaction(row.id, "cancelled")
+                if self._recorder is not None:
+                    self._recorder.record_hypothesis_action(row.interaction_key, "cancelled")
                 cancelled += 1
         return cancelled
+
+    def _raw_idea(self, thread_ts: str) -> str | None:
+        """The operator's first message this process saw for the thread.
+
+        Best effort: the in-memory transcript is lost on restart, so after one
+        the earliest retained message (usually the one that triggered the
+        save) stands in for the original idea.
+        """
+        for msg in self._histories.get(thread_ts, []):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                return msg["content"]
+        return None
+
+    def _confirmed_universe_name(self, thread_ts: str) -> str | None:
+        record = self._store.get_thread_universe(thread_ts)
+        if record is not None and record.status == "confirmed":
+            return record.name
+        return None
 
     def _set_universe_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:

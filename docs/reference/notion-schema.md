@@ -19,13 +19,19 @@ never writes — this keeps write paths testable, makes reconciliation
 meaningful (a ledger row can only have come from the rebalancer), and avoids
 concurrent-edit conflicts (Notion 409s on concurrent saves).
 
-| Database         | Sole writer                                        |
-| ---------------- | -------------------------------------------------- |
-| Research Ideas   | orchestrator conversation core (directive tools)   |
-| Hypothesis Log   | orchestrator hypothesis poller                     |
-| Backtest Results | orchestrator poller (run-completion path)          |
-| Decision Log     | orchestrator operator tools (promote, halt/resume) |
-| Trade Ledger     | execution rebalancer                               |
+| Database         | Sole writer                                                  |
+| ---------------- | ------------------------------------------------------------ |
+| Research Ideas   | orchestrator NotionRecorder (directive + run lifecycle)       |
+| Hypothesis Log   | orchestrator NotionRecorder (poller hypothesis paths)         |
+| Backtest Results | orchestrator NotionRecorder (poller experiment-feedback path) |
+| Decision Log     | orchestrator operator tools (promote, halt/resume)            |
+| Trade Ledger     | execution rebalancer                                          |
+
+Inside the orchestrator process, `orchestrator/notion_recorder.py`
+(`NotionRecorder`, US-027) is the single write funnel for the first three
+databases: the conversation core records directives and run-status changes,
+the hypothesis poller records hypotheses, operator actions, and completed
+experiments — all through the one shared recorder instance.
 
 Humans may add comments or extra pages in the workspace, but must not edit
 rows in these databases — treat them as append-mostly logs owned by code.

@@ -140,6 +140,12 @@ def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
+    from orchestrator.notion_client import NotionClient
+    from orchestrator.notion_recorder import (
+        NotionRecorder,
+        RecorderConfigError,
+        load_notion_databases,
+    )
     from orchestrator.poller import HypothesisPoller
     from orchestrator.rdagent_client import RdAgentClient
     from orchestrator.state import StateStore
@@ -151,8 +157,28 @@ def main() -> None:
     # One WebClient shared by Bolt and the background poller (which posts
     # outside any Bolt request context, so it needs the client directly).
     web_client = WebClient(token=config.bot_token)
-    conversation = ConversationCore(store=store, router=ModelRouter(), rdagent=rdagent)
-    poller = HypothesisPoller(store, rdagent, slack=web_client, channel_id=config.channel_id)
+
+    recorder = None
+    try:
+        databases = load_notion_databases()
+    except RecorderConfigError as exc:
+        logger.warning("Notion recording disabled: %s", exc)
+    else:
+
+        def _permalink(thread_ts: str) -> str | None:
+            response = web_client.chat_getPermalink(
+                channel=config.channel_id, message_ts=thread_ts
+            )
+            return response.get("permalink")
+
+        recorder = NotionRecorder(NotionClient(), databases, store, permalink=_permalink)
+
+    conversation = ConversationCore(
+        store=store, router=ModelRouter(), rdagent=rdagent, recorder=recorder
+    )
+    poller = HypothesisPoller(
+        store, rdagent, slack=web_client, channel_id=config.channel_id, recorder=recorder
+    )
     app = create_app(config, conversation, interactions=poller, client=web_client)
     poller.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)

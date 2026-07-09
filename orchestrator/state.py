@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS promoted_strategy (
     promoted_at    TEXT NOT NULL
 );
 
+-- Notion page-id mappings (US-027): which Notion page records a given
+-- lifecycle object (kind 'idea' keyed by thread_ts, kind 'hypothesis' keyed
+-- by interaction_key), so later lifecycle points update the same page.
+CREATE TABLE IF NOT EXISTS notion_pages (
+    kind       TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    page_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+
 CREATE TABLE IF NOT EXISTS pending_interactions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_ts       TEXT NOT NULL,
@@ -397,6 +408,26 @@ class StateStore:
             config=json.loads(row["config"]),
             promoted_at=row["promoted_at"],
         )
+
+    # -- notion page mappings (US-027) -------------------------------------------
+
+    def set_notion_page(self, kind: str, key: str, page_id: str) -> None:
+        """Remember which Notion page records (kind, key) — upsert."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO notion_pages (kind, key, page_id, created_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (kind, key) DO UPDATE SET page_id = excluded.page_id",
+                (kind, key, page_id, _utcnow()),
+            )
+
+    def get_notion_page(self, kind: str, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT page_id FROM notion_pages WHERE kind = ? AND key = ?",
+                (kind, key),
+            ).fetchone()
+        return None if row is None else row["page_id"]
 
     # -- pending interactions ---------------------------------------------------
 

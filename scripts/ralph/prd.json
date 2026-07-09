@@ -418,8 +418,8 @@
         "Typecheck passes"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: orchestrator/notion_recorder.py NotionRecorder — single Notion write funnel (best-effort: log-and-swallow so outages never break Slack/poller). Directive save -> Research Ideas page (raw idea = first thread message, directive, universe, Status proposed, Thread TS + permalink); start/stop/resume/completion -> Status transitions; posted hypothesis -> Hypothesis Log row (Action pending, Idea relation) with approve/edit/reject/cancel updates; each FEEDBACK auto-ack -> Backtest Results row (metrics via summary.METRIC_SPECS, Sharpe csv-or-ret.pkl, SOTA = feedback decision, workspace, Idea relation). Page-id mappings persist in new notion_pages SQLite table. 22 unit tests (payload asserts on FakeSession) + LIVE smoke against real Notion DBs: all rows landed, status/action/relation verified by read-after-write, smoke pages archived."
     },
     {
       "id": "US-028",

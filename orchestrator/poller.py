@@ -27,6 +27,12 @@ run finishes, the poller posts the backtest metrics summary (qlib_res.csv)
 and uploads the equity-curve chart (ret.pkl -> PNG) to the owning thread,
 then moves the run row to its terminal status — which removes it from the
 ``running`` set, so completion is handled exactly once.
+
+Notion audit trail (US-027): when a NotionRecorder is injected, each posted
+hypothesis becomes a Hypothesis Log row, each operator action updates it,
+each auto-acked feedback records its completed experiment's metrics as a
+Backtest Results row, and run completion moves the idea page's Status. All
+of it is best-effort — the recorder logs and swallows its own failures.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from orchestrator import summary
+from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import (
     KIND_BASE_FEATURES,
     KIND_FEEDBACK,
@@ -206,6 +213,7 @@ class HypothesisPoller:
         channel_id: str,
         interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
+        recorder: NotionRecorder | None = None,
     ) -> None:
         self._store = store
         self._rdagent = rdagent
@@ -213,6 +221,8 @@ class HypothesisPoller:
         self._channel_id = channel_id
         self._interval = interval_seconds
         self._locate = locate
+        # Optional Notion audit trail (US-027); None disables recording.
+        self._recorder = recorder
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -301,6 +311,8 @@ class HypothesisPoller:
             self._store.delete_pending_interaction(row.id)
             logger.exception("failed to post hypothesis to thread %s", run.thread_ts)
             return 0
+        if self._recorder is not None:
+            self._recorder.record_hypothesis(run.thread_ts, interaction.key, interaction.content)
         logger.info("posted hypothesis %s to thread %s", interaction.key, run.thread_ts)
         return 1
 
@@ -319,7 +331,45 @@ class HypothesisPoller:
             logger.exception("failed to auto-ack feedback for thread %s", run.thread_ts)
             return
         self._store.resolve_pending_interaction(row.id, "auto_approved")
+        self._record_experiment(run, interaction)
         logger.info("auto-acknowledged feedback %s for thread %s", interaction.key, run.thread_ts)
+
+    def _record_experiment(self, run: Run, interaction: PendingInteraction) -> None:
+        """Record the just-judged experiment as a Backtest Results row (US-027).
+
+        A feedback interaction marks one completed experiment: the runner
+        result (and its workspace metrics) already exist, and the feedback's
+        ``decision`` is the loop's SOTA verdict on it. Best-effort — missing
+        or unparsable artifacts are logged, never raised.
+        """
+        if self._recorder is None:
+            return
+        try:
+            artifacts = self._locate(run.session_path)
+            metrics = summary.load_metrics(artifacts.qlib_res_csv)
+        except (ArtifactNotFoundError, OSError, summary.SummaryError) as exc:
+            logger.warning(
+                "no backtest artifacts to record for run %s: %s", run.session_path, exc
+            )
+            return
+        sharpe = next((metrics[k] for k in summary.SHARPE_CSV_KEYS if k in metrics), None)
+        if sharpe is None and artifacts.ret_pkl is not None:
+            try:
+                sharpe = summary.compute_sharpe(artifacts.ret_pkl)
+            except summary.SummaryError:
+                sharpe = None
+        title = f"Experiment {interaction.timestamp}"
+        if run.universe:
+            title += f" — {run.universe}"
+        self._recorder.record_backtest(
+            run.thread_ts,
+            title=title,
+            metrics=metrics,
+            sharpe=sharpe,
+            sota=bool(interaction.content.get("decision")),
+            workspace_path=str(artifacts.workspace_path),
+            universe=run.universe,
+        )
 
     # -- run completion (US-022) ---------------------------------------------
 
@@ -381,6 +431,8 @@ class HypothesisPoller:
                 file=chart_png,
             )
         self._store.update_run_status(run.thread_ts, terminal_status(status))
+        if self._recorder is not None:
+            self._recorder.record_idea_status(run.thread_ts, terminal_status(status))
         logger.info(
             "run %s finished (end_code=%s) — summary posted to thread %s",
             run.session_path,
@@ -398,6 +450,8 @@ class HypothesisPoller:
         if not self._submit_row(row, row.payload["content"], say):
             return
         self._store.resolve_pending_interaction(row.id, "approved")
+        if self._recorder is not None:
+            self._recorder.record_hypothesis_action(row.interaction_key, "approved")
         say(
             text=":white_check_mark: Hypothesis approved and submitted to the run.",
             thread_ts=row.thread_ts,
@@ -411,6 +465,8 @@ class HypothesisPoller:
         if not self._submit_row(row, rejection_payload(row.payload["content"]), say):
             return
         self._store.resolve_pending_interaction(row.id, "rejected")
+        if self._recorder is not None:
+            self._recorder.record_hypothesis_action(row.interaction_key, "rejected")
         say(
             text=(
                 ":no_entry: Hypothesis rejected — the run was told to discard it"
@@ -440,6 +496,10 @@ class HypothesisPoller:
         if not self._submit_row(row, edited_payload(row.payload["content"], text), say):
             return True  # consumed (the operator was told the submit failed)
         self._store.resolve_pending_interaction(row.id, "edited")
+        if self._recorder is not None:
+            self._recorder.record_hypothesis_action(
+                row.interaction_key, "edited", operator_input=text.strip()
+            )
         say(
             text=":pencil2: Edited hypothesis submitted to the run.",
             thread_ts=row.thread_ts,
