@@ -299,19 +299,49 @@ def test_stop_unknown_trace_raises(stub: StubServerUi) -> None:
 def test_resume_unsupported_upstream_raises_specific_error(stub: StubServerUi) -> None:
     client = make_client(stub)
     handle = start(stub, client)
-    with pytest.raises(UnsupportedActionError, match="US-024"):
+    with pytest.raises(UnsupportedActionError, match="research/server_ui.py"):
         client.resume(handle.trace_id)
 
 
 def test_resume_against_resume_capable_server(resume_stub: StubServerUi) -> None:
     client = make_client(resume_stub)
     handle = start(resume_stub, client)
+    seeded_before = len(resume_stub.submitted[handle.trace_id])
     client.resume(handle.trace_id, session_path="/traces/x/__session__/3/0_propose")
     assert resume_stub.controls[-1] == {
         "id": handle.trace_id,
         "action": "resume",
         "path": "/traces/x/__session__/3/0_propose",
     }
+    # without a directive nothing is re-seeded
+    assert len(resume_stub.submitted[handle.trace_id]) == seeded_before
+
+
+def test_resume_with_directive_reseeds_init_interactions(resume_stub: StubServerUi) -> None:
+    """A resumed run re-blocks on init params + base features — resume must
+    re-seed both, mirroring start_run's FIFO pre-seeding."""
+    client = make_client(resume_stub)
+    handle = start(resume_stub, client)
+    client.resume(
+        handle.trace_id,
+        session_path="/traces/x",
+        directive="Find momentum factors",
+        universe="us_liquid",
+    )
+    seeded = resume_stub.submitted[handle.trace_id]
+    assert len(seeded) == 4  # 2 from start_run + 2 re-seeded by resume
+    assert "Find momentum factors" in seeded[2]["user_instruction"]
+    assert "us_liquid" in seeded[2]["user_instruction"]
+    assert seeded[3] == FEATURES
+
+
+def test_resume_failure_does_not_seed(resume_stub: StubServerUi) -> None:
+    client = make_client(resume_stub)
+    with pytest.raises(RdAgentServerError, match="No running process"):
+        client.resume(
+            "Finance Whole Pipeline/nope", directive="Find momentum factors"
+        )
+    assert resume_stub.submitted["Finance Whole Pipeline/nope"] == []
 
 
 # -- transport errors / health ---------------------------------------------

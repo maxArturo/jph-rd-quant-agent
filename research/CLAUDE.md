@@ -64,3 +64,11 @@
   env vars (UI_TRACE_FOLDER, UI_STATIC_PATH) are read at import time of
   `rdagent.log.ui.conf` and default to CWD-relative `./git_ignore_folder/` —
   set them (the unit points at ~/rdq-runs/server_ui/) before import.
+- server_ui also installs the `/control` resume extension (US-024,
+  `install_resume_control()`): it wraps the registered Flask view at RUNTIME
+  (`app.view_functions["control_process"]`) — the supported pattern for
+  changing upstream endpoint behavior without touching the pinned tree.
+  Handlers must read `log_folder_path`/`rdagent_processes`/`RDAgentTask`
+  through the `rdagent.log.server.app` module at call time so tests can
+  monkeypatch them. When re-registering a task for the same trace id, carry
+  `messages` over WITHOUT `END` tags or the run reads as already finished.

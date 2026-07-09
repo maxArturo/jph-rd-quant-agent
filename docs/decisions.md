@@ -356,3 +356,39 @@ that; built-in/reserved names (us_liquid, sp500, all) cannot be reused.
 Below `min_size` (default 30) tickers the proposal warns and suggests padding
 with liquid sector peers, because RD-Agent(Q) ranks cross-sectionally and a
 thin cross-section makes top-k selection noise.
+
+## 2026-07-09 — US-024: server-side resume extension + stop/resume tools
+
+Upstream server_ui's `/control` implements only `stop`, but the run targets
+themselves support session resume (`fin_quant` main(path=...) ->
+`RDLoop.load(path, checkout=True)` picks the latest dumped step under
+`<trace_dir>/__session__/`). research/server_ui.py therefore installs a
+**runtime view wrapper** over the registered Flask `control_process` view
+(`install_resume_control()`): `action: "resume"` relaunches the target from
+the checkpointed session **under the same trace id** (messages, polling and
+artifact resolution continue), everything else delegates to upstream
+unchanged. The pinned tree on disk stays byte-identical (RECORD-hash test).
+
+Resume semantics and guards:
+
+- default session path = the trace dir itself; an explicit `path` must live
+  under UI_TRACE_FOLDER (containment check) and contain dumped loop steps.
+- refuses while the process is still alive; only the three fin scenarios are
+  resumable (their mains take `path=`); `loops`/`all_duration` pass through.
+- the old task's message history is carried onto the new task **minus END
+  markers** — a stale END would make `status()` report the resumed run as
+  instantly finished and the poller would close it out on the first tick.
+- a resumed interactive run re-runs `_interact_init_params()`, i.e. it blocks
+  on init-params + base-features again exactly like a fresh start. The
+  poller deliberately never answers those kinds, so
+  `RdAgentClient.resume(..., directive=, universe=)` re-seeds both answers
+  the way `start_run` does — resume without a directive deadlocks the run.
+
+Slack tools (conversation.py): `stop_run` = /control stop -> cancel the
+thread's unanswered hypothesis rows (status 'cancelled'; a stopped run's IPC
+queues are gone, and the resumed run re-proposes under fresh interaction
+keys) -> run row 'stopped'. `resume_run` = /control resume from the stored
+session_path with the saved directive re-seeded -> run row back to 'running',
+which is what re-activates the poller (it polls `status='running'` rows).
+If the poller's END(-1) handler wins the race with stop_run's status update,
+both write 'stopped' — harmless either order.

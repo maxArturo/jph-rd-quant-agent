@@ -370,8 +370,8 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: stop_run/resume_run ToolSpecs in ConversationCore. stop_run = /control stop -> cancel unanswered pending/editing rows ('cancelled') -> run row 'stopped'. resume_run = /control resume from the stored session_path (server extension: research/server_ui.py install_resume_control() wraps the upstream Flask view at runtime — RDLoop.load relaunch under the SAME trace id, END markers stripped from carried-over history) with the saved directive re-seeded (resumed runs re-block on init interactions), then row back to 'running' which re-activates the poller. 17 new tests + live service probes (extension deployed, guards + upstream delegation verified) + real-fable-5 smoke over real HTTP: stop->resume full flow PASS."
     },
     {
       "id": "US-025",

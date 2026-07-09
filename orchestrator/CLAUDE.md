@@ -47,8 +47,11 @@
   requests stay in the stream — dedup with `PendingInteraction.key`, and skip
   kinds `init_params`/`base_features`, which `start_run()` auto-answers);
   `submit()` answers the OLDEST unanswered interaction (FIFO queue, not
-  addressed to a specific request); `resume()` raises
-  `UnsupportedActionError` until US-024 extends research/server_ui.py.
+  addressed to a specific request); `resume()` needs the research/server_ui.py
+  resume extension (a bare upstream server raises `UnsupportedActionError`)
+  and MUST be passed `directive=`/`universe=` — a resumed run re-blocks on
+  the init interactions like a fresh start, and the poller never answers
+  those kinds, so resume re-seeds them the way `start_run` does.
   `locate_artifacts(trace_dir)` unpickles `runner result` pkls — trace dirs
   for server-started runs live under `~/rdq-runs/server_ui/traces/<trace_id>`,
   NOT under the LOG_TRACE_PATH convention of the CLI wrappers. Tests: stub
@@ -57,10 +60,18 @@
   `base_features={...}` so the client never imports rdagent.
 - Session-path convention (US-020): `runs.session_path` stores
   `str(client.trace_dir(handle.trace_id))`; recover the trace id for API
-  calls with `client.trace_id_of(session_path)`. Tools that only need
-  start_run/trace_dir/stop should depend on the `ResearchLauncher` protocol
-  in conversation.py (stub-friendly — see StubLauncher in
-  tests/test_conversation.py) rather than the concrete client.
+  calls with `client.trace_id_of(session_path)`. Run-lifecycle tools should
+  depend on the `ResearchLauncher` protocol in conversation.py
+  (start_run/trace_dir/trace_id_of/stop/resume; stub-friendly — see
+  StubLauncher in tests/test_conversation.py) rather than the concrete client.
+- Run lifecycle via `runs.status` (US-024): stop_run flips
+  running -> 'stopped' AND cancels the thread's unanswered
+  pending/editing interaction rows ('cancelled' — a stopped run's IPC queues
+  are dead and the resumed run re-proposes under fresh keys); resume_run
+  flips back to 'running', which is what re-activates the poller (it only
+  polls `status='running'` rows). Never flip a row to 'running' without
+  actually resuming the server-side process, or the poller will poll a
+  corpse forever.
 
 ## Testing Bolt apps (see tests/test_slack_app.py)
 

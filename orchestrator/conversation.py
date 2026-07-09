@@ -42,13 +42,24 @@ DEFAULT_UNIVERSE = "us_liquid"
 
 
 class ResearchLauncher(Protocol):
-    """What the start_research tool needs from RdAgentClient (stub-friendly)."""
+    """What the run-lifecycle tools need from RdAgentClient (stub-friendly)."""
 
     def start_run(self, directive: str, universe: str) -> RunHandle: ...
 
     def trace_dir(self, trace_id: str) -> Path: ...
 
+    def trace_id_of(self, session_path: str | Path) -> str: ...
+
     def stop(self, trace_id: str) -> None: ...
+
+    def resume(
+        self,
+        trace_id: str,
+        session_path: str | Path | None = None,
+        *,
+        directive: str | None = None,
+        universe: str = "",
+    ) -> None: ...
 
 class UniverseManager(Protocol):
     """What the set_universe tools need from UniverseService (stub-friendly)."""
@@ -60,6 +71,18 @@ class UniverseManager(Protocol):
 
 START_RESEARCH_SCHEMA: dict[str, Any] = {
     # No inputs: the run is driven entirely by the thread's saved directive.
+    "type": "object",
+    "properties": {},
+}
+
+STOP_RUN_SCHEMA: dict[str, Any] = {
+    # No inputs: stops the thread's run.
+    "type": "object",
+    "properties": {},
+}
+
+RESUME_RUN_SCHEMA: dict[str, Any] = {
+    # No inputs: resumes the thread's run from its stored session.
     "type": "object",
     "properties": {},
 }
@@ -168,6 +191,33 @@ def format_universe_ready(materialized: MaterializedUniverse) -> str:
     )
 
 
+def format_run_stopped(run: Run, cancelled_interactions: int) -> str:
+    """Slack mrkdwn confirmation posted when the operator stops the run."""
+    text = (
+        ":octagonal_sign: *Research run stopped.*\n"
+        f"*Session:* `{run.session_path}`\n"
+        "Progress up to the last completed step is checkpointed — say the word"
+        " and I'll resume it from there."
+    )
+    if cancelled_interactions:
+        text += (
+            f"\n_{cancelled_interactions} open hypothesis prompt(s) above were"
+            " cancelled — the run will re-propose after a resume._"
+        )
+    return text
+
+
+def format_run_resumed(run: Run) -> str:
+    """Slack mrkdwn confirmation posted when a stopped run is resumed."""
+    return (
+        ":arrow_forward: *Research run resumed*\n"
+        f"*Universe:* {run.universe}\n"
+        f"*Session:* `{run.session_path}`\n"
+        "Picking up from the last checkpoint — new hypotheses will be posted"
+        " here for approval."
+    )
+
+
 def duplicate_run_message(existing: Run) -> str:
     return (
         f"this thread already has a research run (status: {existing.status}, "
@@ -234,6 +284,8 @@ class ConversationCore:
                 [
                     self._save_directive_tool(thread_ts, say),
                     self._start_research_tool(thread_ts, say),
+                    self._stop_run_tool(thread_ts, say),
+                    self._resume_run_tool(thread_ts, say),
                     self._set_universe_tool(thread_ts, say),
                     self._confirm_universe_tool(thread_ts, say),
                 ],
@@ -342,6 +394,99 @@ class ConversationCore:
             input_schema=START_RESEARCH_SCHEMA,
             handler=handler,
         )
+
+    def _stop_run_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — stops the thread's run
+            run = self._store.get_run(thread_ts)
+            if run is None:
+                raise ValueError("no research run exists in this thread — nothing to stop")
+            if run.status != "running":
+                raise ValueError(
+                    f"the run in this thread is not running (status: {run.status})"
+                    " — nothing to stop"
+                )
+            self._rdagent.stop(self._rdagent.trace_id_of(run.session_path))
+            cancelled = self._cancel_open_interactions(thread_ts)
+            run = self._store.update_run_status(thread_ts, "stopped")
+            say(text=format_run_stopped(run, cancelled), thread_ts=thread_ts)
+            logger.info("stopped research run %s for thread %s", run.session_path, thread_ts)
+            return (
+                "The research run was stopped and its row marked 'stopped'; the"
+                " stop notice was posted. It can be resumed later with resume_run."
+                " Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="stop_run",
+            description=(
+                "Stop this thread's in-flight research run (checkpointed — it can"
+                " be resumed later with resume_run). Call it only when the operator"
+                " explicitly asks to stop, pause, or kill the run."
+            ),
+            input_schema=STOP_RUN_SCHEMA,
+            handler=handler,
+        )
+
+    def _resume_run_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — resumes the thread's stored session
+            run = self._store.get_run(thread_ts)
+            if run is None:
+                raise ValueError(
+                    "no research run exists in this thread — start one with"
+                    " start_research instead"
+                )
+            if run.status == "running":
+                raise ValueError(
+                    f"the run in this thread is already running (session:"
+                    f" {run.session_path}) — nothing to resume"
+                )
+            directive = self._store.get_directive(thread_ts)
+            if directive is None:
+                raise ValueError(
+                    "no saved directive for this thread — a resumed run re-asks for"
+                    " its instruction, so save_directive must be called first"
+                )
+            self._rdagent.resume(
+                self._rdagent.trace_id_of(run.session_path),
+                run.session_path,
+                directive=directive_instruction(directive),
+                universe=run.universe or DEFAULT_UNIVERSE,
+            )
+            run = self._store.update_run_status(thread_ts, "running")
+            say(text=format_run_resumed(run), thread_ts=thread_ts)
+            logger.info("resumed research run %s for thread %s", run.session_path, thread_ts)
+            return (
+                "The run was resumed from its stored session and its row is"
+                " 'running' again, so hypothesis polling is re-activated; the"
+                " resume notice was posted. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="resume_run",
+            description=(
+                "Resume this thread's previously stopped research run from its"
+                " checkpointed session. Call it only when the operator explicitly"
+                " asks to resume/continue the run."
+            ),
+            input_schema=RESUME_RUN_SCHEMA,
+            handler=handler,
+        )
+
+    def _cancel_open_interactions(self, thread_ts: str) -> int:
+        """Mark the thread's unanswered hypothesis prompts 'cancelled'.
+
+        A stopped run's IPC queues are gone, so pending/editing rows can never
+        be submitted; leaving them actionable would wedge the poller's FIFO
+        guard after a resume (the resumed run re-proposes under fresh keys).
+        """
+        cancelled = 0
+        for status in ("pending", "editing"):
+            for row in self._store.list_pending_interactions(thread_ts, status=status):
+                self._store.resolve_pending_interaction(row.id, "cancelled")
+                cancelled += 1
+        return cancelled
 
     def _set_universe_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:

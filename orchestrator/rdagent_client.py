@@ -9,9 +9,10 @@ mapping is recorded in docs/decisions.md:
   pending interactions               is drained into the message list per poll)
 - answer interaction   -> POST /user_interaction/submit  ({"id", "payload"})
 - stop a run           -> POST /control  ({"id", "action": "stop"})
-- resume a run         -> POST /control  action "resume" — NOT supported by
-  the pinned upstream (it 400s "Only 'stop' action is supported"); the client
-  raises UnsupportedActionError until US-024 extends research/server_ui.py.
+- resume a run         -> POST /control  action "resume" + "path" — an
+  extension research/server_ui.py adds over upstream (US-024); the pinned
+  upstream 400s "Only 'stop' action is supported", which the client maps to
+  UnsupportedActionError.
 
 Interaction model (rdagent RDLoop._interact_*): a fin_quant run started via
 the server always gets IPC queues and blocks, in order, on
@@ -194,12 +195,25 @@ class RdAgentClient:
         """POST /control stop; terminates the run's subprocess."""
         self._request("POST", "/control", json={"id": trace_id, "action": "stop"})
 
-    def resume(self, trace_id: str, session_path: str | Path | None = None) -> None:
+    def resume(
+        self,
+        trace_id: str,
+        session_path: str | Path | None = None,
+        *,
+        directive: str | None = None,
+        universe: str = "",
+    ) -> None:
         """POST /control resume (from ``session_path`` if given).
 
-        The pinned upstream only supports "stop" — until research/server_ui.py
-        grows a resume extension (US-024) this raises UnsupportedActionError
-        against the real server.
+        Requires the research/server_ui.py resume extension (US-024); a bare
+        upstream server 400s "Only 'stop'", which raises
+        UnsupportedActionError.
+
+        A resumed interactive run re-blocks on the two init interactions
+        (RDLoop main re-runs ``_interact_init_params``), exactly like a fresh
+        start — pass ``directive`` (and ``universe``) to re-seed them the way
+        ``start_run`` does, or the run waits forever on answers the poller
+        deliberately never gives (it skips init kinds).
         """
         payload: dict[str, Any] = {"id": trace_id, "action": "resume"}
         if session_path is not None:
@@ -209,11 +223,14 @@ class RdAgentClient:
         except RdAgentServerError as exc:
             if "only 'stop' action is supported" in str(exc).lower():
                 raise UnsupportedActionError(
-                    "server_ui does not support resume yet (upstream /control only "
-                    "implements 'stop'; US-024 adds a resume extension in "
-                    f"research/server_ui.py). Server said: {exc}"
+                    "this server_ui does not support resume (upstream /control only "
+                    "implements 'stop'). Run it via research/server_ui.py, which "
+                    f"installs the resume extension. Server said: {exc}"
                 ) from exc
             raise
+        if directive is not None:
+            self.submit(trace_id, {"user_instruction": self._instruction_text(directive, universe)})
+            self.submit(trace_id, self._default_base_features())
 
     # -- inspection -------------------------------------------------------
 
