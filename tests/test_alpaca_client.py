@@ -1,0 +1,375 @@
+"""Unit tests for execution/alpaca_client.py (mocked HTTP) plus a live proxy smoke test."""
+
+from __future__ import annotations
+
+import os
+import pathlib
+from typing import Any
+
+import pytest
+
+from execution.alpaca_client import (
+    BASE_URL,
+    Account,
+    AlpacaAuthError,
+    AlpacaClient,
+    AlpacaError,
+    AlpacaRateLimitError,
+    Order,
+    Position,
+)
+
+ACCOUNT_ROW = {
+    "id": "b3f2a9c1-0000-4000-8000-000000000001",
+    "status": "ACTIVE",
+    "currency": "USD",
+    "equity": "100000.25",
+    "cash": "40000.5",
+    "buying_power": "80001.0",
+}
+
+ORDER_ROW = {
+    "id": "ord-1",
+    "client_order_id": "rdq-1",
+    "symbol": "AAPL",
+    "qty": "10",
+    "notional": None,
+    "side": "buy",
+    "type": "limit",
+    "time_in_force": "day",
+    "limit_price": "199.5",
+    "status": "accepted",
+    "filled_qty": "0",
+    "filled_avg_price": None,
+    "submitted_at": "2026-07-09T13:30:00.000000Z",
+}
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        status_code: int,
+        payload: Any = None,
+        headers: dict[str, str] | None = None,
+        text: str = "",
+    ) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+        self.text = text
+
+    def json(self) -> Any:
+        if self._payload is None:
+            raise ValueError("no JSON body")
+        return self._payload
+
+
+class FakeSession:
+    """Returns queued responses and records every request() call."""
+
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, str] | None = None,
+        json: Any = None,
+        timeout: float | None = None,
+    ) -> FakeResponse:
+        self.calls.append(
+            {"method": method, "url": url, "params": params, "json": json, "timeout": timeout}
+        )
+        if not self._responses:
+            raise AssertionError("FakeSession ran out of queued responses")
+        return self._responses.pop(0)
+
+
+def make_client(
+    responses: list[FakeResponse], **kwargs: Any
+) -> tuple[AlpacaClient, FakeSession, list[float]]:
+    session = FakeSession(responses)
+    sleeps: list[float] = []
+    client = AlpacaClient(session=session, sleep=sleeps.append, **kwargs)
+    return client, session, sleeps
+
+
+class TestPaperOnlyGuard:
+    def test_default_base_url_is_paper(self) -> None:
+        client, _, _ = make_client([])
+        assert client.base_url == "https://paper-api.alpaca.markets"
+        assert "paper-api" in BASE_URL
+
+    def test_live_host_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="paper-only"):
+            AlpacaClient(base_url="https://api.alpaca.markets")
+
+    def test_custom_non_live_base_url_allowed(self) -> None:
+        client, _, _ = make_client([], base_url="http://127.0.0.1:8123/")
+        assert client.base_url == "http://127.0.0.1:8123"
+
+    def test_no_apca_headers_in_source(self) -> None:
+        source = (
+            pathlib.Path(__file__).resolve().parents[1] / "execution" / "alpaca_client.py"
+        ).read_text()
+        assert "APCA-API-KEY-ID" not in source.replace(
+            "APCA-API-KEY-ID / APCA-API-SECRET-KEY header", ""
+        )
+        assert "headers=" not in source  # proxy injects credentials; client sends none
+
+
+class TestAccount:
+    def test_get_account_parses_snapshot(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, ACCOUNT_ROW)])
+        account = client.get_account()
+        assert session.calls == [
+            {
+                "method": "GET",
+                "url": f"{BASE_URL}/v2/account",
+                "params": None,
+                "json": None,
+                "timeout": 30.0,
+            }
+        ]
+        assert account == Account(
+            id="b3f2a9c1-0000-4000-8000-000000000001",
+            status="ACTIVE",
+            currency="USD",
+            equity=100000.25,
+            cash=40000.5,
+            buying_power=80001.0,
+        )
+
+    def test_unparseable_numeric_field_raises(self) -> None:
+        row = dict(ACCOUNT_ROW, equity="not-a-number")
+        client, _, _ = make_client([FakeResponse(200, row)])
+        with pytest.raises(AlpacaError, match="equity"):
+            client.get_account()
+
+
+class TestPositions:
+    def test_get_positions_parses_long_and_short(self) -> None:
+        rows = [
+            {
+                "symbol": "AAPL",
+                "qty": "10",
+                "side": "long",
+                "avg_entry_price": "190.25",
+                "current_price": "200.5",
+                "market_value": "2005",
+            },
+            {
+                "symbol": "TSLA",
+                "qty": "-5",
+                "side": "short",
+                "avg_entry_price": "300",
+                "current_price": None,
+                "market_value": None,
+            },
+        ]
+        client, session, _ = make_client([FakeResponse(200, rows)])
+        positions = client.get_positions()
+        assert session.calls[0]["url"] == f"{BASE_URL}/v2/positions"
+        assert positions == [
+            Position("AAPL", 10.0, "long", 190.25, 200.5, 2005.0),
+            Position("TSLA", -5.0, "short", 300.0, None, None),
+        ]
+
+    def test_flat_account_returns_empty_list(self) -> None:
+        client, _, _ = make_client([FakeResponse(200, [])])
+        assert client.get_positions() == []
+
+    def test_non_list_payload_raises(self) -> None:
+        client, _, _ = make_client([FakeResponse(200, {"message": "oops"})])
+        with pytest.raises(AlpacaError, match="expected a JSON list"):
+            client.get_positions()
+
+
+class TestListOrders:
+    def test_default_status_open(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, [ORDER_ROW])])
+        orders = client.list_orders()
+        assert session.calls[0]["params"] == {"status": "open"}
+        assert orders == [
+            Order(
+                id="ord-1",
+                client_order_id="rdq-1",
+                symbol="AAPL",
+                qty=10.0,
+                notional=None,
+                side="buy",
+                order_type="limit",
+                time_in_force="day",
+                limit_price=199.5,
+                status="accepted",
+                filled_qty=0.0,
+                filled_avg_price=None,
+                submitted_at="2026-07-09T13:30:00.000000Z",
+            )
+        ]
+
+    def test_filters_passed_as_params(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, [])])
+        client.list_orders(status="closed", limit=50, symbols=["AAPL", "MSFT"])
+        assert session.calls[0]["params"] == {
+            "status": "closed",
+            "limit": "50",
+            "symbols": "AAPL,MSFT",
+        }
+
+
+class TestPlaceOrder:
+    def test_limit_order_payload(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, ORDER_ROW)])
+        order = client.place_order(
+            "AAPL", qty=10, side="buy", limit_price=199.5, client_order_id="rdq-1"
+        )
+        assert session.calls == [
+            {
+                "method": "POST",
+                "url": f"{BASE_URL}/v2/orders",
+                "params": None,
+                "json": {
+                    "symbol": "AAPL",
+                    "qty": "10",
+                    "side": "buy",
+                    "type": "limit",
+                    "time_in_force": "day",
+                    "limit_price": "199.5",
+                    "client_order_id": "rdq-1",
+                },
+                "timeout": 30.0,
+            }
+        ]
+        assert order.id == "ord-1"
+        assert order.status == "accepted"
+
+    def test_market_order_payload_omits_limit_price(self) -> None:
+        row = dict(ORDER_ROW, type="market", limit_price=None)
+        client, session, _ = make_client([FakeResponse(200, row)])
+        client.place_order("AAPL", qty=2.5, side="sell", order_type="market")
+        assert session.calls[0]["json"] == {
+            "symbol": "AAPL",
+            "qty": "2.5",
+            "side": "sell",
+            "type": "market",
+            "time_in_force": "day",
+        }
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"qty": 0, "side": "buy", "limit_price": 1.0}, "qty must be positive"),
+            ({"qty": -1, "side": "buy", "limit_price": 1.0}, "qty must be positive"),
+            ({"qty": 1, "side": "hold", "limit_price": 1.0}, "side must be one of"),
+            ({"qty": 1, "side": "buy", "order_type": "stop"}, "order_type must be one of"),
+            ({"qty": 1, "side": "buy"}, "limit orders require limit_price"),
+            (
+                {"qty": 1, "side": "buy", "order_type": "market", "limit_price": 1.0},
+                "market orders must not set limit_price",
+            ),
+        ],
+    )
+    def test_invalid_order_rejected_before_any_http(
+        self, kwargs: dict[str, Any], match: str
+    ) -> None:
+        client, session, _ = make_client([])
+        with pytest.raises(ValueError, match=match):
+            client.place_order("AAPL", **kwargs)
+        assert session.calls == []
+
+
+class TestCancelOrder:
+    def test_cancel_returns_none_on_204(self) -> None:
+        client, session, _ = make_client([FakeResponse(204)])
+        assert client.cancel_order("ord-1") is None
+        assert session.calls == [
+            {
+                "method": "DELETE",
+                "url": f"{BASE_URL}/v2/orders/ord-1",
+                "params": None,
+                "json": None,
+                "timeout": 30.0,
+            }
+        ]
+
+    def test_uncancelable_order_raises_with_detail(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(422, {"code": 42210000, "message": "order is not cancelable"})]
+        )
+        with pytest.raises(AlpacaError, match="not cancelable"):
+            client.cancel_order("ord-1")
+
+
+class TestErrorsAndRetries:
+    def test_401_names_identity_and_setup_script(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(401, {"code": 40110000, "message": "access key verification failed"})]
+        )
+        with pytest.raises(AlpacaAuthError) as excinfo:
+            client.get_account()
+        message = str(excinfo.value)
+        assert "rdq-exec-paper" in message
+        assert "ops/setup_onecli.sh" in message
+        assert "access key verification failed" in message
+
+    def test_403_also_raises_auth_error(self) -> None:
+        client, _, _ = make_client([FakeResponse(403, {"message": "forbidden"})])
+        with pytest.raises(AlpacaAuthError):
+            client.get_positions()
+
+    def test_429_honors_retry_after_then_succeeds(self) -> None:
+        client, session, sleeps = make_client(
+            [
+                FakeResponse(429, headers={"Retry-After": "3"}),
+                FakeResponse(200, ACCOUNT_ROW),
+            ]
+        )
+        account = client.get_account()
+        assert account.id == ACCOUNT_ROW["id"]
+        assert sleeps == [3.0]
+        assert len(session.calls) == 2
+
+    def test_429_exponential_fallback_without_header(self) -> None:
+        client, _, sleeps = make_client(
+            [FakeResponse(429), FakeResponse(429), FakeResponse(200, ACCOUNT_ROW)]
+        )
+        client.get_account()
+        assert sleeps == [1.0, 2.0]
+
+    def test_429_exhaustion_raises_rate_limit_error(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(429) for _ in range(5)], max_retries=4
+        )
+        with pytest.raises(AlpacaRateLimitError, match="after 4 retries"):
+            client.get_account()
+
+    def test_5xx_is_never_retried(self) -> None:
+        client, session, sleeps = make_client(
+            [FakeResponse(500, {"message": "internal server error"})]
+        )
+        with pytest.raises(AlpacaError, match="HTTP 500"):
+            client.get_account()
+        assert sleeps == []
+        assert len(session.calls) == 1
+
+    def test_error_detail_falls_back_to_text(self) -> None:
+        client, _, _ = make_client([FakeResponse(500, text="plain body")])
+        with pytest.raises(AlpacaError, match="plain body"):
+            client.get_account()
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("RDQ_LIVE_TESTS") != "1",
+    reason="live proxy smoke; run with RDQ_LIVE_TESTS=1 under `onecli run --agent rdq-exec-paper`",
+)
+class TestLiveSmoke:
+    def test_get_account_returns_account_id(self) -> None:
+        client = AlpacaClient()
+        account = client.get_account()
+        assert account.id
+        assert account.currency == "USD"
+        assert account.equity > 0

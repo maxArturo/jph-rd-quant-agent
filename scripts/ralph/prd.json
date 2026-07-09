@@ -434,8 +434,8 @@
         "Typecheck passes"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/alpaca_client.py AlpacaClient — get_account/get_positions/list_orders/place_order/cancel_order against paper-api.alpaca.markets, bare HTTPS (source-grep test proves no APCA headers; proxy injects under rdq-exec-paper). Base URL configurable but constructor HARD-REFUSES api.alpaca.markets (paper-only). 429 retried w/ Retry-After; 5xx never retried (POST /v2/orders double-submit risk); 401/403 -> AlpacaAuthError naming identity+setup script. 28 unit tests + LIVE smoke through proxy PASSED: account 3de6db59-fdc6..., ACTIVE, equity $100k. Alpaca wire quirks in execution/CLAUDE.md (new)."
     },
     {
       "id": "US-029",

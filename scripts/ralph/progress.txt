@@ -393,3 +393,15 @@ Operator provisioned three things; PRD notes + docs/decisions.md updated to matc
   - Notion page ids come back dashed from create but query filters/relations compare fine; normalize dashes only when comparing ids from different sources.
   - US-033 (promotion/Decision Log): extend NotionRecorder with a record_decision method (decision_log db id already in NotionDatabases) rather than adding a second write path.
 ---
+## 2026-07-09 - US-028
+- Alpaca paper client: execution/alpaca_client.py AlpacaClient with get_account, get_positions, list_orders (status/limit/symbols filters), place_order (market/limit, string wire form for qty/limit_price, client_order_id passthrough), cancel_order (204 -> None). Typed frozen dataclasses Account/Position/Order.
+- Paper-only enforced in code: default base URL is paper-api.alpaca.markets; constructor raises ValueError on the live host (api.alpaca.markets appears only in the refusal guard). No APCA header anywhere — source-grep test asserts no `headers=` in the module; OneCLI proxy injects both paper secrets under rdq-exec-paper.
+- Errors: 401/403 -> AlpacaAuthError naming rdq-exec-paper + ops/setup_onecli.sh + check script; 429 retried honoring Retry-After (exponential fallback, AlpacaRateLimitError on exhaustion); 5xx NEVER retried (deliberate: a 500 on POST /v2/orders is ambiguous — retry could double-submit); order params validated client-side before any HTTP.
+- Files: execution/alpaca_client.py (new), tests/test_alpaca_client.py (28 unit + 1 live), execution/CLAUDE.md (new), scripts/ralph/prd.json.
+- Verified: 28 unit tests pass; LIVE smoke `RDQ_LIVE_TESTS=1 onecli run --agent rdq-exec-paper -- pytest -m live` PASSED — get_account returned account id 3de6db59-fdc6..., status ACTIVE, equity 100000.0, currency USD. make check green (ruff pass, pyright 0 errors, 415 passed / 2 skipped).
+- **Learnings for future iterations:**
+  - Alpaca v2 returns numeric fields as STRINGS ("equity": "100000.25") — always parse; position qty is SIGNED (negative for shorts) alongside a side field; notional orders have qty: null; DELETE /v2/orders/{id} returns 204 no-body.
+  - rdq-exec-paper identity + both paper secrets were already assigned by US-003's setup script — the live smoke needed zero new provisioning.
+  - Money-touching HTTP clients must NOT blanket-retry 5xx: POST /v2/orders on a 500 is ambiguous (order may exist). Idempotency for the rebalancer (US-032/034) should come from client_order_id, not retries.
+  - The paper account is fresh: $100k equity, ACTIVE, flat. US-034's first dry-run has a clean slate.
+---
