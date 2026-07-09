@@ -509,8 +509,8 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: orchestrator/promotion.py PromotionFlow — Promote button on completed-run summaries (poller adds promotion_offer_blocks; failed/stopped/no-artifact runs get none), confirmation restates universe + topk/n_drop (workspace's own conf via signal.load_strategy_params; unreadable params = refusal) + headline metrics, Confirm pins workspace+config into the single promoted_strategy row (replacement announced in-thread) + Decision Log row (NotionRecorder.record_decision, new) + idea Status 'promoted'. Buttons carry only thread_ts — candidate re-derived per click, restart-safe. Rebalancer entrypoint check: execution/promoted.load_promoted_strategy raises NoPromotedStrategyError (absent DB / no row / workspace gone). 22 new tests + LIVE smoke through the proxy: real Decision Log row created, read back, archived."
     },
     {
       "id": "US-034",

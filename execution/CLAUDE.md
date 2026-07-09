@@ -79,3 +79,12 @@
   calendar entry on/before as_of (`~/.qlib/qlib_data/us_data/calendars/
   day.txt`). Predictions are made FROM day T FOR T+1, so pred dated the last
   completed trading day is fresh for a pre-open rebalance.
+- The rebalancer's entrypoint check is `execution/promoted.py`
+  (`load_promoted_strategy()`): it refuses with `NoPromotedStrategyError`
+  when the orchestrator state DB is absent (it must NEVER create it from the
+  execution side), when no `promoted_strategy` row exists, or when the pinned
+  workspace directory is gone. US-034 must call it FIRST and treat the error
+  as abort-without-trading. The pinned config dict carries
+  universe/universe_tickers/topk/n_drop/thread_ts/session_path — pass topk/
+  n_drop into `signal.StrategyParams` rather than re-deriving them from the
+  workspace conf (the operator confirmed those exact values when promoting).

@@ -193,3 +193,21 @@
   the next poll. Terminal mapping from the upstream END message:
   end_code 0/None -> `completed`, -1 (operator stop) -> `stopped`,
   else -> `failed` (`terminal_status()` in poller.py).
+
+- Strategy promotion (US-033) lives in `orchestrator/promotion.py`
+  (`PromotionFlow`): the poller adds the Promote button to a completed run's
+  summary (`promotion_offer_blocks`), and app.py routes the three
+  `run_promote`/`promote_confirm`/`promote_cancel` actions via the
+  `PromotionHandler` protocol. Button values carry ONLY the thread_ts — the
+  candidate (workspace, universe, topk/n_drop from the workspace's own conf
+  via `execution.signal.load_strategy_params`, headline metrics) is
+  re-derived from SQLite + run artifacts on every click, so buttons survive
+  restarts with no pending-promotion state. Promotion refuses when the run
+  isn't `completed` or topk/n_drop can't be read (the rebalancer couldn't
+  reproduce the strategy); metrics merely degrade to n/a. Confirm pins
+  workspace + config into the single `promoted_strategy` row (replacement is
+  announced in-thread), writes a Decision Log row
+  (`NotionRecorder.record_decision`), and moves the idea page's Status to
+  `promoted`. The rebalancer-side check is `execution/promoted.py` —
+  keep the pinned config keys (universe/universe_tickers/topk/n_drop/
+  thread_ts/session_path) in sync with what US-034 consumes.

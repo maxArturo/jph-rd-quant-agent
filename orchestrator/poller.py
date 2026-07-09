@@ -26,7 +26,9 @@ Run completion (US-022): every poll also checks the run's END status. When a
 run finishes, the poller posts the backtest metrics summary (qlib_res.csv)
 and uploads the equity-curve chart (ret.pkl -> PNG) to the owning thread,
 then moves the run row to its terminal status — which removes it from the
-``running`` set, so completion is handled exactly once.
+``running`` set, so completion is handled exactly once. A successfully
+completed run's summary carries the Promote button (US-033; the click
+handlers live in orchestrator/promotion.py).
 
 Notion audit trail (US-027): when a NotionRecorder is injected, each posted
 hypothesis becomes a Hypothesis Log row, each operator action updates it,
@@ -45,6 +47,7 @@ from typing import Any, Protocol
 
 from orchestrator import summary
 from orchestrator.notion_recorder import NotionRecorder
+from orchestrator.promotion import promotion_offer_blocks
 from orchestrator.rdagent_client import (
     KIND_BASE_FEATURES,
     KIND_FEEDBACK,
@@ -421,7 +424,16 @@ class HypothesisPoller:
                 f" — nothing to summarize. ({artifact_problem})"
             )
 
-        self._slack.chat_postMessage(channel=self._channel_id, thread_ts=run.thread_ts, text=text)
+        post_kwargs: dict[str, Any] = {
+            "channel": self._channel_id,
+            "thread_ts": run.thread_ts,
+            "text": text,
+        }
+        # Promotion offer (US-033): only a successful run with resolvable
+        # artifacts is promotable, so only those summaries get the button.
+        if terminal_status(status) == "completed" and artifacts is not None:
+            post_kwargs["blocks"] = promotion_offer_blocks(run.thread_ts, text)
+        self._slack.chat_postMessage(**post_kwargs)
         if chart_png is not None:
             self._slack.files_upload_v2(
                 channel=self._channel_id,

@@ -106,7 +106,9 @@ def test_parse_env_file_missing_file_is_empty(tmp_path: Path) -> None:
 
 
 def make_app(
-    monkeypatch: pytest.MonkeyPatch, interactions: Any | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    interactions: Any | None = None,
+    promotions: Any | None = None,
 ) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
@@ -126,6 +128,7 @@ def make_app(
         CONFIG,
         conversation,
         interactions=interactions,
+        promotions=promotions,
         client=client,
         token_verification_enabled=False,
         process_before_response=True,

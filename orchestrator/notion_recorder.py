@@ -2,8 +2,9 @@
 
 The orchestrator's single Notion write funnel (docs/reference/notion-schema.md):
 saved directives land in Research Ideas, each proposed hypothesis and the
-operator's action on it in Hypothesis Log, and each completed experiment's
-backtest metrics in Backtest Results. Database ids come from
+operator's action on it in Hypothesis Log, each completed experiment's
+backtest metrics in Backtest Results, and deliberate trading decisions
+(promotion, halt/resume) in Decision Log. Database ids come from
 orchestrator/config.yaml (written by ops/bootstrap_notion.py — never hardcode
 them).
 
@@ -22,6 +23,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -119,6 +121,10 @@ def checkbox_property(value: bool) -> dict[str, Any]:
 
 def relation_property(page_id: str) -> dict[str, Any]:
     return {"relation": [{"id": page_id}]}
+
+
+def date_property(iso_datetime: str) -> dict[str, Any]:
+    return {"date": {"start": iso_datetime}}
 
 
 def directive_details(directive: Directive) -> str:
@@ -331,6 +337,46 @@ class NotionRecorder:
             properties["Idea"] = relation_property(idea_page)
         page = self._notion.create_page(
             {"type": "database_id", "database_id": self._databases.backtest_results},
+            properties,
+        )
+        return page["id"]
+
+    # -- Decision Log -----------------------------------------------------------
+
+    def record_decision(
+        self,
+        *,
+        title: str,
+        decision_type: str,
+        details: str,
+        thread_ts: str | None = None,
+    ) -> str | None:
+        """One row per deliberate decision that changes what trades (US-033).
+
+        ``decision_type`` is the schema's Type select (promotion / halt /
+        resume / universe / other); ``thread_ts`` links the row to the
+        thread's Research Ideas page when one is recorded.
+        """
+        return self._guarded(
+            f"record_decision {title!r}",
+            lambda: self._record_decision(title, decision_type, details, thread_ts),
+        )
+
+    def _record_decision(
+        self, title: str, decision_type: str, details: str, thread_ts: str | None
+    ) -> str:
+        properties: dict[str, Any] = {
+            "Decision": title_property(title),
+            "Type": select_property(decision_type),
+            "Details": rich_text_property(details),
+            "Decided At": date_property(datetime.now(timezone.utc).isoformat()),
+        }
+        if thread_ts is not None:
+            idea_page = self._store.get_notion_page(PAGE_KIND_IDEA, thread_ts)
+            if idea_page is not None:
+                properties["Idea"] = relation_property(idea_page)
+        page = self._notion.create_page(
+            {"type": "database_id", "database_id": self._databases.decision_log},
             properties,
         )
         return page["id"]

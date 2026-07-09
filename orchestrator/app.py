@@ -41,6 +41,16 @@ class InteractionHandler(Protocol):
     def consume_edit_reply(self, thread_ts: str, text: str, say: Say) -> bool: ...
 
 
+class PromotionHandler(Protocol):
+    """What the app needs from the promotion flow (see PromotionFlow)."""
+
+    def request_promotion(self, thread_ts: str, say: Say) -> None: ...
+
+    def confirm_promotion(self, thread_ts: str, say: Say) -> None: ...
+
+    def cancel_promotion(self, thread_ts: str, say: Say) -> None: ...
+
+
 def _is_actionable_user_message(event: dict[str, Any], channel_id: str) -> bool:
     """True for plain user messages in the target channel (top-level or in-thread)."""
     if event.get("channel") != channel_id:
@@ -84,6 +94,7 @@ def create_app(
     config: SlackConfig,
     conversation: MessageResponder,
     interactions: InteractionHandler | None = None,
+    promotions: PromotionHandler | None = None,
     client: WebClient | None = None,
     token_verification_enabled: bool = True,
     process_before_response: bool = False,
@@ -133,6 +144,29 @@ def create_app(
             ack()
             handler.reject(_interaction_id(action), say)
 
+    if promotions is not None:
+        promoter = promotions
+        from orchestrator.promotion import (
+            ACTION_PROMOTE,
+            ACTION_PROMOTE_CANCEL,
+            ACTION_PROMOTE_CONFIRM,
+        )
+
+        @app.action(ACTION_PROMOTE)
+        def _on_promote(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            promoter.request_promotion(str(action["value"]), say)
+
+        @app.action(ACTION_PROMOTE_CONFIRM)
+        def _on_promote_confirm(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            promoter.confirm_promotion(str(action["value"]), say)
+
+        @app.action(ACTION_PROMOTE_CANCEL)
+        def _on_promote_cancel(ack: Any, action: dict[str, Any], say: Say) -> None:
+            ack()
+            promoter.cancel_promotion(str(action["value"]), say)
+
     return app
 
 
@@ -147,6 +181,7 @@ def main() -> None:
         load_notion_databases,
     )
     from orchestrator.poller import HypothesisPoller
+    from orchestrator.promotion import PromotionFlow
     from orchestrator.rdagent_client import RdAgentClient
     from orchestrator.state import StateStore
 
@@ -179,7 +214,10 @@ def main() -> None:
     poller = HypothesisPoller(
         store, rdagent, slack=web_client, channel_id=config.channel_id, recorder=recorder
     )
-    app = create_app(config, conversation, interactions=poller, client=web_client)
+    promotions = PromotionFlow(store, recorder=recorder)
+    app = create_app(
+        config, conversation, interactions=poller, promotions=promotions, client=web_client
+    )
     poller.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
     SocketModeHandler(app, config.app_token).start()
