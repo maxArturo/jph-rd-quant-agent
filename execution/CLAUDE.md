@@ -51,6 +51,15 @@
   (approved orders update the projected book; rejected ones don't), position
   exposure is marked at the order's limit price, and only orders that GROW
   |position| are pct-checked so an oversized position can always be trimmed.
+- `execution/diff.py` is PURE like the gate and emits the gate's
+  `ProposedOrder` type directly. US-034 must pass a `prices` map covering
+  every symbol that is held OR targeted (exits need a price too) and treat
+  `DiffError` as abort-without-trading. Rules that must not drift: target
+  shares = floor(weight*equity/ref_price); full exits are exact-qty and
+  NEVER skipped (a short exit is a buy); the min-notional skip applies ONLY
+  to held+targeted rebalance deltas (at-threshold trades); buys round limit
+  prices UP to the cent, sells DOWN; output is sells-then-buys, alphabetical
+  within each side.
 - `execution/breaker.py` mirrors the gate's conventions: thresholds in
   `execution/breaker.paper.json` (both keys required, unknown refused,
   at-limit passes / strictly-over trips), trip messages prefixed with the

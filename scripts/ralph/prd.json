@@ -493,8 +493,8 @@
         "Typecheck passes"
       ],
       "priority": 32,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/diff.py compute_orders (pure, no-HTTP; emits order_gate.ProposedOrder) — target shares = floor(weight*equity/ref_price), non-exit deltas floored toward zero to whole shares, full exits exact-qty and never skipped (short exit = buy), min-notional skip ONLY for held+targeted rebalance deltas (at-threshold trades, gate boundary convention), marketable limits buy ceil-to-cent / sell floor-to-cent at ±0.5% default, sells-then-buys alphabetical. Every bad input raises DiffError before any order list exists. 36 unit tests (golden book exact-list, all three AC cases, rounding, ordering, guards, gate round-trip) + READ-ONLY live smoke: real paper snapshot (equity $100k, 0 positions) + fixture targets -> exactly the 4 expected entry buys, nothing submitted."
     },
     {
       "id": "US-033",
