@@ -479,8 +479,8 @@
         "Typecheck passes"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/breaker.py Breaker.check(equity, day_notional_usd) -> BreakerTrip|None (typed reason enum HALT_FILE/DAILY_NOTIONAL/DRAWDOWN; messages prefixed with the violated key, gate convention). Thresholds in execution/breaker.paper.json (strict load_limits-style validation; committed: 200k daily notional = one full both-sides turnover, 20% drawdown). State under ~/rdq-data/breaker/: halt file (halt()/clear_halt() for US-038) + high_water_mark.json (atomic tmp+rename; raised only on CLEAN pass, never lowered; corrupt file -> BreakerStateError refuses to trade). 47 unit tests incl. restart-survival; full lifecycle driven end-to-end with the real config (seed->peak->notional trip->drawdown trip->halt->resume). US-034: branch on trip.reason — HALT_FILE exits 0, others nonzero."
     },
     {
       "id": "US-032",

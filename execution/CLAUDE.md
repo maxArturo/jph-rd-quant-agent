@@ -51,6 +51,18 @@
   (approved orders update the projected book; rejected ones don't), position
   exposure is marked at the order's limit price, and only orders that GROW
   |position| are pct-checked so an oversized position can always be trimmed.
+- `execution/breaker.py` mirrors the gate's conventions: thresholds in
+  `execution/breaker.paper.json` (both keys required, unknown refused,
+  at-limit passes / strictly-over trips), trip messages prefixed with the
+  violated key. State files default under `~/rdq-data/breaker/`: `halt`
+  (operator kill switch — US-038 tools call `Breaker.halt()`/`clear_halt()`)
+  and `high_water_mark.json`. Check order: halt → daily notional → drawdown.
+  US-034 must branch on `trip.reason`: `HALT_FILE` exits 0 ("halted" notice);
+  the other trips exit nonzero.
+- The high-water mark only moves UP, and only on a CLEAN pass (a trip never
+  touches it). A corrupt/unreadable HWM file raises `BreakerStateError`
+  (refuse to trade) — never "fix" it by silently re-seeding; that disarms
+  the drawdown kill switch.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.
