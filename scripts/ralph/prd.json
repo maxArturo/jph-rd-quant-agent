@@ -540,8 +540,8 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/ledger.py TradeLedger — Trade Ledger's SOLE writer (one-writer-per-DB): row created at submit time (mid-batch failure still records live orders), updated with terminal fill/rejection after poll_fills; best-effort (never aborts a trade) but failures surface as WARNING lines in the daily summary. rebalance.format_daily_summary posts equity/orders placed/fills/gate-breaker rejections every day the pipeline reaches the gate (rejection days post it with the violated limits, exit 1). PREREQ: Notion for rdq-exec-paper = per-agent app-connection grant (no CLI; docs/decisions.md 2026-07-09); check_onecli.sh now probes connector hosts — all 9 checks PASS. 16 new tests + LIVE smoke through the proxy as rdq-exec-paper: real Trade Ledger row created, updated to filled, read back exact, archived."
     },
     {
       "id": "US-036",

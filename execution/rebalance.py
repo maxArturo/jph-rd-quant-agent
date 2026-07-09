@@ -7,7 +7,13 @@ Chains the tested execution pieces end-to-end, in the PRD's order:
 
 Abort policy: every failure posts to the Slack channel and exits nonzero —
 except a halt-file breaker trip, which posts a "halted" notice and exits 0
-(an operator halt is a deliberate state, not an error). ``--dry-run`` runs
+(an operator halt is a deliberate state, not an error). Gate and breaker
+rejections post the daily summary (equity + each violated limit) as their
+notice; earlier failures post the plain abort message. Days that reach the
+end post the daily summary too: orders placed, fills, rejections ("none"),
+account equity — and every submitted order lands in the Notion Trade Ledger
+(execution/ledger.py, US-035), created at submit time and updated with its
+terminal fill or rejection after the poll. ``--dry-run`` runs
 the full chain through the gate and breaker, prints the exact order list,
 and exits 0 without submitting anything. Note the breaker's clean-pass
 high-water-mark update still happens on a dry run (recording an equity peak
@@ -53,6 +59,7 @@ from execution.diff import (
     DiffResult,
     compute_orders,
 )
+from execution.ledger import TradeLedger
 from execution.order_gate import (
     Limits,
     OrderGateError,
@@ -233,13 +240,18 @@ def format_plan(diff: DiffResult, as_of: dt.date, dry_run: bool) -> str:
 
 
 def submit_orders(
-    client: AlpacaClient, orders: Sequence[ProposedOrder], as_of: dt.date
+    client: AlpacaClient,
+    orders: Sequence[ProposedOrder],
+    as_of: dt.date,
+    ledger: TradeLedger | None = None,
 ) -> list[Order]:
     """Submit every proposed order as a day marketable-limit order.
 
     client_order_id is deterministic per (day, side, symbol) so an accidental
     same-day rerun is rejected by Alpaca's uniqueness check instead of
-    doubling the book.
+    doubling the book. Each order is recorded in the Trade Ledger right
+    after its POST succeeds, so a mid-batch failure still leaves a row for
+    every order that is live.
     """
     submitted: list[Order] = []
     for order in orders:
@@ -261,6 +273,8 @@ def submit_orders(
                 "before rerunning; submitted orders are live"
             ) from exc
         submitted.append(placed)
+        if ledger is not None:
+            ledger.record_submitted(placed, as_of)
     return submitted
 
 
@@ -317,6 +331,40 @@ def fill_summary(submitted: Sequence[Order], final: Sequence[Order]) -> str:
     return "\n".join([header, *lines])
 
 
+def format_daily_summary(
+    as_of: dt.date,
+    equity: float,
+    submitted: Sequence[Order],
+    final: Sequence[Order],
+    rejections: Sequence[str] = (),
+    no_trade_note: str | None = None,
+    ledger_failures: Sequence[str] = (),
+) -> str:
+    """The daily Slack digest: orders placed, fills, rejections, equity.
+
+    Posted on every day the pipeline reaches the gate — traded days carry the
+    fill report, no-trade days say why, and gate/breaker-rejection days list
+    each rejection (those days still exit nonzero; this is the notice).
+    """
+    lines = [
+        f"daily rebalance summary ({as_of})",
+        f"account equity: ${equity:,.2f}",
+        f"orders placed: {len(submitted)}",
+    ]
+    if submitted:
+        lines.append(fill_summary(submitted, final))
+    elif no_trade_note:
+        lines.append(f"  {no_trade_note}")
+    if rejections:
+        lines.append("gate/breaker rejections:")
+        lines += [f"  {reason}" for reason in rejections]
+    else:
+        lines.append("gate/breaker rejections: none")
+    for failure in ledger_failures:
+        lines.append(f"WARNING: Trade Ledger write failed — {failure}")
+    return "\n".join(lines)
+
+
 def _safe_notify(notify: Notify, text: str) -> None:
     """Post to Slack best-effort: a chat outage must not mask the real outcome."""
     try:
@@ -339,6 +387,7 @@ def run_rebalance(
     poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    ledger: TradeLedger | None = None,
 ) -> int:
     """Run the full rebalance chain; returns the process exit code.
 
@@ -385,12 +434,23 @@ def run_rebalance(
             limit_offset_pct=limit_offset_pct,
         )
 
-        # 6. Gate: any rejected order aborts the whole batch.
+        # 6. Gate: any rejected order aborts the whole batch. The rejection
+        # notice is the day's summary (equity + every violated limit).
         if limits is None:
             limits = load_limits()
-        evaluate_orders(
-            diff.orders, account, positions, len(todays_orders), limits
-        ).raise_for_rejections()
+        gate = evaluate_orders(diff.orders, account, positions, len(todays_orders), limits)
+        if gate.rejections:
+            summary = format_daily_summary(
+                as_of,
+                account.equity,
+                [],
+                [],
+                rejections=[r.message for r in gate.rejections],
+                no_trade_note="order gate rejected the batch — nothing submitted",
+            )
+            _safe_notify(notify, summary)
+            print(summary, file=sys.stderr)
+            return 1
 
         # 7. Breaker: halt file / daily notional / drawdown kill switch.
         if breaker is None:
@@ -402,18 +462,36 @@ def run_rebalance(
                 _safe_notify(notify, message)
                 print(message)
                 return 0
-            raise RebalanceError(trip.message)
+            summary = format_daily_summary(
+                as_of,
+                account.equity,
+                [],
+                [],
+                rejections=[trip.message],
+                no_trade_note="circuit breaker tripped — nothing submitted",
+            )
+            _safe_notify(notify, summary)
+            print(summary, file=sys.stderr)
+            return 1
 
         plan = format_plan(diff, as_of, dry_run)
         print(plan)
         if dry_run:
             return 0
         if not diff.orders:
-            _safe_notify(notify, plan)
+            summary = format_daily_summary(
+                as_of,
+                account.equity,
+                [],
+                [],
+                no_trade_note="no orders — book already on target",
+            )
+            _safe_notify(notify, summary)
             return 0
 
-        # 8-9. Submit, then poll fills until terminal or timeout.
-        submitted = submit_orders(client, diff.orders, as_of)
+        # 8-9. Submit (ledger row per live order), then poll fills until
+        # terminal or timeout, then record each final fill/rejection.
+        submitted = submit_orders(client, diff.orders, as_of, ledger=ledger)
         final = poll_fills(
             client,
             [order.id for order in submitted],
@@ -421,7 +499,17 @@ def run_rebalance(
             interval_seconds=poll_interval_seconds,
             sleep=sleep,
         )
-        summary = f"rebalance complete ({as_of}): {fill_summary(submitted, final)}"
+        if ledger is not None:
+            by_id = {order.id: order for order in final}
+            for order in submitted:
+                ledger.record_final(by_id.get(order.id, order), as_of)
+        summary = format_daily_summary(
+            as_of,
+            account.equity,
+            submitted,
+            final,
+            ledger_failures=ledger.failures if ledger is not None else (),
+        )
         _safe_notify(notify, summary)
         print(summary)
         return 0
@@ -488,6 +576,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="print notices to stderr instead of Slack (supervised local runs)",
     )
+    parser.add_argument(
+        "--no-notion",
+        action="store_true",
+        help="skip Trade Ledger writes (supervised local runs; live runs must record)",
+    )
     args = parser.parse_args(argv)
 
     from orchestrator.config import ConfigError
@@ -505,6 +598,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
 
+    ledger: TradeLedger | None = None
+    if not args.no_notion:
+        from orchestrator.notion_client import NotionClient
+        from orchestrator.notion_recorder import RecorderConfigError, load_notion_databases
+
+        try:
+            databases = load_notion_databases()
+        except RecorderConfigError as exc:
+            print(
+                f"ERROR: {exc}\nRefusing to trade without a Trade Ledger to record "
+                "orders; pass --no-notion for a supervised local run.",
+                file=sys.stderr,
+            )
+            return 1
+        ledger = TradeLedger(NotionClient(), databases.trade_ledger)
+
     return run_rebalance(
         AlpacaClient(),
         notify,
@@ -514,6 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         store_path=args.store,
         poll_timeout_seconds=args.poll_timeout,
         poll_interval_seconds=args.poll_interval,
+        ledger=ledger,
     )
 
 

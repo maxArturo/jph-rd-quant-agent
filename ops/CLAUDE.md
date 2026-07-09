@@ -56,3 +56,12 @@
   enforces the date sync. After editing any unit: `daemon-reload` + restart,
   then check `/proc/<MainPID>/environ` — `systemctl show-environment` does
   NOT reflect per-unit Environment= lines.
+- OneCLI has TWO injection mechanisms: vaulted secrets (host-pattern matched,
+  managed by `onecli secrets`/`agents set-secrets`, what setup_onecli.sh
+  assigns) and app connections (OAuth connectors, e.g. Notion). App
+  connections are granted PER AGENT and the grant has no CLI or REST
+  endpoint — it lives in the gateway's `agent_app_connections` table and is
+  normally edited in the web UI. check_onecli.sh probes no-vault-secret
+  hosts bare and reports "via app connection" on 2xx; setup_onecli.sh's
+  "no vault secret for host api.notion.com" WARN is expected and harmless
+  (docs/decisions.md 2026-07-08 + 2026-07-09).

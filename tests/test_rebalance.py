@@ -14,6 +14,7 @@ import pytest
 
 from execution.alpaca_client import AlpacaClient, Order
 from execution.breaker import Breaker, BreakerConfig
+from execution.ledger import TradeLedger
 from execution.order_gate import Limits
 from execution.rebalance import (
     RebalanceError,
@@ -21,14 +22,18 @@ from execution.rebalance import (
     build_reference_prices,
     day_traded_notional,
     fill_summary,
+    format_daily_summary,
     latest_store_price,
     orders_submitted_on,
     poll_fills,
     run_rebalance,
     submitted_market_date,
 )
+from orchestrator.notion_client import NotionClient
 from orchestrator.state import StateStore
 from tests.test_alpaca_client import FakeResponse
+from tests.test_notion_client import FakeResponse as NotionResponse
+from tests.test_notion_client import FakeSession as NotionSession
 from tests.test_signal import write_calendar, write_conf, write_pred
 
 AS_OF = dt.date(2026, 7, 9)  # Thursday; store calendar ends the day before
@@ -469,6 +474,166 @@ def test_notify_failure_never_masks_the_outcome(
     err = capsys.readouterr().err
     assert "Slack notification failed" in err
     assert "market closed" in err
+
+
+# ---------------------------------------------------------------- daily summary (US-035)
+
+
+def notion_ledger(responses: list[NotionResponse]) -> tuple[TradeLedger, NotionSession]:
+    session = NotionSession(responses)
+    return TradeLedger(NotionClient(session=session), "db-trade-ledger"), session
+
+
+def notion_page(page_id: str) -> NotionResponse:
+    return NotionResponse(200, {"object": "page", "id": page_id})
+
+
+def test_traded_day_posts_daily_summary(env: SimpleNamespace) -> None:
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+    assert len(notes) == 1
+    assert "daily rebalance summary (2026-07-09)" in notes[0]
+    assert "account equity: $100,000.00" in notes[0]
+    assert "orders placed: 2" in notes[0]
+    assert "2/2 orders filled" in notes[0]
+    assert "gate/breaker rejections: none" in notes[0]
+
+
+def test_no_trade_day_summary_includes_equity(env: SimpleNamespace) -> None:
+    broker = FakeBroker(
+        positions=[position_row("AAPL", 250, 200.0), position_row("MSFT", 125, 400.0)]
+    )
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+    assert "orders placed: 0" in notes[0]
+    assert "account equity: $100,000.00" in notes[0]
+
+
+def test_gate_rejection_day_summary_lists_rejections_and_equity(
+    env: SimpleNamespace,
+) -> None:
+    tight = Limits(
+        max_order_notional_usd=1_000.0,
+        max_position_pct_equity=60.0,
+        max_day_orders=120,
+        max_total_positions=60,
+    )
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes, limits=tight) == 1
+    assert len(notes) == 1
+    assert "gate/breaker rejections:" in notes[0]
+    assert "max_order_notional_usd" in notes[0]
+    assert "account equity: $100,000.00" in notes[0]
+    assert "orders placed: 0" in notes[0]
+    assert broker.session.posts() == []
+
+
+def test_breaker_trip_day_summary_lists_the_trip(env: SimpleNamespace) -> None:
+    env.hwm_file.write_text(json.dumps({"high_water_mark": 200_000.0}) + "\n")
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes) == 1
+    assert "gate/breaker rejections:" in notes[0]
+    assert "max_drawdown_pct" in notes[0]
+    assert "account equity: $100,000.00" in notes[0]
+
+
+def test_format_daily_summary_from_fixture_fill_set() -> None:
+    submitted = [
+        make_order(id="a", status="accepted", filled_qty=0.0, filled_avg_price=None),
+        make_order(
+            id="b", symbol="MSFT", status="accepted", filled_qty=0.0, filled_avg_price=None
+        ),
+    ]
+    final = [
+        make_order(id="a", status="filled", filled_qty=10.0, filled_avg_price=100.0),
+        make_order(id="b", symbol="MSFT", status="rejected", filled_qty=0.0),
+    ]
+    text = format_daily_summary(AS_OF, 123_456.78, submitted, final)
+    assert "daily rebalance summary (2026-07-09)" in text
+    assert "account equity: $123,456.78" in text
+    assert "orders placed: 2" in text
+    assert "1/2 orders filled" in text
+    assert "buy 10 AAPL: filled @ $100.00" in text
+    assert "MSFT: rejected" in text
+    assert "gate/breaker rejections: none" in text
+
+
+def test_format_daily_summary_rejections_and_ledger_warnings() -> None:
+    text = format_daily_summary(
+        AS_OF,
+        50_000.0,
+        [],
+        [],
+        rejections=["max_order_notional_usd: order too big"],
+        no_trade_note="order gate rejected the batch — nothing submitted",
+        ledger_failures=["record_submitted buy AAPL: boom"],
+    )
+    assert "orders placed: 0" in text
+    assert "order gate rejected the batch" in text
+    assert "gate/breaker rejections:\n  max_order_notional_usd: order too big" in text
+    assert "WARNING: Trade Ledger write failed — record_submitted buy AAPL: boom" in text
+
+
+# ---------------------------------------------------------------- trade ledger (US-035)
+
+
+def test_traded_day_writes_ledger_rows_and_final_fills(env: SimpleNamespace) -> None:
+    # 2 orders -> 2 creates at submit time + 2 updates after the fill poll.
+    ledger, session = notion_ledger(
+        [notion_page("pg-1"), notion_page("pg-2"), notion_page("pg-1"), notion_page("pg-2")]
+    )
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes, ledger=ledger) == 0
+    assert ledger.failures == []
+
+    creates = [c for c in session.calls if c["method"] == "POST"]
+    updates = [c for c in session.calls if c["method"] == "PATCH"]
+    assert len(creates) == 2
+    assert len(updates) == 2
+
+    first = creates[0]["json"]
+    assert first["parent"] == {"type": "database_id", "database_id": "db-trade-ledger"}
+    props = first["properties"]
+    assert props["Order"]["title"][0]["text"]["content"] == "2026-07-09 BUY 250 AAPL"
+    assert props["Order ID"]["rich_text"][0]["text"]["content"] == "ord-1"
+    assert props["Side"] == {"select": {"name": "buy"}}
+    assert props["Qty"] == {"number": 250.0}
+    assert props["Limit Price"] == {"number": 201.0}
+    assert props["Status"] == {"select": {"name": "submitted"}}
+    assert creates[1]["json"]["properties"]["Order"]["title"][0]["text"]["content"] == (
+        "2026-07-09 BUY 125 MSFT"
+    )
+
+    assert updates[0]["url"].endswith("/v1/pages/pg-1")
+    final_props = updates[0]["json"]["properties"]
+    assert final_props["Status"] == {"select": {"name": "filled"}}
+    assert final_props["Filled Qty"] == {"number": 250.0}
+    assert final_props["Filled Avg Price"] == {"number": 201.0}
+
+
+def test_mid_batch_submit_failure_still_records_live_orders(env: SimpleNamespace) -> None:
+    ledger, session = notion_ledger([notion_page("pg-1")])
+    broker = FakeBroker(post_fail_after=1)
+    notes: list[str] = []
+    assert run(env, broker, notes, ledger=ledger) == 1
+    creates = [c for c in session.calls if c["method"] == "POST"]
+    assert len(creates) == 1  # the one order that went in has its row
+    assert creates[0]["json"]["properties"]["Symbol"]["rich_text"][0]["text"]["content"] == "AAPL"
+
+
+def test_ledger_outage_never_breaks_the_run_and_is_surfaced(env: SimpleNamespace) -> None:
+    responses = [NotionResponse(400, {"message": "boom"}) for _ in range(4)]
+    ledger, _session = notion_ledger(responses)
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes, ledger=ledger) == 0  # trade still completes
+    assert "2/2 orders filled" in notes[0]
+    assert "WARNING: Trade Ledger write failed" in notes[0]
+    assert len(ledger.failures) == 4  # 2 failed creates + 2 failed final creates
 
 
 # ---------------------------------------------------------------- helpers

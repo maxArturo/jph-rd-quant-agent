@@ -30,6 +30,7 @@ CHECKS=(
   "rdq-research|api.voyageai.com|https://api.voyageai.com/v1/embeddings|Content-Type: application/json|{\"model\":\"voyage-3.5-lite\",\"input\":\"ping\"}"
   "rdq-research|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"
   "rdq-exec-paper|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account||"
+  "rdq-exec-paper|api.notion.com|https://api.notion.com/v1/users/me|Notion-Version: 2022-06-28|"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -86,30 +87,37 @@ for check in "${CHECKS[@]}"; do
     continue
   fi
 
+  # Hosts with no vault secret may still be injected via an app connection
+  # (e.g. api.notion.com — docs/decisions.md 2026-07-08); probe those bare
+  # and let the wire result decide instead of failing on the vault lookup.
   mapfile -t vault_ids < <(jq -r --arg h "$host" \
     '.data[] | select(.hostPattern == $h) | .id' <<<"$secrets_json")
+  connector=""
   if [[ ${#vault_ids[@]} -eq 0 ]]; then
-    fail "$label" "no vault secret for host"
-    missing+=("$identity <- $host (secret not in vault)")
-    continue
-  fi
-
-  unassigned=0
-  for sid in "${vault_ids[@]}"; do
-    grep -qx "$sid" <<<"$assigned" || unassigned=1
-  done
-  if [[ $unassigned -eq 1 ]]; then
-    fail "$label" "vault secret not assigned to identity"
-    missing+=("$identity <- $host (assignment missing)")
-    continue
+    connector=" via app connection"
+  else
+    unassigned=0
+    for sid in "${vault_ids[@]}"; do
+      grep -qx "$sid" <<<"$assigned" || unassigned=1
+    done
+    if [[ $unassigned -eq 1 ]]; then
+      fail "$label" "vault secret not assigned to identity"
+      missing+=("$identity <- $host (assignment missing)")
+      continue
+    fi
   fi
 
   code=$(probe "$identity" "$url" "$header" "$body")
   case "$code" in
-    2??) echo "PASS  $label  (HTTP $code)" ;;
+    2??) echo "PASS  $label  (HTTP $code$connector)" ;;
     401 | 403)
-      fail "$label" "HTTP $code — credential not injected or invalid"
-      missing+=("$identity <- $host (injected credential rejected)")
+      if [[ -n "$connector" ]]; then
+        fail "$label" "HTTP $code — no vault secret and no app connection grants this identity access"
+        missing+=("$identity <- $host (grant the app connection to this agent in the OneCLI web UI)")
+      else
+        fail "$label" "HTTP $code — credential not injected or invalid"
+        missing+=("$identity <- $host (injected credential rejected)")
+      fi
       ;;
     *) fail "$label" "HTTP $code" ;;
   esac

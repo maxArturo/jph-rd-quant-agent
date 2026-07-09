@@ -6,7 +6,7 @@
 # Identities created:
 #   rdq-orchestrator  Anthropic + Notion + Alpaca paper  (Slack bot / Claude layer)
 #   rdq-research      Anthropic + Voyage embeddings + FMP (RD-Agent + data pipeline)
-#   rdq-exec-paper    Alpaca paper                       (nightly rebalancer)
+#   rdq-exec-paper    Alpaca paper + Notion              (nightly rebalancer + Trade Ledger)
 #
 # Deliberately NO rdq-exec-live: live trading is out of scope for this repo.
 # As defense in depth, this script refuses to assign any secret whose host
@@ -34,7 +34,7 @@ declare -A IDENTITY_NAMES=(
 declare -A IDENTITY_HOSTS=(
   [rdq-orchestrator]="api.anthropic.com api.notion.com paper-api.alpaca.markets"
   [rdq-research]="api.anthropic.com api.voyageai.com financialmodelingprep.com"
-  [rdq-exec-paper]="paper-api.alpaca.markets"
+  [rdq-exec-paper]="paper-api.alpaca.markets api.notion.com"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }

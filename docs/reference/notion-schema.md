@@ -25,7 +25,7 @@ concurrent-edit conflicts (Notion 409s on concurrent saves).
 | Hypothesis Log   | orchestrator NotionRecorder (poller hypothesis paths)         |
 | Backtest Results | orchestrator NotionRecorder (poller experiment-feedback path) |
 | Decision Log     | orchestrator NotionRecorder (operator tools: promote, halt/resume) |
-| Trade Ledger     | execution rebalancer                                          |
+| Trade Ledger     | execution rebalancer (`execution/ledger.py` TradeLedger, US-035) |
 
 Inside the orchestrator process, `orchestrator/notion_recorder.py`
 (`NotionRecorder`, US-027) is the single write funnel for the first four

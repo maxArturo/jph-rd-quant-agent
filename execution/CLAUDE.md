@@ -118,3 +118,26 @@
   universe/universe_tickers/topk/n_drop/thread_ts/session_path — pass topk/
   n_drop into `signal.StrategyParams` rather than re-deriving them from the
   workspace conf (the operator confirmed those exact values when promoting).
+- `execution/ledger.py` (`TradeLedger`) is the Notion Trade Ledger's SOLE
+  writer (one-writer-per-DB; the orchestrator's NotionRecorder must never
+  touch that database). Row lifecycle: `record_submitted` right after each
+  POST /v2/orders succeeds (so a mid-batch submit failure still leaves rows
+  for the live orders), `record_final` with the post-poll snapshot; if the
+  submit-time create failed, `record_final` creates the full row instead of
+  updating. Writes are best-effort — never raise, never abort a run — but
+  failures accumulate in `TradeLedger.failures` and the rebalancer appends
+  them to the daily summary as WARNING lines. Property names must match the
+  Trade Ledger schema in docs/reference/notion-schema.md; Alpaca statuses map
+  through `ledger_status()` (canceled -> cancelled; non-terminal ->
+  submitted/partially_filled).
+- The daily Slack digest is `rebalance.format_daily_summary()` (equity,
+  orders placed, fills via fill_summary, gate/breaker rejections, ledger
+  warnings). It is posted on every day the pipeline reaches the gate:
+  traded and no-trade days exit 0; gate-rejection and breaker-trip days post
+  it WITH the rejection lines and exit 1 (those paths no longer go through
+  the generic "rebalance aborted" message — earlier failures still do).
+  US-038 adds the breaker state line here.
+- Live Notion access for `rdq-exec-paper` is an app-connection GRANT on the
+  agent, not a vault secret — see docs/decisions.md 2026-07-09 (US-035). If
+  ledger writes start 401ing, re-grant the Notion connection to the agent in
+  the OneCLI web UI; do not vault a key.

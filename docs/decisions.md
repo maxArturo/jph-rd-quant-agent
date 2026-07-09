@@ -392,3 +392,36 @@ session_path with the saved directive re-seeded -> run row back to 'running',
 which is what re-activates the poller (it polls `status='running'` rows).
 If the poller's END(-1) handler wins the race with stop_run's status update,
 both write 'stopped' — harmless either order.
+
+## 2026-07-09 — US-035: Trade Ledger under rdq-exec-paper via a per-agent Notion app-connection grant
+
+**Decision:** The nightly rebalancer (identity `rdq-exec-paper`) writes the
+Notion Trade Ledger directly (`execution/ledger.py`, the database's sole
+writer per docs/reference/notion-schema.md) — it does NOT relay rows through
+the orchestrator.
+
+**Finding: OneCLI app connections are granted per agent, and the grant has no
+CLI.** Notion auth is the "JPH NanoClaw Connection" app connection (see the
+2026-07-08 Notion entry), and the proxy injects it only for agents that hold
+a row in the gateway's `agent_app_connections` table. That is why
+`rdq-orchestrator` (granted 2026-07-07, presumably via the web UI) got
+HTTP 200 while `rdq-exec-paper` got 401 until 2026-07-09, when the same grant
+was added for `rdq-exec-paper`
+(`agent 3c2ae9c1-1856-4c4c-b777-c09fc1cc5ab5 <- connection
+af37465d-5f08-4382-afba-586c31f3dbbf`, inserted directly into the OneCLI
+Postgres `agent_app_connections` table because neither `onecli` nor the
+management REST API exposes the operation; the web UI equivalent is the
+agent's app-connections editor). If the grant ever disappears (e.g. OneCLI
+migration), re-add it in the web UI — do NOT vault a Notion key.
+
+**check_onecli.sh consequence:** hosts with no vault secret are now probed
+bare instead of failing the vault lookup — a 2xx proves app-connection
+injection ("via app connection" in the PASS line), a 401/403 names the
+missing grant. `ops/setup_onecli.sh` still prints its harmless WARN for
+`api.notion.com` (app connections never appear in `onecli secrets list`).
+
+**Ledger write policy:** best-effort (never aborts a run — by ledger time the
+orders are already live at Alpaca) but never silent: failures accumulate in
+`TradeLedger.failures` and are appended to the daily Slack summary as
+WARNING lines, and `ops/reconcile.py` (US-037) exists to catch any rows that
+were lost anyway.
