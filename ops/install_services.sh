@@ -16,6 +16,8 @@ UNITS=(
   rdq-data-refresh.timer
   rdq-rebalance.service
   rdq-rebalance.timer
+  rdq-sweep.service
+  rdq-sweep.timer
 )
 
 mkdir -p "$UNIT_DIR"

@@ -1,4 +1,4 @@
-"""Offline tests for the systemd units (US-010, US-018, US-020, US-036) + install script."""
+"""Offline tests for the systemd units (US-010, US-018, US-020, US-036, US-041) + install script."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-data-refresh.service"
 REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-data-refresh.timer"
 REBALANCE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance.service"
 REBALANCE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance.timer"
+SWEEP_UNIT = REPO_ROOT / "ops" / "rdq-sweep.service"
+SWEEP_TIMER = REPO_ROOT / "ops" / "rdq-sweep.timer"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
 
@@ -239,6 +241,39 @@ class TestRebalanceUnits:
         _systemd_analyze_verify(REBALANCE_TIMER)
 
 
+class TestSweepUnits:
+    def test_exist(self) -> None:
+        assert SWEEP_UNIT.is_file()
+        assert SWEEP_TIMER.is_file()
+
+    def test_runs_local_sweep_oneshot(self) -> None:
+        """The sweep is purely local (filesystem + SQLite read) — no onecli
+        wrapper, no injected credentials."""
+        text = SWEEP_UNIT.read_text()
+        assert "python -m ops.sweep" in text
+        assert "onecli run" not in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+        # timer-driven oneshot convention: enable the timer, not the service
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_timer_weekly_new_york(self) -> None:
+        """AC: weekly timer; scheduled off-market with explicit timezone."""
+        days, hhmm = timer_schedule(SWEEP_TIMER)
+        assert days == "Sun"
+        assert hhmm < "09:30"
+        # a missed sweep is harmless to catch up (deletes only weeks-old trees)
+        assert "Persistent=true" in SWEEP_TIMER.read_text()
+        assert "WantedBy=timers.target" in SWEEP_TIMER.read_text()
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(SWEEP_UNIT)
+        _systemd_analyze_verify(SWEEP_TIMER)
+
+
 class TestInstallScript:
     def test_exists_and_executable(self) -> None:
         assert INSTALL.is_file()
@@ -252,6 +287,8 @@ class TestInstallScript:
         assert "rdq-data-refresh.timer" in text
         assert "rdq-rebalance.service" in text
         assert "rdq-rebalance.timer" in text
+        assert "rdq-sweep.service" in text
+        assert "rdq-sweep.timer" in text
         assert ".config/systemd/user" in text
         assert "daemon-reload" in text
 

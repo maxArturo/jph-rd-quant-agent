@@ -1,0 +1,27 @@
+# RD-Agent(Q) workspace retention sweep — systemd user unit (US-041).
+#
+# Runs `python -m ops.sweep`: deletes non-SOTA, non-promoted workspace dirs
+# (and stale mlflow run dirs inside surviving unprotected workspaces) older
+# than the configured age under ~/rdq-runs/*/workspace. The promoted
+# strategy's workspace (promoted_strategy row in orchestrator/state.sqlite)
+# and SOTA workspaces (trace-log feedback decision) are never deleted, and
+# "age" is the newest mtime in the tree, so anything an active run still
+# writes to always looks fresh.
+#
+# No onecli wrapper: the sweep is purely local (filesystem + SQLite read) —
+# it makes no network calls and needs no injected credentials.
+#
+# Started by rdq-sweep.timer (weekly, Sunday early morning ET);
+# no [Install] section on purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-sweep.timer
+# Logs:     journalctl --user -u rdq-sweep.service
+
+[Unit]
+Description=RD-Agent(Q) weekly workspace retention sweep (protects promoted + SOTA workspaces)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=%h/rd-agent-q/.venv/bin/python -m ops.sweep

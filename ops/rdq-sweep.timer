@@ -1,0 +1,19 @@
+# Weekly trigger for rdq-sweep.service (US-041).
+#
+# Sunday 03:30 America/New_York — markets closed, no research or rebalance
+# timer nearby, so nothing is mid-write while the sweep walks the run trees
+# (the sweep's newest-mtime age check protects active runs regardless).
+#
+# Persistent=true: a sweep missed while the box was down is harmless to
+# catch up — it only ever deletes trees already weeks old.
+
+[Unit]
+Description=Weekly Sunday 03:30 America/New_York trigger for the workspace retention sweep
+
+[Timer]
+OnCalendar=Sun 03:30 America/New_York
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

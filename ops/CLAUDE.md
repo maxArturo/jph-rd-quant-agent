@@ -91,3 +91,14 @@
   Trade Ledger row MUST archive it afterwards, or reconcile flags it as an
   orphan forever (archived pages are invisible to Notion queries — that is
   the sanctioned cleanup mechanism, not deletion).
+- `ops/sweep.py` (US-041) derives SOTA **offline from the trace logs**: the
+  FileStorage layout is `<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl`, and a
+  loop's `feedback` pkl (`.decision` attr) pairs with its `runner result` pkl
+  (workspace paths) via the shared `Loop_<n>` ancestor dir — reuse this if
+  anything else needs run outcomes without the orchestrator DB. The sweep is
+  conservative on unknowns (unreadable feedback = SOTA, uncorrelatable runner
+  result = protected) and its "age" is the NEWEST lstat mtime in a tree, so
+  actively-written workspaces never look old. It reads the promoted row via
+  StateStore only when state.sqlite already EXISTS (StateStore(path) CREATES
+  the db on init — always guard with `is_file()` from read-only callers, same
+  as execution/promoted.py).

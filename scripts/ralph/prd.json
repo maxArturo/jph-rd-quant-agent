@@ -633,8 +633,8 @@
         "Typecheck passes"
       ],
       "priority": 41,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: ops/sweep.py — deletes unprotected workspace dirs under ~/rdq-runs/*/workspace older than --days (default 14) plus stale mlflow run dirs inside surviving unprotected workspaces. Protection: promoted_strategy row (StateStore, only read when the db file exists) + SOTA derived offline from trace logs (Loop_<n> feedback decision pkl paired with the runner-result pkl's experiment_workspace + sub_workspace_list; unreadable/uncorrelatable = keep). Age = newest lstat mtime in the tree, so active runs never look old; symlinks skipped. rdq-sweep.service (oneshot, no onecli — purely local) + rdq-sweep.timer (Sun 03:30 America/New_York, Persistent=true) verified, installed, ENABLED and listed in list-timers. 20 unit tests on fixture trees + CLI driven end-to-end on a /tmp fixture (promoted+SOTA survived, rejected+orphan deleted, exit 0) + real service run via systemctl start (journal: 'swept: 0 deletable...')."
     },
     {
       "id": "US-042",
