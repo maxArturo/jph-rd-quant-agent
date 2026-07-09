@@ -15,7 +15,11 @@
   "100000.25"); position `qty` is signed (negative = short) alongside a
   `side` field; notional orders have `qty: null`; DELETE /v2/orders/{id}
   returns 204 with no body. `place_order` sends qty/limit_price as strings
-  (API canonical form).
+  (API canonical form). GET /v2/orders returns newest-first with no cursor —
+  `list_orders(after=, until=)` takes RFC3339 submitted_at bounds and
+  ops/reconcile.py pages backwards by tightening `until` to the oldest stamp
+  of each full page (dedupe by order id; a full page sharing one timestamp
+  cannot be paged past and raises).
 - Client testability pattern (same as data/fmp.py / orchestrator/
   notion_client.py): `AlpacaClient(session=..., sleep=...)` — FakeSession
   records `.request(method, url, params=, json=, timeout=)` calls and returns

@@ -73,3 +73,11 @@
   when a missed run is harmless to catch up (data refresh: idempotent);
   trading jobs use Persistent=false so a boot mid-day doesn't fire a stale
   pre-open rebalance.
+- `ops/reconcile.py` (US-037) is READ-ONLY on both sides and runs as
+  rdq-exec-paper (Alpaca vault secrets + Notion app connection both inject
+  for that identity). Exit codes: 0 = ledger matches broker history exactly,
+  1 = mismatches (printed with order id + differing fields), 2 = the
+  comparison itself failed (config/auth/HTTP). Any smoke test that writes a
+  Trade Ledger row MUST archive it afterwards, or reconcile flags it as an
+  orphan forever (archived pages are invisible to Notion queries — that is
+  the sanctioned cleanup mechanism, not deletion).

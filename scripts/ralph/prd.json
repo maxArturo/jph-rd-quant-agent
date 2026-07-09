@@ -571,8 +571,8 @@
         "Typecheck passes"
       ],
       "priority": 37,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: ops/reconcile.py — joins Trade Ledger rows (Order ID rich_text) against Alpaca order history for an ET date range; compares Symbol/Side/Qty/Limit Price/Status (via ledger_status)/Filled Qty/Filled Avg Price. Exit 0 clean / 1 mismatches (printed with order id + differing fields) / 2 operational failure. AlpacaClient.list_orders grew after/until (RFC3339) for backwards pagination. 22 unit tests (clean match, missing ledger row, qty mismatch + orphan/duplicate/stale-status/pagination/CLI). LIVE through the proxy as rdq-exec-paper: first run FOUND a real orphan (un-archived US-035 smoke row) exit 1, archived it, rerun OK exit 0."
     },
     {
       "id": "US-038",

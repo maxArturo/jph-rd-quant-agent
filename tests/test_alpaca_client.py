@@ -220,6 +220,17 @@ class TestListOrders:
             "symbols": "AAPL,MSFT",
         }
 
+    def test_after_until_bounds_passed_as_params(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, [])])
+        client.list_orders(
+            status="all", after="2026-07-09T04:00:00Z", until="2026-07-10T04:00:00Z"
+        )
+        assert session.calls[0]["params"] == {
+            "status": "all",
+            "after": "2026-07-09T04:00:00Z",
+            "until": "2026-07-10T04:00:00Z",
+        }
+
 
 class TestPlaceOrder:
     def test_limit_order_payload(self) -> None:

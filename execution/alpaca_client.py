@@ -192,13 +192,24 @@ class AlpacaClient:
         status: str = "open",
         limit: int | None = None,
         symbols: list[str] | None = None,
+        after: str | None = None,
+        until: str | None = None,
     ) -> list[Order]:
-        """GET /v2/orders: orders filtered by status ("open" | "closed" | "all")."""
+        """GET /v2/orders: orders filtered by status ("open" | "closed" | "all").
+
+        ``after``/``until`` are RFC3339 bounds on submitted_at; Alpaca returns
+        newest-first, so ops/reconcile.py pages backwards by tightening
+        ``until``.
+        """
         params: dict[str, str] = {"status": status}
         if limit is not None:
             params["limit"] = str(limit)
         if symbols:
             params["symbols"] = ",".join(symbols)
+        if after is not None:
+            params["after"] = after
+        if until is not None:
+            params["until"] = until
         rows = self._expect_list(self._request("GET", "/v2/orders", params=params), "/v2/orders")
         return [_parse_order(row) for row in rows]
 
