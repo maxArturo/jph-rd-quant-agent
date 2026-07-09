@@ -618,8 +618,8 @@
         "Typecheck passes"
       ],
       "priority": 40,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: ops/flatten.py (cancel all -> confirm no open orders -> close every position -> poll GET /v2/positions empty; exit 0 flat / 1 not-confirmed (market closed hint) / 2 operational) + AlpacaClient.cancel_all_orders (207 multi-status) + close_position (DELETE /v2/positions/{symbol}) + ops/runbook.md (halt, pause research, flatten, key rotation via `onecli secrets update --id` in place, tailscale serve audit). 13 new tests (FlattenBroker routes through the REAL client; cancel-before-close ordering, short closed with buy, timeout paths, runbook sections). LIVE smoke through proxy: flat account confirmed, exit 0 (deliberately no orders placed — an Alpaca order without a ledger row would permanently fail ops/reconcile.py for that date; live test self-skips when the book is non-empty)."
     },
     {
       "id": "US-041",

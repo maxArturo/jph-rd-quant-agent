@@ -73,6 +73,16 @@
   when a missed run is harmless to catch up (data refresh: idempotent);
   trading jobs use Persistent=false so a boot mid-day doesn't fire a stale
   pre-open rebalance.
+- `ops/flatten.py` (US-040) is the emergency go-to-zero script (cancel all →
+  close all → poll /v2/positions empty), run as rdq-exec-paper. Exit codes:
+  0 = confirmed flat, 1 = liquidations submitted but not confirmed (usually
+  closed market — rerun after the open), 2 = operational failure. Its
+  liquidation orders have NO Trade Ledger rows, so ops/reconcile.py will
+  flag them for that date — expected; note the flatten in the Decision Log.
+  Never run it (or its live test) casually: it liquidates whatever the paper
+  book holds. Operator procedures live in `ops/runbook.md` — keep it current
+  when halt/rotate/exposure mechanics change (tests/test_flatten.py asserts
+  its required sections).
 - `ops/reconcile.py` (US-037) is READ-ONLY on both sides and runs as
   rdq-exec-paper (Alpaca vault secrets + Notion app connection both inject
   for that identity). Exit codes: 0 = ledger matches broker history exactly,

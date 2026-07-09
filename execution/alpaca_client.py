@@ -80,6 +80,14 @@ class CalendarDay:
 
 
 @dataclass(frozen=True)
+class CancelledOrder:
+    """One entry from DELETE /v2/orders' 207 multi-status body."""
+
+    id: str
+    status: int  # per-order HTTP status (200 = cancel accepted)
+
+
+@dataclass(frozen=True)
 class Order:
     id: str
     client_order_id: str
@@ -276,6 +284,36 @@ class AlpacaClient:
     def cancel_order(self, order_id: str) -> None:
         """DELETE /v2/orders/{id}: cancel one order (204 on success)."""
         self._request("DELETE", f"/v2/orders/{order_id}")
+
+    def cancel_all_orders(self) -> list[CancelledOrder]:
+        """DELETE /v2/orders: cancel every open order in one call.
+
+        Returns the 207 multi-status body — one entry per order the cancel
+        was attempted on (empty list when there was nothing to cancel).
+        Cancellation is asynchronous: entries report the attempt, not the
+        terminal state; poll list_orders(status="open") to confirm.
+        """
+        payload = self._request("DELETE", "/v2/orders")
+        if payload is None:  # a 204 means there was nothing to cancel
+            return []
+        rows = self._expect_list(payload, "/v2/orders")
+        return [
+            CancelledOrder(
+                id=str(row["id"]),
+                status=int(_float(row.get("status", 0), "status", "cancel_all")),
+            )
+            for row in rows
+        ]
+
+    def close_position(self, symbol: str) -> Order:
+        """DELETE /v2/positions/{symbol}: liquidate one position entirely.
+
+        Alpaca submits a market order for the full signed quantity (a short
+        is closed with a buy) and returns that order. The symbol must have
+        no open orders or Alpaca rejects the liquidation — cancel first.
+        """
+        row = self._request("DELETE", f"/v2/positions/{symbol}")
+        return _parse_order(self._expect_dict(row, f"/v2/positions/{symbol}"))
 
     def _expect_dict(self, payload: Any, path: str) -> dict[str, Any]:
         if not isinstance(payload, dict):

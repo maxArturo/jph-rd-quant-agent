@@ -148,6 +148,14 @@
   still aborts the run), and it reads breaker state via the public
   `Breaker.halted`/`halt_note`/`high_water_mark` accessors — use those, not
   the private file readers.
+- Emergency liquidation endpoints on the client: `cancel_all_orders()`
+  (DELETE /v2/orders, 207 multi-status body → `CancelledOrder` list; the
+  entries report the ATTEMPT — cancellation is async, poll
+  `list_orders(status="open")` to confirm) and `close_position(symbol)`
+  (DELETE /v2/positions/{symbol} → the liquidation market Order; Alpaca
+  rejects it while the symbol has a working order, so always cancel first).
+  `ops/flatten.py` is the only intended caller — the rebalancer must keep
+  using targeted `place_order`/`cancel_order`.
 - Live Notion access for `rdq-exec-paper` is an app-connection GRANT on the
   agent, not a vault secret — see docs/decisions.md 2026-07-09 (US-035). If
   ledger writes start 401ing, re-grant the Notion connection to the agent in

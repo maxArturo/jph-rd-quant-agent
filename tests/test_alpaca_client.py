@@ -16,6 +16,7 @@ from execution.alpaca_client import (
     AlpacaError,
     AlpacaRateLimitError,
     CalendarDay,
+    CancelledOrder,
     Order,
     Position,
 )
@@ -313,6 +314,55 @@ class TestCancelOrder:
         )
         with pytest.raises(AlpacaError, match="not cancelable"):
             client.cancel_order("ord-1")
+
+
+class TestCancelAllOrders:
+    def test_parses_207_multi_status_body(self) -> None:
+        client, session, _ = make_client(
+            [FakeResponse(207, [{"id": "ord-1", "status": 200}, {"id": "ord-2", "status": 500}])]
+        )
+        cancelled = client.cancel_all_orders()
+        assert cancelled == [
+            CancelledOrder(id="ord-1", status=200),
+            CancelledOrder(id="ord-2", status=500),
+        ]
+        assert session.calls[0]["method"] == "DELETE"
+        assert session.calls[0]["url"] == f"{BASE_URL}/v2/orders"
+
+    def test_nothing_to_cancel(self) -> None:
+        client, _, _ = make_client([FakeResponse(207, [])])
+        assert client.cancel_all_orders() == []
+
+    def test_204_body_means_empty(self) -> None:
+        client, _, _ = make_client([FakeResponse(204)])
+        assert client.cancel_all_orders() == []
+
+
+class TestClosePosition:
+    def test_returns_the_liquidation_order(self) -> None:
+        client, session, _ = make_client(
+            [FakeResponse(200, dict(ORDER_ROW, id="close-1", side="sell", type="market"))]
+        )
+        order = client.close_position("AAPL")
+        assert order.id == "close-1"
+        assert order.side == "sell"
+        assert order.order_type == "market"
+        assert session.calls == [
+            {
+                "method": "DELETE",
+                "url": f"{BASE_URL}/v2/positions/AAPL",
+                "params": None,
+                "json": None,
+                "timeout": 30.0,
+            }
+        ]
+
+    def test_no_such_position_raises_with_detail(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(404, {"code": 40410000, "message": "position does not exist"})]
+        )
+        with pytest.raises(AlpacaError, match="position does not exist"):
+            client.close_position("AAPL")
 
 
 class TestGetCalendar:
