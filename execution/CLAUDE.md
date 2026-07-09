@@ -68,7 +68,9 @@
   `execution/breaker.paper.json` (both keys required, unknown refused,
   at-limit passes / strictly-over trips), trip messages prefixed with the
   violated key. State files default under `~/rdq-data/breaker/`: `halt`
-  (operator kill switch — US-038 tools call `Breaker.halt()`/`clear_halt()`)
+  (operator kill switch — the Slack halt_trading/resume_trading tools in
+  orchestrator/conversation.py call `Breaker.halt()`/`clear_halt()` on the
+  DEFAULT paths, shared with the rebalancer on this single-user box)
   and `high_water_mark.json`. Check order: halt → daily notional → drawdown.
   US-034 must branch on `trip.reason`: `HALT_FILE` exits 0 ("halted" notice);
   the other trips exit nonzero.
@@ -140,7 +142,12 @@
   traded and no-trade days exit 0; gate-rejection and breaker-trip days post
   it WITH the rejection lines and exit 1 (those paths no longer go through
   the generic "rebalance aborted" message — earlier failures still do).
-  US-038 adds the breaker state line here.
+  Every summary carries `breaker_state_line()` (US-038): "breaker: HALTED —
+  <note>" / "breaker: normal (high-water mark $X)". The helper never raises
+  (a corrupt HWM file becomes a STATE ERROR line; the breaker's own check
+  still aborts the run), and it reads breaker state via the public
+  `Breaker.halted`/`halt_note`/`high_water_mark` accessors — use those, not
+  the private file readers.
 - Live Notion access for `rdq-exec-paper` is an app-connection GRANT on the
   agent, not a vault secret — see docs/decisions.md 2026-07-09 (US-035). If
   ledger writes start 401ing, re-grant the Notion connection to the agent in

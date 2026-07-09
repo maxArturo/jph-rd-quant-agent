@@ -148,10 +148,7 @@ class Breaker:
             )
 
         if self.halt_file.exists():
-            try:
-                note = self.halt_file.read_text().strip()
-            except OSError:
-                note = ""
+            note = self.halt_note
             detail = f" ({note})" if note else ""
             return BreakerTrip(
                 reason=BreakerReason.HALT_FILE,
@@ -196,6 +193,22 @@ class Breaker:
     @property
     def halted(self) -> bool:
         return self.halt_file.exists()
+
+    @property
+    def halt_note(self) -> str:
+        """The halt file's note text ("" when absent, empty, or unreadable)."""
+        try:
+            return self.halt_file.read_text().strip()
+        except OSError:
+            return ""
+
+    @property
+    def high_water_mark(self) -> float | None:
+        """The persisted high-water mark (None before the first clean pass).
+
+        Raises :class:`BreakerStateError` on a corrupt file, same as check().
+        """
+        return self._read_high_water_mark()
 
     def _read_high_water_mark(self) -> float | None:
         try:

@@ -11,7 +11,7 @@ except a halt-file breaker trip, which posts a "halted" notice and exits 0
 rejections post the daily summary (equity + each violated limit) as their
 notice; earlier failures post the plain abort message. Days that reach the
 end post the daily summary too: orders placed, fills, rejections ("none"),
-account equity — and every submitted order lands in the Notion Trade Ledger
+account equity, breaker state — and every submitted order lands in the Notion Trade Ledger
 (execution/ledger.py, US-035), created at submit time and updated with its
 terminal fill or rejection after the poll. ``--dry-run`` runs
 the full chain through the gate and breaker, prints the exact order list,
@@ -50,6 +50,7 @@ from execution.breaker import (
     Breaker,
     BreakerError,
     BreakerReason,
+    BreakerStateError,
     load_breaker_config,
 )
 from execution.diff import (
@@ -331,6 +332,25 @@ def fill_summary(submitted: Sequence[Order], final: Sequence[Order]) -> str:
     return "\n".join([header, *lines])
 
 
+def breaker_state_line(breaker: Breaker) -> str:
+    """One line describing the breaker's current state, for the daily summary.
+
+    Deliberately never raises: a corrupt high-water-mark file is reported in
+    the line itself (the breaker's own check aborts the run separately).
+    """
+    if breaker.halted:
+        note = breaker.halt_note
+        detail = f" — {note}" if note else ""
+        return f"breaker: HALTED{detail} (resume trading to lift it)"
+    try:
+        high_water_mark = breaker.high_water_mark
+    except BreakerStateError as exc:
+        return f"breaker: STATE ERROR — {exc}"
+    if high_water_mark is None:
+        return "breaker: normal (no high-water mark recorded yet)"
+    return f"breaker: normal (high-water mark ${high_water_mark:,.2f})"
+
+
 def format_daily_summary(
     as_of: dt.date,
     equity: float,
@@ -339,12 +359,14 @@ def format_daily_summary(
     rejections: Sequence[str] = (),
     no_trade_note: str | None = None,
     ledger_failures: Sequence[str] = (),
+    breaker_state: str | None = None,
 ) -> str:
     """The daily Slack digest: orders placed, fills, rejections, equity.
 
     Posted on every day the pipeline reaches the gate — traded days carry the
     fill report, no-trade days say why, and gate/breaker-rejection days list
     each rejection (those days still exit nonzero; this is the notice).
+    ``breaker_state`` is breaker_state_line()'s output (US-038).
     """
     lines = [
         f"daily rebalance summary ({as_of})",
@@ -360,6 +382,8 @@ def format_daily_summary(
         lines += [f"  {reason}" for reason in rejections]
     else:
         lines.append("gate/breaker rejections: none")
+    if breaker_state is not None:
+        lines.append(breaker_state)
     for failure in ledger_failures:
         lines.append(f"WARNING: Trade Ledger write failed — {failure}")
     return "\n".join(lines)
@@ -438,6 +462,8 @@ def run_rebalance(
         # notice is the day's summary (equity + every violated limit).
         if limits is None:
             limits = load_limits()
+        if breaker is None:
+            breaker = Breaker(load_breaker_config())
         gate = evaluate_orders(diff.orders, account, positions, len(todays_orders), limits)
         if gate.rejections:
             summary = format_daily_summary(
@@ -447,14 +473,13 @@ def run_rebalance(
                 [],
                 rejections=[r.message for r in gate.rejections],
                 no_trade_note="order gate rejected the batch — nothing submitted",
+                breaker_state=breaker_state_line(breaker),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
             return 1
 
         # 7. Breaker: halt file / daily notional / drawdown kill switch.
-        if breaker is None:
-            breaker = Breaker(load_breaker_config())
         trip = breaker.check(account.equity, day_traded_notional(todays_orders))
         if trip is not None:
             if trip.reason is BreakerReason.HALT_FILE:
@@ -469,6 +494,7 @@ def run_rebalance(
                 [],
                 rejections=[trip.message],
                 no_trade_note="circuit breaker tripped — nothing submitted",
+                breaker_state=breaker_state_line(breaker),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
@@ -485,6 +511,7 @@ def run_rebalance(
                 [],
                 [],
                 no_trade_note="no orders — book already on target",
+                breaker_state=breaker_state_line(breaker),
             )
             _safe_notify(notify, summary)
             return 0
@@ -509,6 +536,7 @@ def run_rebalance(
             submitted,
             final,
             ledger_failures=ledger.failures if ledger is not None else (),
+            breaker_state=breaker_state_line(breaker),
         )
         _safe_notify(notify, summary)
         print(summary)

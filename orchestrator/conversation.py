@@ -70,6 +70,22 @@ class UniverseManager(Protocol):
     def materialize(self, name: str, tickers: Sequence[str]) -> MaterializedUniverse: ...
 
 
+class TradingBreaker(Protocol):
+    """What the halt/resume tools need from execution.breaker.Breaker."""
+
+    halt_file: Path
+
+    @property
+    def halted(self) -> bool: ...
+
+    @property
+    def halt_note(self) -> str: ...
+
+    def halt(self, note: str = "") -> None: ...
+
+    def clear_halt(self) -> None: ...
+
+
 START_RESEARCH_SCHEMA: dict[str, Any] = {
     # No inputs: the run is driven entirely by the thread's saved directive.
     "type": "object",
@@ -109,6 +125,25 @@ SET_UNIVERSE_SCHEMA: dict[str, Any] = {
 
 CONFIRM_UNIVERSE_SCHEMA: dict[str, Any] = {
     # No inputs: confirms the thread's stored proposal.
+    "type": "object",
+    "properties": {},
+}
+
+HALT_TRADING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why trading is being halted, in the operator's words — written"
+                " into the halt file and the Decision Log."
+            ),
+        },
+    },
+}
+
+RESUME_TRADING_SCHEMA: dict[str, Any] = {
+    # No inputs: removes the breaker halt file.
     "type": "object",
     "properties": {},
 }
@@ -219,6 +254,26 @@ def format_run_resumed(run: Run) -> str:
     )
 
 
+def format_trading_halted(note: str, halt_file: Path) -> str:
+    """Slack mrkdwn confirmation posted when the operator halts trading."""
+    return (
+        ":octagonal_sign: *Paper trading halted.*\n"
+        f"*Reason:* {note}\n"
+        f"*Halt file:* `{halt_file}`\n"
+        "Every rebalance run will post a halted notice and submit no orders"
+        " until you resume trading."
+    )
+
+
+def format_trading_resumed(halt_file: Path) -> str:
+    """Slack mrkdwn confirmation posted when the operator resumes trading."""
+    return (
+        ":arrow_forward: *Paper trading resumed.*\n"
+        f"*Halt file:* `{halt_file}` removed — the nightly rebalance will"
+        " trade again from its next run."
+    )
+
+
 def duplicate_run_message(existing: Run) -> str:
     return (
         f"this thread already has a research run (status: {existing.status}, "
@@ -257,6 +312,7 @@ class ConversationCore:
         rdagent: ResearchLauncher | None = None,
         universes: UniverseManager | None = None,
         recorder: NotionRecorder | None = None,
+        breaker: TradingBreaker | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -266,10 +322,17 @@ class ConversationCore:
             from orchestrator.universe import UniverseService
 
             universes = UniverseService()
+        if breaker is None:
+            # The real kill switch: ~/rdq-data/breaker/halt, shared with the
+            # rebalancer (execution/breaker.py default paths).
+            from execution.breaker import Breaker, load_breaker_config
+
+            breaker = Breaker(load_breaker_config())
         self._store = store
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
         self._universes: UniverseManager = universes
+        self._breaker: TradingBreaker = breaker
         # Optional Notion audit trail (US-027); None disables recording.
         self._recorder = recorder
         self._histories: dict[str, list[dict[str, Any]]] = {}
@@ -292,6 +355,8 @@ class ConversationCore:
                     self._resume_run_tool(thread_ts, say),
                     self._set_universe_tool(thread_ts, say),
                     self._confirm_universe_tool(thread_ts, say),
+                    self._halt_trading_tool(thread_ts, say),
+                    self._resume_trading_tool(thread_ts, say),
                 ],
                 system=self._system_prompt(thread_ts),
             )
@@ -607,5 +672,80 @@ class ConversationCore:
                 " it before the operator confirms."
             ),
             input_schema=CONFIRM_UNIVERSE_SCHEMA,
+            handler=handler,
+        )
+
+    def _halt_trading_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            if self._breaker.halted:
+                note = self._breaker.halt_note
+                detail = f" ({note})" if note else ""
+                raise ValueError(
+                    f"trading is already halted{detail} — resume_trading lifts it"
+                )
+            reason = str(args.get("reason") or "").strip()
+            note = reason or f"halted from Slack thread {thread_ts}"
+            self._breaker.halt(note)
+            say(text=format_trading_halted(note, self._breaker.halt_file), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_decision(
+                    title="Trading halted",
+                    decision_type="halt",
+                    details=f"Reason: {note}. Halt file: {self._breaker.halt_file}.",
+                    thread_ts=thread_ts,
+                )
+            logger.info("trading halted from thread %s: %s", thread_ts, note)
+            return (
+                "The breaker halt file was written: every rebalance run now exits"
+                " with a halted notice and submits no orders until resume_trading."
+                " The halt notice was posted. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="halt_trading",
+            description=(
+                "HALT all paper trading immediately by writing the circuit-breaker"
+                " halt file — the nightly rebalancer submits no orders while it"
+                " exists. Call it only when the operator explicitly asks to halt or"
+                " stop trading; it does not touch research runs (that is stop_run)."
+            ),
+            input_schema=HALT_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _resume_trading_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — removes the halt file
+            if not self._breaker.halted:
+                raise ValueError(
+                    "trading is not halted — there is no halt file to remove"
+                )
+            note = self._breaker.halt_note
+            self._breaker.clear_halt()
+            say(text=format_trading_resumed(self._breaker.halt_file), thread_ts=thread_ts)
+            if self._recorder is not None:
+                was = f" (was: {note})" if note else ""
+                self._recorder.record_decision(
+                    title="Trading resumed",
+                    decision_type="resume",
+                    details=f"Halt lifted{was}. Halt file {self._breaker.halt_file} removed.",
+                    thread_ts=thread_ts,
+                )
+            logger.info("trading resumed from thread %s (halt note was: %s)", thread_ts, note)
+            return (
+                "The breaker halt file was removed: the nightly rebalance will"
+                " trade again from its next run. The resume notice was posted."
+                " Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="resume_trading",
+            description=(
+                "RESUME paper trading by removing the circuit-breaker halt file"
+                " written by halt_trading. Call it only when the operator"
+                " explicitly asks to resume trading; it does not touch research"
+                " runs (that is resume_run)."
+            ),
+            input_schema=RESUME_TRADING_SCHEMA,
             handler=handler,
         )

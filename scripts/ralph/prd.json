@@ -587,8 +587,8 @@
         "Typecheck passes"
       ],
       "priority": 38,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: halt_trading/resume_trading ToolSpecs in ConversationCore over the new TradingBreaker protocol (default = real Breaker on the shared ~/rdq-data/breaker paths; tests inject tmp paths). Halt writes the operator's reason into the halt file + posts confirmation + Decision Log row (type halt); resume removes it (row type resume, carries the old note); redundant calls refused via is_error so the existing note is never clobbered. Breaker exposes halt_note/high_water_mark accessors; every daily summary now carries breaker_state_line() (HALTED — note / normal + HWM / STATE ERROR, never raises). 13 new tests incl. tool-written file gating the REAL rebalance pipeline (exit 0, no orders, then trades again after resume). LIVE smoke through the proxy: real fable-5 drove halt->resume, real Decision Log rows created, read back, archived."
     },
     {
       "id": "US-039",

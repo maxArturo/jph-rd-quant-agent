@@ -175,6 +175,17 @@
   injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
   synchronous. See dispatch_action in tests/test_poller.py.
 
+- Trading halt/resume (US-038): halt_trading/resume_trading are ToolSpecs in
+  ConversationCore like the run-lifecycle tools, but they flip the
+  REBALANCER's kill switch (execution/breaker.py halt file on the default
+  `~/rdq-data/breaker/` paths), not research runs. The core depends on the
+  `TradingBreaker` protocol (halt/clear_halt/halted/halt_note/halt_file) and
+  defaults to the real `Breaker(load_breaker_config())` — tests inject one
+  over tmp paths. Both tools refuse redundant calls (already halted / not
+  halted) so the model relays state instead of clobbering the existing halt
+  note, and both write a Decision Log row via
+  `NotionRecorder.record_decision` (types `halt`/`resume`).
+
 - Run-completion output lives in `orchestrator/summary.py`: `load_metrics`
   (qlib_res.csv is a pandas Series csv — metric name index, one value
   column), `format_summary` (the metric-label -> qlib-key mapping lives in
