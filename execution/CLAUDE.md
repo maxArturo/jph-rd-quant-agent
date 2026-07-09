@@ -40,6 +40,17 @@
   (`load_strategy_params` is the template). topk/n_drop live at
   `port_analysis_config.strategy.kwargs`; all conf*.yaml in a workspace must
   agree or the loader refuses.
+- `execution/order_gate.py` is PURE — no HTTP, no state. The caller passes a
+  fresh `Account`/`Position` snapshot plus today's order count and gets a
+  `GateResult` back; US-034 should call `result.raise_for_rejections()` to
+  abort-without-trading on any rejection. Boundary semantics: exactly AT a
+  limit passes, strictly over fails. Rejection messages start with the
+  violated JSON key from `execution/limits.paper.json` (all four keys
+  required; unknown keys refused — edit the file and `load_limits` in sync).
+- Gate projection details: batches evaluate sequentially and cumulatively
+  (approved orders update the projected book; rejected ones don't), position
+  exposure is marked at the order's limit price, and only orders that GROW
+  |position| are pct-checked so an oversized position can always be trimmed.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.

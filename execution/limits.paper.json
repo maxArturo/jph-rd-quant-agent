@@ -1,0 +1,6 @@
+{
+  "max_order_notional_usd": 10000,
+  "max_position_pct_equity": 10,
+  "max_day_orders": 120,
+  "max_total_positions": 60
+}

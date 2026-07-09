@@ -464,8 +464,8 @@
         "Typecheck passes"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/order_gate.py (pure, no-HTTP: evaluate_orders(orders, account, positions, day_orders_placed, limits) -> GateResult; raise_for_rejections() for US-034 abort) + execution/limits.paper.json (all 4 keys required, unknown keys refused). At-limit passes / just-over fails; every rejection message starts with the violated JSON key. Batch evaluated cumulatively (approved orders project onto the book; rejected don't); exposure marked at order limit price; only |position|-growing orders pct-checked (trimming oversized stays legal); full exits free position-count slots in-batch. 37 unit tests + READ-ONLY live smoke against the real paper snapshot through the proxy: mixed batch -> 2 approved, notional + pct rejections exactly as expected."
     },
     {
       "id": "US-031",
