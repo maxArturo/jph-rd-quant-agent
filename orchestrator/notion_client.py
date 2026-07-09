@@ -119,6 +119,47 @@ class NotionClient:
             if not page.get("has_more") or cursor is None:
                 return results
 
+    def create_database(
+        self,
+        parent_page_id: str,
+        title: str,
+        properties: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST /v1/databases: create a database under a page parent."""
+        payload: dict[str, Any] = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [{"type": "text", "text": {"content": title}}],
+            "properties": properties,
+        }
+        return self._request("POST", "/v1/databases", payload)
+
+    def list_child_databases(self, page_id: str) -> dict[str, str]:
+        """GET /v1/blocks/{id}/children: map child-database title -> database id.
+
+        Paginates through all children; non-database blocks are ignored. If two
+        child databases share a title the LAST one wins — bootstrap treats
+        titles as unique under its parent page.
+        """
+        found: dict[str, str] = {}
+        cursor: str | None = None
+        while True:
+            query = f"?page_size={DEFAULT_PAGE_SIZE}"
+            if cursor is not None:
+                query += f"&start_cursor={cursor}"
+            page = self._request("GET", f"/v1/blocks/{page_id}/children{query}", None)
+            blocks = page.get("results", [])
+            if not isinstance(blocks, list):
+                raise NotionError(
+                    f"expected a 'results' list from block children, got: {blocks!r:.200}"
+                )
+            for block in blocks:
+                if block.get("type") == "child_database":
+                    title = block.get("child_database", {}).get("title", "")
+                    found[title] = block["id"]
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or cursor is None:
+                return found
+
     def update_page(
         self,
         page_id: str,

@@ -86,6 +86,15 @@
   records `.request(method, url, json=, headers=)` — a superset of the
   test_fmp.py GET-only fake).
 
+- Notion database ids live in `orchestrator/config.yaml` under
+  `notion.databases.{research_ideas,hypothesis_log,backtest_results,
+  decision_log,trade_ledger}` — written (and rewritten) by
+  `ops/bootstrap_notion.py`; never hand-edit or hardcode the ids. The
+  property schemas are documented in docs/reference/notion-schema.md; each
+  database has exactly ONE writing component (one-writer-per-DB convention) —
+  check the table there before adding a Notion write path. Relations are
+  `single_property` (no synced back-reference on Research Ideas).
+
 ## Testing Bolt apps (see tests/test_slack_app.py)
 
 - Bolt >=1.15 constructs a NEW real `WebClient` per request in

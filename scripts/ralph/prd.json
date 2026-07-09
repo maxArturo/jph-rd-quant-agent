@@ -402,8 +402,8 @@
         "Typecheck passes"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": "Parent page provided by operator: 'Automated AI Quant Investment', page id 3979b1a4-36cf-8046-baa5-cc14c1ca7665 (URL https://app.notion.com/p/Automated-AI-Quant-Investment-3979b1a436cf8046baa5cc14c1ca7665). bootstrap_notion.py must create the five DBs under this page (make it configurable, default to this id). AUTH: Notion is injected by OneCLI via a connector integration ('JPH NanoClaw Connection'), NOT a vaulted secret — bare proxied GET /v1/users/me as rdq-orchestrator returns 200 (verified 2026-07-08). It does NOT show in `onecli secrets list`, so setup_onecli.sh prints a harmless WARN about no api.notion.com secret — ignore it; do not vault a Notion key. Parent page is SHARED with the integration (verified 2026-07-08: bare proxied GET /v1/pages/<id> as rdq-orchestrator returns 200 with the page object). No human blocker remains for Notion — the live bootstrap and real writes are fully unblocked."
+      "passes": true,
+      "notes": "DONE 2026-07-09: ops/bootstrap_notion.py (python -m ops.bootstrap_notion under onecli as rdq-orchestrator; --parent-page-id defaults to 3979b1a4-36cf-8046-baa5-cc14c1ca7665) + docs/reference/notion-schema.md (5 schemas + one-writer-per-DB table) + NotionClient.create_database/list_child_databases. Idempotency = child databases matched by title under the parent page (unit tested fresh/rerun/partial). LIVE run created all 5; rerun reported 'exists' x5 (no dupes); every DB queried OK. IDs in orchestrator/config.yaml: research_ideas 3989b1a4-36cf-81bc-87e9-c0ac0ea1cc2c, hypothesis_log 3989b1a4-36cf-81a8-a866-c9fd16c3b104, backtest_results 3989b1a4-36cf-81a3-b1dd-ce1ce20f535a, decision_log 3989b1a4-36cf-8145-9aa1-cdb3ed98c643, trade_ledger 3989b1a4-36cf-8184-9d9d-d6dfdcadbb54. Relations are single_property -> Research Ideas (no back-refs). US-027: read ids via yaml from orchestrator/config.yaml, never hardcode."
     },
     {
       "id": "US-027",

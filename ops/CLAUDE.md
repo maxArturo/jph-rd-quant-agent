@@ -20,6 +20,19 @@
   scripts, `set -uo pipefail` (no `-e`) for check-style scripts that collect
   failures.
 
+## Python in ops/
+
+- `ops/` is a real package (`ops/__init__.py`, listed in pyproject
+  `packages.find` include) so tests can `from ops.foo import ...` — new
+  Python entrypoints here are run as `python -m ops.<module>` (usually under
+  `onecli run --agent <identity>`), not as loose scripts.
+- Notion database bootstrap: `ops/bootstrap_notion.py` owns the five DB
+  schemas — its `database_properties()` must stay in sync with
+  docs/reference/notion-schema.md (a test cross-checks property names against
+  the doc's tables). DB ids land in `orchestrator/config.yaml` under
+  `notion:`; rerunning is idempotent (matches child databases by title under
+  the parent page).
+
 ## systemd user units
 
 - Units live in `ops/` and are symlinked into `~/.config/systemd/user/` by
