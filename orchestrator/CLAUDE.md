@@ -73,6 +73,19 @@
   actually resuming the server-side process, or the poller will poll a
   corpse forever.
 
+- Notion writes go through `orchestrator/notion_client.py` (`NotionClient`):
+  bare HTTPS with only `Notion-Version: 2022-06-28` — NEVER add an
+  Authorization header (a source-grep test enforces it; the OneCLI proxy
+  injects the token via the connector integration when running under
+  `onecli run --agent rdq-orchestrator`). Read-after-write goes through
+  `query_db_until(db_id, predicate)` — Notion queries lag writes; a plain
+  `query_db` right after `create_page` can miss the row. Retries: 429
+  honors Retry-After; 409/5xx are transient (Notion returns 409
+  conflict_error on concurrent saves — retry, don't fail). Tests inject
+  `NotionClient(session=FakeSession, sleep=list.append)` (FakeSession here
+  records `.request(method, url, json=, headers=)` — a superset of the
+  test_fmp.py GET-only fake).
+
 ## Testing Bolt apps (see tests/test_slack_app.py)
 
 - Bolt >=1.15 constructs a NEW real `WebClient` per request in

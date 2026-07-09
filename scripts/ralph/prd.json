@@ -385,8 +385,8 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: orchestrator/notion_client.py NotionClient — create_page (POST /v1/pages), query_db (POST /v1/databases/<id>/query, paginates next_cursor), update_page (PATCH /v1/pages/<id>, properties/archived); Notion-Version: 2022-06-28 on every call, zero Authorization header (source-grep test). Retries: 429 Retry-After, 409/5xx transient exponential; read-after-write = query_db_until(predicate) bounded backoff -> NotionConsistencyError. 20 unit tests + LIVE through proxy: users/me 200 (connector bot), parent page readable, create_page + archive round-trip PASS."
     },
     {
       "id": "US-026",
