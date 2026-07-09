@@ -24,3 +24,26 @@
 - Live tests: `@pytest.mark.live` + self-skip unless `RDQ_LIVE_TESTS=1`; run
   via `RDQ_LIVE_TESTS=1 onecli run --agent rdq-exec-paper -- .venv/bin/pytest
   tests/test_alpaca_client.py -m live`.
+- `execution/signal.py` replicates qlib's TopkDropoutStrategy selection
+  line-for-line (a parity test in tests/test_signal.py transcribes the
+  upstream lines and diffs against it) with two documented deviations: ties
+  rank alphabetically (upstream is unstable-sort luck) and degenerate slices
+  (`n_drop=0`, over-held book) are clamped instead of nonsense-trading. Don't
+  "fix" the algorithm without re-reading
+  qlib/contrib/strategy/signal_strategy.py.
+- Signal-extraction failure policy: EVERYTHING raises `SignalError` before
+  any `TargetBook` exists (stale/missing pred, empty cross-section, dup
+  holdings). US-034 must treat SignalError as abort-without-trading, never
+  catch-and-continue.
+- Workspace qlib confs keep their jinja placeholders (qrun renders at run
+  time) — parse them by rendering with `jinja2.Undefined` first
+  (`load_strategy_params` is the template). topk/n_drop live at
+  `port_analysis_config.strategy.kwargs`; all conf*.yaml in a workspace must
+  agree or the loader refuses.
+- pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
+  MultiIndex (datetime, instrument), first column is the score (upstream uses
+  `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.
+- Freshness rule: latest pred cross-section date must be >= the last store
+  calendar entry on/before as_of (`~/.qlib/qlib_data/us_data/calendars/
+  day.txt`). Predictions are made FROM day T FOR T+1, so pred dated the last
+  completed trading day is fresh for a pre-open rebalance.

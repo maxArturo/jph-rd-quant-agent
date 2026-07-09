@@ -449,8 +449,8 @@
         "Typecheck passes"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "DONE 2026-07-09: execution/signal.py — topk_dropout_holdings replicates TopkDropoutStrategy.generate_trade_decision line-for-line (parity test diffs against transcribed upstream lines, 100 randomized books); deterministic deviations documented: ties alphabetical, n_drop=0/over-held clamps. Params from workspace conf*.yaml (jinja-tolerant render; confs must agree), pred = newest mlruns/**/pred.pkl, freshness vs store calendar last_trading_day(as_of). Every failure raises SignalError before any TargetBook exists; CLI exits 1. 36 tests + CLI driven live against the REAL us_data calendar + real template conf: fresh/stale/missing all observed correct."
     },
     {
       "id": "US-030",
