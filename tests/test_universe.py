@@ -33,6 +33,7 @@ from orchestrator.universe import (
     normalize_tickers,
     render_universe_templates,
 )
+from tests.test_build_store import FakeFmp
 from tests.test_conversation import (
     THREAD,
     RecordingSay,
@@ -40,7 +41,7 @@ from tests.test_conversation import (
     start_research_script,
 )
 from tests.test_llm import FakeClient, message, text_block, tool_use_block
-from tests.test_make_universe import build_fixture_store
+from tests.test_make_universe import build_fixture_store, make_bars
 
 STORE_SPECS = {
     "AAPL": (100.0, 1_000_000.0),
@@ -50,12 +51,15 @@ STORE_SPECS = {
 }
 
 
-def make_service(tmp_path: Path, store: Path, min_size: int = 2) -> UniverseService:
+def make_service(
+    tmp_path: Path, store: Path, min_size: int = 2, fmp: FakeFmp | None = None
+) -> UniverseService:
     return UniverseService(
         store=store,
         factor_source_root=tmp_path / "factor_source",
         templates_root=tmp_path / "templates",
         min_size=min_size,
+        fmp_client=fmp,
     )
 
 
@@ -87,14 +91,25 @@ def test_propose_normalizes_and_dedups(tmp_path: Path) -> None:
 def test_propose_warns_below_min_size_suggesting_peer_padding(tmp_path: Path) -> None:
     store = build_fixture_store(tmp_path, STORE_SPECS)
     service = make_service(tmp_path, store, min_size=3)
-    proposal = service.propose("ai_pair", ["NVDA", "AMD"])
+    proposal = service.propose("ai_pair", ["NVDA", "AAPL"])
     assert len(proposal.warnings) == 1
     warning = proposal.warnings[0].lower()
     assert "2 tickers" in warning and "3" in warning
     assert "padding" in warning and "peers" in warning
 
     # configurable: at/above the threshold there is no warning
-    assert service.propose("ai_trio", ["NVDA", "AMD", "AVGO"]).warnings == ()
+    assert service.propose("ai_trio", ["NVDA", "AAPL", "MSFT"]).warnings == ()
+
+
+def test_propose_warns_on_store_gaps_promising_backfill(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, STORE_SPECS)
+    service = make_service(tmp_path, store)
+    proposal = service.propose("ai_semis", ["NVDA", "AMD", "AVGO"])
+    gap_warnings = [w for w in proposal.warnings if "backfill" in w]
+    assert len(gap_warnings) == 1
+    assert "2 ticker(s)" in gap_warnings[0]
+    assert "AMD" in gap_warnings[0] and "AVGO" in gap_warnings[0]
+    assert "FMP" in gap_warnings[0]
 
 
 def test_propose_refuses_builtin_and_reserved_names(tmp_path: Path) -> None:
@@ -145,17 +160,43 @@ def test_normalize_tickers_rejects_empty_list() -> None:
 # materialize(): gap reporting + data work
 
 
-def test_materialize_reports_gaps_and_writes_nothing(tmp_path: Path) -> None:
+def test_materialize_reports_fmp_missing_tickers_and_builds_no_universe(
+    tmp_path: Path,
+) -> None:
     store = build_fixture_store(tmp_path, STORE_SPECS)
-    service = make_service(tmp_path, store)
+    fmp = FakeFmp(bars={"FAKE1": (), "FAKE2": ()})
+    service = make_service(tmp_path, store, fmp=fmp)
     with pytest.raises(UniverseGapError) as excinfo:
         service.materialize("ai_semis", ["AAPL", "FAKE1", "FAKE2"])
     text = str(excinfo.value)
-    assert "2 ticker(s)" in text and "FAKE1" in text and "FAKE2" in text
-    assert "build_store" in text  # actionable
+    assert "FAKE1" in text and "FAKE2" in text
+    assert "re-propose" in text  # actionable
     assert not (store / "instruments" / "ai_semis.txt").exists()
     assert not (tmp_path / "factor_source" / "ai_semis").exists()
     assert not (tmp_path / "templates" / "ai_semis").exists()
+
+
+def test_materialize_backfills_store_gaps_from_fmp(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, STORE_SPECS)
+    fmp = FakeFmp(bars={"AMD": make_bars("AMD", close=120.0, volume=900.0)})
+    service = make_service(tmp_path, store, fmp=fmp)
+    result = service.materialize("ai_semis", ["NVDA", "AAPL", "AMD"])
+
+    # The new ticker landed in the store and in the universe file.
+    all_symbols = {
+        line.split("\t")[0]
+        for line in (store / "instruments" / "all.txt").read_text().splitlines()
+        if line.strip()
+    }
+    assert "AMD" in all_symbols
+    rows = result.instruments_path.read_text().splitlines()
+    assert [r.split("\t")[0] for r in rows] == ["AAPL", "AMD", "NVDA"]
+    assert (result.factor_source / "data_folder" / "daily_pv.h5").exists()
+
+    # Idempotent: a re-materialize finds no gaps and fetches nothing more.
+    fetched_before = list(fmp.fetched)
+    service.materialize("ai_semis", ["NVDA", "AAPL", "AMD"])
+    assert fmp.fetched == fetched_before
 
 
 def test_materialize_writes_instruments_factor_source_and_templates(

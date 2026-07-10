@@ -146,3 +146,100 @@ Cross-check nothing repo-owned listens beyond loopback:
 ```sh
 ss -tlnp | grep -vE '127\.0\.0\.1|\[::1\]'
 ```
+
+## 6. Routine monitoring & triage
+
+Not emergencies — the checks for "is it alive and what is it doing".
+From non-login shells, prefix every `systemctl --user` / `journalctl --user`
+with `XDG_RUNTIME_DIR=/run/user/$(id -u)`.
+
+### One-shot health check
+
+```sh
+ops/health.sh    # unit states + loopback audit + tailscale exposure; exit 0 = healthy
+```
+
+### Logs
+
+```sh
+journalctl --user -u rdq-orchestrator.service -f     # Slack bot, live
+journalctl --user -u rdq-research.service -f         # server_ui control plane
+journalctl --user -u rdq-rebalance.service -n 100    # last rebalance run
+journalctl --user -u rdq-data-refresh.service -n 50  # last data refresh
+journalctl --user -u rdq-sweep.service -n 50         # last retention sweep
+```
+
+The orchestrator is quiet by design for plain conversation: it logs tool
+actions (`saved directive`, `started research run`, `trading halted`, ...)
+and exceptions, **not** every message. "No log lines" after a chat message
+is normal; the reply in the Slack thread is the signal. A missing reply
+with no logged exception means the message never reached the bot — see the
+deafness check below.
+
+### Per-subsystem probes
+
+```sh
+# research control plane up?
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19899/test   # want 200
+
+# research run internals (hypotheses, Co-STEER attempts, backtest logs):
+# start the viewer (transient unit; `rdagent ui` shells out to bare
+# `streamlit`, so the venv must be on PATH), then map it tailnet-only:
+systemd-run --user --unit=rdq-trace-viewer \
+  -p WorkingDirectory=$HOME/rd-agent-q \
+  -E PATH=$HOME/rd-agent-q/.venv/bin:/usr/local/bin:/usr/bin:/bin \
+  -E STREAMLIT_SERVER_ADDRESS=127.0.0.1 -E STREAMLIT_SERVER_HEADLESS=true \
+  $HOME/rd-agent-q/.venv/bin/rdagent ui --port 19900 \
+  --log-dir $HOME/rdq-runs/server_ui/traces
+ops/expose_traces.sh    # then open https://<tailnet-host>:19900
+# stop when monitoring is done:
+#   systemctl --user stop rdq-trace-viewer; tailscale serve --https=19900 off
+
+# research run stuck? tail its trace log — if the newest line is
+# "Requesting base feature configuration from user." and the file mtime is
+# stale, the base-feature gate is failing validation on every submit
+# (rd_loop retries forever). The probe's stderr is logged as
+# "feature validation probe failed" (research/us_validation.py); a missing
+# shim (e.g. QLIB_QUANT_* class paths unset) reverts to upstream's
+# conda/CN-data probe, which can NEVER pass on this box — see
+# docs/decisions.md US-043. Restart the service and relaunch the run.
+tail -n 5 ~/rdq-runs/server_ui/traces/*/*.log
+
+# orchestrator state (read-only peek; directives/runs/pending_interactions/
+# promoted_strategy):
+.venv/bin/python -c "import sqlite3; con=sqlite3.connect('orchestrator/state.sqlite'); \
+  [print(t, con.execute(f'select count(*) from {t}').fetchone()[0]) for t in \
+  ('directives','runs','pending_interactions','promoted_strategy')]"
+
+# ledger vs broker (read-only both sides):
+onecli run --agent rdq-exec-paper -- .venv/bin/python -m ops.reconcile
+```
+
+### Trading-day monitoring
+
+The daily Slack summary (weekdays ~08:00 ET) is itself the monitor: equity,
+orders, fills, gate/breaker rejections, and always a `breaker:` state line.
+**A missing summary is a finding** — the rebalancer posts one on every day
+it reaches the gate, including no-trade and rejection days. If it hasn't
+appeared by ~08:10 ET, check `journalctl --user -u rdq-rebalance.service`.
+
+### Slack-bot deafness check
+
+The Socket Mode websocket can die without crashing the process (so
+`Restart=always` never fires) — the failure mode is a healthy-looking
+service that answers nothing. Check that the bot process holds a direct
+connection to Slack on :443:
+
+```sh
+MAINPID=$(XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user show -p MainPID --value rdq-orchestrator.service)
+ss -tnp | grep "pid=$MAINPID" | grep ':443 '   # want one ESTAB line to a public IP
+```
+
+No `:443` line (or a `CLOSE-WAIT` to `127.0.0.1:10254`) = deaf; restart the
+service. Root cause of the known instance (2026-07-09): slack_sdk reads
+`HTTPS_PROXY` but ignores `NO_PROXY`, so under `onecli run` the websocket
+tunneled through the OneCLI proxy, which drops long-lived connections.
+`orchestrator/app.py` now forces `proxy = None` on both Slack clients; if
+deafness recurs, verify that override is still in place before hunting
+elsewhere. Messages sent while the bot was deaf are **not replayed** —
+resend them.

@@ -256,7 +256,15 @@ def main() -> None:
     poller.start()
     approvals.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
-    SocketModeHandler(app, config.app_token).start()
+    handler = SocketModeHandler(app, config.app_token)
+    # Slack must never route through the OneCLI proxy (docs/decisions.md
+    # 2026-07-08), but slack_sdk loads HTTPS_PROXY from the env and ignores
+    # NO_PROXY — under `onecli run` the websocket tunnels through the proxy,
+    # which drops long-lived connections and leaves the bot deaf. Force
+    # direct connections for both the websocket and the Web API client.
+    handler.client.proxy = None
+    web_client.proxy = None
+    handler.start()
 
 
 if __name__ == "__main__":

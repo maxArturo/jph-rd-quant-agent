@@ -474,3 +474,157 @@ traffic and must not transit the credential proxy that `onecli run` injects —
 the client sets `session.trust_env = False`, and rdq-orchestrator.service's
 NO_PROXY now also covers `127.0.0.1,localhost` (which the RdAgentClient calls
 to :19899 benefit from too).
+
+## 2026-07-09 — Slack clients force proxy=None (slack_sdk ignores NO_PROXY)
+
+**Problem found in production:** the orchestrator connected to Slack, then
+went silently deaf within ~2 minutes — service up, no errors logged, no
+replies. The Socket Mode websocket was tunneling through the OneCLI proxy
+despite the unit's `NO_PROXY=slack.com`: slack_sdk's proxy discovery
+(`proxy_env_variable_loader.load_http_proxy_from_env`) reads only
+`HTTPS_PROXY`/`https_proxy` and never consults NO_PROXY, and
+`SocketModeHandler` inherits the same env-loaded proxy via
+`app.client.proxy`. The proxy drops long-lived tunnels; the builtin client
+left a CLOSE-WAIT socket and never reconnected. Missed events are not
+replayed by Slack.
+
+**Decision:** enforce the existing "Slack never transits the proxy" rule
+(2026-07-08 entry) in code, not env: `orchestrator/app.py main()` sets
+`handler.client.proxy = None` and `web_client.proxy = None` after
+construction. Passing `proxy=""`/`None` at construction does NOT work —
+both clients fall back to env loading on falsy values, which is why the
+override must happen post-construction.
+
+**Diagnosis pattern (runbook §6):** a deaf bot shows no `:443` connection
+for the orchestrator PID in `ss -tnp` (and typically a CLOSE-WAIT to
+127.0.0.1:10254). The execution-side notifier (`execution/rebalance.py
+slack_notifier`) constructs a plain WebClient under `onecli run` too — its
+posts are short-lived HTTPS (not a persistent tunnel) so it has worked, but
+it inherits the same env-loading behavior if this ever needs revisiting.
+
+## 2026-07-09 — On-demand store backfill for custom universes (any-US-equity)
+
+**Problem:** the qlib store held only the 31-ticker bootstrap set, so the
+first real custom-universe proposal (30 AI-infrastructure names) died in
+`materialize()` with "absent from the store — backfill with
+data/build_store.py first". The operator's mental model — any US equity is
+reachable — matched PLAN.md's intent (the store as a broad superset) but not
+the store's actual contents, and no tool could close the gap from Slack.
+
+**Decision:** universes are no longer store-bounded. `data/refresh.py` gains
+`extend_store(store, client, symbols)` — full-history FMP backfill for new
+tickers, aligned to the store's own calendar (never "today"), merged through
+build_store's atomic swap with existing bars recovered from the bins and
+custom universes preserved; plus a `--add-tickers` CLI. `UniverseService`
+uses it: `propose()` warns which tickers will need backfill (and that
+confirm will take minutes), `materialize()` backfills gaps after operator
+confirmation; only symbols FMP has no bars for remain a hard
+`UniverseGapError` (listing them, suggesting re-proposal). Partial backfill
+before that error is deliberate: added bars are harmless, and the retry
+without the bad symbols finds them already present.
+
+**Identity change:** `rdq-orchestrator` now holds the
+`financialmodelingprep.com` secret (setup_onecli.sh + check_onecli.sh
+probe) — materialize runs inside the orchestrator process, which previously
+could not reach FMP. Market data is read-only/low-stakes; the
+paper/live-brokerage scoping is untouched.
+
+**Cost note:** extend refetches splits/dividends for every EXISTING ticker
+too (the rebuild recomputes all adjustment factors — same trade-off as
+refresh_store). Fine at current store size; if the store grows to ~1000
+names, revisit with a factor-preserving bundle path before making extends
+routine.
+
+## 2026-07-09 — US-043: fin_quant runs execute without conda (docker backtests + venv shims)
+
+**Problem:** the first UI-launched fin_quant run stalled forever at startup —
+`rd_loop._interact_init_params` re-asked for a base-feature config in an
+infinite loop because upstream's `validate_qlib_features` can never pass on
+this box: it hardcodes `QlibCondaEnv` (no conda here → the probe's PATH
+collapses to /bin:/usr/bin with no `python`), and its probe queries SH600000
+from the CN store (absent — only us_data exists). Two more conda assumptions
+were waiting behind it: `QlibFBWorkspace.execute` defaults to
+`env_type="conda"` for the real backtests, and `get_factor_env` builds
+`CondaConf(conda_env_name=$CONDA_DEFAULT_ENV)` → pydantic error when unset.
+Installing conda would NOT have fixed the gate (the CN-data probe still
+fails) and would duplicate what docker already provides.
+
+**Decision:** split execution by workload, pinned tree untouched.
+(1) Backtests/model training opt into docker: `MODEL_CoSTEER_ENV_TYPE=docker`
+(QTDockerEnv, local_qlib:latest built from the pinned dockerfile, mounts
+~/.qlib rw) in rdq-research.service and run_us_quant.sh wire_env.
+(2) Generated factor code runs with the repo venv's interpreter:
+`FACTOR_CoSTEER_PYTHON_BIN=.venv/bin/python` (same two places).
+(3) research/us_validation.py runtime-patches (US-024 pattern, by assignment
+over every from-import binding) `validate_qlib_features` → a subprocess of
+`sys.executable` probing the US store with SPY (knobs: RDQ_QLIB_STORE,
+RDQ_VALIDATION_*), and `get_factor_env` → a LocalEnv on the venv's bin/.
+The install hook is `research.us_quant` import — resolving the QLIB_QUANT_*
+class paths imports it in every fin_quant process during loop construction,
+before the interaction gate — plus a belt-and-braces call in
+server_ui.main() (children are forked and inherit the patched modules).
+
+**Caveat:** the patch targets mirror upstream call sites at the pinned
+commit (rd_loop, utils.qlib, factor_coder.config, factor_experiment,
+quant_experiment) — re-audit `grep -rn "validate_qlib_features\|get_factor_env"`
+when bumping research/PINNED_COMMIT.
+
+**Addendum (same day):** `QLIB_DOCKER_BUILD_FROM_DOCKERFILE=false` joined the
+env set — the first probe run revealed upstream `QTDockerEnv.prepare()`
+rebuilds the image on EVERY call via docker-py's legacy builder, which shares
+no cache with the BuildKit-built local_qlib:latest (a silent hour-long
+rebuild inside each run). Ops owns the image instead; rebuild it manually
+after a research/PINNED_COMMIT bump if the upstream Dockerfile changed.
+
+**Addendum 2 (same day):** the probe run surfaced a third conda/CN hardcode:
+`QTDockerEnv.prepare` raises StopIteration when a caller replaces
+`extra_volumes` with the empty default (`get_model_env(extra_volumes={})`,
+via the quant scenario's `get_runtime_environment`), and otherwise
+auto-downloads the CN dataset whenever `~/.qlib/qlib_data/cn_data` is
+missing — it always is here. install_us_validation() now also class-patches
+`QTDockerEnv.prepare` to image build/pull only (`DockerEnv.prepare`),
+covering QlibFBWorkspace.execute backtests, get_model_env, and
+generate_data_folder_from_qlib.
+
+**Addendum 3 (same day):** the first chat completion of a fin_quant run has
+never succeeded on this box — rdagent sends `temperature=0.5` and LiteLLM
+raises UnsupportedParamsError for the Claude models (the known
+research/CLAUDE.md gotcha). `LITELLM_DROP_PARAMS=true` (honored by litellm's
+module init) joins the unit + wire_env so unsupported params are dropped
+instead of erroring.
+
+**Addendum 4 (same day):** every qlib backtest inside `local_qlib:latest`
+died in `qlib/workflow/expm.py create_exp` — the MLflow shipped in the image
+(>= 3.6) put the filesystem tracking backend in maintenance mode and raises
+MlflowException for the `./mlruns` store qlib's recorder is hardwired to,
+unless `MLFLOW_ALLOW_FILE_STORE=true` is set. Whole loops burned LLM budget
+"failing purely due to MLflow infrastructure" without ever testing factor
+logic. Fix: `QLIB_DOCKER_ENV_DICT={"MLFLOW_ALLOW_FILE_STORE":"true"}` joins
+the unit + wire_env — `QlibDockerConf.env_dict` (pydantic-settings, JSON
+parse) is merged into every container env at the top of `Env.run`, covering
+both the cached and retry docker paths. Migrating qlib to a DB backend is
+not an option at the pinned commit; the env opt-out is upstream MLflow's
+sanctioned escape hatch and stays correct across image rebuilds.
+
+**Addendum 5 (same day):** with MLflow unblocked, every backtest then died in
+qlib instrument loading — `ValueError: instrument ... us_data does not
+contain data for day` — while the host store was provably intact (all three
+trial loops of the miner_ai_conversion run failed identically; a manual
+container with the documented `~/.qlib` mount read the store fine). Root
+cause: `QTDockerEnv.__init__` declares `conf: DockerConf = QlibDockerConf()`
+— a mutable default evaluated once at class definition, shared by every
+`QTDockerEnv()` in the process. Upstream `get_model_env()` (called with no
+volumes from both quant/model `get_runtime_environment` while rendering the
+scenario prompt) assigns `env.conf.extra_volumes = {}` and
+`running_timeout_period = 600` onto that shared object, silently deleting
+the `~/.qlib -> /root/.qlib` mount (and shrinking the 3600s budget) for
+every subsequent backtest container. The containers saw an empty
+`/root/.qlib`, so qlib's calendar-glob-based `support_freq` came up empty
+before any factor code ran. Upstream never hits this because its model env
+defaults to conda; `MODEL_CoSTEER_ENV_TYPE=docker` (this box) activates the
+docker path. Fix: `get_us_model_env` in research/us_validation.py (shim #4,
+same US-024 assignment pattern, bindings in model_coder.conf +
+model_experiment + quant_experiment) builds a FRESH `QlibDockerConf` per
+call and merges caller volumes over the defaults, never touching the shared
+class default. The forensic tell for a poisoned process: the qrun entry in
+the docker execution log shows `timeout ... 600` instead of 3600.

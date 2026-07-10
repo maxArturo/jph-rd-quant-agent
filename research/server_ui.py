@@ -153,11 +153,17 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     # so offline tests can monkeypatch module attributes before this binds.
     from rdagent.log.server.app import _load_existing_traces, app, log_folder_path
 
+    from research.us_validation import install_us_validation
+
     log_folder_path.mkdir(parents=True, exist_ok=True)
     if app.static_folder:
         Path(app.static_folder).mkdir(parents=True, exist_ok=True)
     app.config["UI_SERVER_PORT"] = port
     install_resume_control()
+    # Patch the parent before Flask starts: run processes are forked, so they
+    # inherit the US feature-validation / factor-env bindings even if the
+    # QLIB_QUANT_* class-path env vars are ever unset (research/us_validation.py).
+    install_us_validation()
     _load_existing_traces(log_folder_path)
     app.run(debug=False, host=host, port=port)
 

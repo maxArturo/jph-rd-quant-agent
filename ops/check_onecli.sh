@@ -26,6 +26,7 @@ CHECKS=(
   "rdq-orchestrator|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01|"
   "rdq-orchestrator|api.notion.com|https://api.notion.com/v1/users/me|Notion-Version: 2022-06-28|"
   "rdq-orchestrator|paper-api.alpaca.markets|https://paper-api.alpaca.markets/v2/account||"
+  "rdq-orchestrator|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"
   "rdq-research|api.anthropic.com|https://api.anthropic.com/v1/models|anthropic-version: 2023-06-01|"
   "rdq-research|api.voyageai.com|https://api.voyageai.com/v1/embeddings|Content-Type: application/json|{\"model\":\"voyage-3.5-lite\",\"input\":\"ping\"}"
   "rdq-research|financialmodelingprep.com|https://financialmodelingprep.com/stable/search-symbol?query=AAPL||"

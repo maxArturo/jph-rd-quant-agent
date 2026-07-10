@@ -4,7 +4,8 @@
 # secrets per the PLAN.md identity table. Idempotent: safe to rerun.
 #
 # Identities created:
-#   rdq-orchestrator  Anthropic + Notion + Alpaca paper  (Slack bot / Claude layer)
+#   rdq-orchestrator  Anthropic + Notion + Alpaca paper + FMP  (Slack bot / Claude layer;
+#                     FMP backs on-demand universe backfill, orchestrator/universe.py)
 #   rdq-research      Anthropic + Voyage embeddings + FMP (RD-Agent + data pipeline)
 #   rdq-exec-paper    Alpaca paper + Notion + FMP        (nightly rebalancer + Trade Ledger + store refresh)
 #
@@ -32,7 +33,7 @@ declare -A IDENTITY_NAMES=(
 )
 # identity -> space-separated host patterns whose vault secrets it gets
 declare -A IDENTITY_HOSTS=(
-  [rdq-orchestrator]="api.anthropic.com api.notion.com paper-api.alpaca.markets"
+  [rdq-orchestrator]="api.anthropic.com api.notion.com paper-api.alpaca.markets financialmodelingprep.com"
   [rdq-research]="api.anthropic.com api.voyageai.com financialmodelingprep.com"
   [rdq-exec-paper]="paper-api.alpaca.markets api.notion.com financialmodelingprep.com"
 )

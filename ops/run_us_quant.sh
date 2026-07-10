@@ -85,6 +85,19 @@ wire_env() {
 
   export FACTOR_CoSTEER_DATA_FOLDER="${FACTOR_SOURCE}/data_folder"
   export FACTOR_CoSTEER_DATA_FOLDER_DEBUG="${FACTOR_SOURCE}/data_folder_debug"
+  # Execution environments (US-043, mirror rdq-research.service): docker for
+  # qlib backtests/model training (no conda on this box), the repo venv's
+  # interpreter for generated factor code.
+  export MODEL_CoSTEER_ENV_TYPE="docker"
+  export FACTOR_CoSTEER_PYTHON_BIN="${PYTHON}"
+  # Ops owns local_qlib:latest — in-run prepare() would rebuild it with
+  # docker-py's legacy builder every time (no BuildKit cache, ~1h).
+  export QLIB_DOCKER_BUILD_FROM_DOCKERFILE="false"
+  # MLflow >= 3.6 in the image refuses the ./mlruns file store that qlib's
+  # recorder is hardwired to; without this every backtest dies in create_exp.
+  export QLIB_DOCKER_ENV_DICT='{"MLFLOW_ALLOW_FILE_STORE":"true"}'
+  # LiteLLM rejects temperature!=1 for Claude models; rdagent sends 0.5.
+  export LITELLM_DROP_PARAMS="true"
   export APP_TPL="${REPO_ROOT}/research/app_tpl"
   export QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT="research.us_quant.USQlibFactorHypothesis2Experiment"
   export QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT="research.us_quant.USQlibModelHypothesis2Experiment"

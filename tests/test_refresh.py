@@ -13,6 +13,7 @@ from data.build_store import BuildError, TickerBundle, build_store
 from data.fmp import Dividend, EodBar, Split
 from data.refresh import (
     RefreshError,
+    extend_store,
     main,
     read_raw_bars,
     read_universes,
@@ -272,3 +273,124 @@ def test_main_missing_store_exits_nonzero(
     argv = ["--store", str(tmp_path / "absent"), "--end", "2024-01-10"]
     assert main(argv, client=WindowedFakeFmp(bars={})) == 1
     assert "no store at" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# extend_store(): on-demand new-ticker backfill (custom-universe support)
+
+
+def test_extend_store_adds_new_ticker_and_preserves_universes(tmp_path: Path) -> None:
+    store = build_fixture_store(
+        tmp_path, {"AAPL": make_bars("AAPL"), "MSFT": make_bars("MSFT")}
+    )
+    (store / "instruments" / "pair.txt").write_text("AAPL\t2024-01-02\t2024-01-08\n")
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG", close=50.0)})
+    result = extend_store(store, fmp, ["goog"])
+    assert result.added == {"GOOG": 5}
+    assert result.missing == ()
+    all_symbols = {
+        line.split("\t")[0]
+        for line in (store / "instruments" / "all.txt").read_text().splitlines()
+        if line.strip()
+    }
+    assert all_symbols == {"AAPL", "MSFT", "GOOG"}
+    assert read_universes(store)["pair"] == ["AAPL"]
+    # Fetch window is aligned to the store's own calendar, never "today".
+    assert fmp.windows == [("GOOG", "2024-01-02", "2024-01-08")]
+    # Existing tickers survive the rebuild with their bars intact.
+    calendar = [
+        date.fromisoformat(line)
+        for line in (store / "calendars" / "day.txt").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [bar.date for bar in read_raw_bars(store, "AAPL", calendar)] == DAYS
+
+
+def test_extend_store_reports_symbols_fmp_lacks_and_leaves_store_untouched(
+    tmp_path: Path,
+) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    snapshot = store_snapshot(store)
+    fmp = WindowedFakeFmp(bars={"FAKE": ()})
+    result = extend_store(store, fmp, ["FAKE"])
+    assert result.added == {}
+    assert result.missing == ("FAKE",)
+    assert store_snapshot(store) == snapshot
+
+
+def test_extend_store_skips_symbols_already_present(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    fmp = WindowedFakeFmp(bars={})
+    result = extend_store(store, fmp, ["AAPL", "aapl"])
+    assert result.added == {}
+    assert result.missing == ()
+    assert fmp.windows == []  # nothing fetched at all
+
+
+def test_extend_store_partial_missing_still_adds_the_rest(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG"), "FAKE": ()})
+    result = extend_store(store, fmp, ["GOOG", "FAKE"])
+    assert result.added == {"GOOG": 5}
+    assert result.missing == ("FAKE",)
+
+
+def test_main_add_tickers_extends_and_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG")})
+    assert main(["--store", str(store), "--add-tickers", "GOOG"], client=fmp) == 0
+    assert "added GOOG: 5 bars" in capsys.readouterr().out
+
+
+def test_main_add_tickers_missing_symbol_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    fmp = WindowedFakeFmp(bars={"FAKE": ()})
+    assert main(["--store", str(store), "--add-tickers", "FAKE"], client=fmp) == 1
+    assert "FMP has no data for: FAKE" in capsys.readouterr().err
+
+
+def test_extend_store_excludes_gapped_symbols_and_reports_them(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    snapshot = store_snapshot(store)
+    # A hole on 2024-01-04 inside GLXY's own span: unusable, must not build.
+    holed = tuple(b for b in make_bars("GLXY") if b.date != DAYS[2])
+    fmp = WindowedFakeFmp(bars={"GLXY": holed})
+    result = extend_store(store, fmp, ["GLXY"])
+    assert result.added == {}
+    assert result.gapped == ("GLXY",)
+    assert result.missing == ()
+    assert store_snapshot(store) == snapshot
+
+
+def test_extend_store_gapped_symbol_does_not_poison_the_batch(tmp_path: Path) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    holed = tuple(b for b in make_bars("GLXY") if b.date != DAYS[2])
+    fmp = WindowedFakeFmp(bars={"GLXY": holed, "GOOG": make_bars("GOOG")})
+    result = extend_store(store, fmp, ["GLXY", "GOOG"])
+    assert result.added == {"GOOG": 5}
+    assert result.gapped == ("GLXY",)
+
+
+def test_extend_store_drops_off_calendar_bars_keeping_calendar_invariant(
+    tmp_path: Path,
+) -> None:
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    # A foreign-venue bar on a day the store has never seen (Sat 2024-01-06):
+    # dropped, not merged — the calendar must not grow.
+    foreign_day = date(2024, 1, 6)
+    bars = tuple(
+        sorted(make_bars("GDS") + make_bars("GDS", days=[foreign_day]), key=lambda b: b.date)
+    )
+    fmp = WindowedFakeFmp(bars={"GDS": bars})
+    result = extend_store(store, fmp, ["GDS"])
+    assert result.added == {"GDS": 5}  # the foreign bar did not count
+    calendar = [
+        date.fromisoformat(line)
+        for line in (store / "calendars" / "day.txt").read_text().splitlines()
+        if line.strip()
+    ]
+    assert calendar == DAYS

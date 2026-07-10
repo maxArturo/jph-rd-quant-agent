@@ -44,6 +44,10 @@
   NO_PROXY — any service wrapping `onecli run` must `Environment=` a NO_PROXY
   exemption for hosts that may not transit the proxy (Slack: `slack.com`;
   urllib suffix-matches, covering wss-primary/files subdomains).
+  CAVEAT: NO_PROXY only helps clients that honor it — slack_sdk loads
+  HTTPS_PROXY and ignores NO_PROXY entirely, so its websocket + WebClient
+  need `proxy = None` forced in code (orchestrator/app.py main(), 2026-07-09;
+  see runbook §6 "Slack-bot deafness check").
 - From non-login shells (agents, cron) set
   `XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user` /
   `systemd-analyze --user verify`, or they can't reach the user manager.

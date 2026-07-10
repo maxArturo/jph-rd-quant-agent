@@ -6,14 +6,17 @@ core drives a two-step flow with this module:
 
 1. ``propose(name, tickers)`` — cheap validation only (no data work):
    normalizes the ticker list, refuses built-in/reserved names and all-US
-   proposals (those should use the built-in us_liquid), and warns when the
-   list is below ``min_size`` (cross-sectional ranking needs breadth). The
-   core posts the proposal in-thread for operator confirmation.
-2. ``materialize(name, tickers)`` — after the operator confirms: validates
-   tickers against the store (gaps are a hard error listing every missing
-   symbol), writes the instruments file (data/make_universe), regenerates
-   the factor source h5s (data/make_factor_source), and renders a
-   per-universe copy of the US workspace templates with ``market: <name>``.
+   proposals (those should use the built-in us_liquid), warns when the
+   list is below ``min_size`` (cross-sectional ranking needs breadth), and
+   warns which tickers are not in the store yet (they will be backfilled
+   from FMP on confirm). The core posts the proposal in-thread for operator
+   confirmation.
+2. ``materialize(name, tickers)`` — after the operator confirms: backfills
+   store gaps from FMP (data/refresh.extend_store; symbols FMP has no data
+   for are a hard error listing each one), writes the instruments file
+   (data/make_universe), regenerates the factor source h5s
+   (data/make_factor_source), and renders a per-universe copy of the US
+   workspace templates with ``market: <name>``.
 
 Layout convention (mirrors the us_liquid wiring from US-017):
 - instruments file: ``<store>/instruments/<name>.txt``
@@ -34,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from data.build_store import DEFAULT_STORE_PATH, MARKET_ALL
+from data.fmp import FmpClient
 from data.make_universe import (
     DEFAULT_CONFIG_PATH,
     make_universe,
@@ -60,7 +64,7 @@ class UniverseRefusalError(ValueError):
 
 
 class UniverseGapError(ValueError):
-    """Requested tickers are absent from the store (message lists them)."""
+    """Requested tickers could not be sourced (message lists them)."""
 
 
 class TemplateRenderError(RuntimeError):
@@ -144,6 +148,7 @@ class UniverseService:
         us_templates: Path = DEFAULT_US_TEMPLATES,
         config_path: Path = DEFAULT_CONFIG_PATH,
         min_size: int = DEFAULT_MIN_SIZE,
+        fmp_client: FmpClient | None = None,
     ) -> None:
         self.store = store
         self.factor_source_root = factor_source_root
@@ -151,6 +156,9 @@ class UniverseService:
         self.us_templates = us_templates
         self.config_path = config_path
         self.min_size = min_size
+        # Created lazily on first gap backfill; the proxy injects the FMP key
+        # only when the process runs under an identity holding that secret.
+        self._fmp_client = fmp_client
 
     def propose(self, name: str, tickers: Sequence[str]) -> UniverseProposal:
         """Validate a proposal without doing any data work."""
@@ -173,7 +181,19 @@ class UniverseService:
                 " cross-sectional ranking needs breadth — consider padding the list"
                 " with liquid sector peers before confirming"
             )
+        gaps = self._store_gaps(symbols)
+        if gaps:
+            warnings.append(
+                f"{len(gaps)} ticker(s) not in the data store yet ({', '.join(gaps)}):"
+                " confirming will backfill their full daily history from FMP before"
+                " building the universe — expect the confirmation step to take a few"
+                " minutes"
+            )
         return UniverseProposal(name=clean, tickers=tuple(symbols), warnings=tuple(warnings))
+
+    def _store_gaps(self, symbols: Sequence[str]) -> list[str]:
+        spans = read_instrument_spans(self.store.expanduser())
+        return sorted(s for s in symbols if s not in spans)
 
     def _refuse_all_us(self, symbols: Sequence[str]) -> None:
         """Refuse proposals that cover the whole store / the us_liquid default."""
@@ -199,13 +219,30 @@ class UniverseService:
         """Do the confirmed universe's data work; raises on any gap/failure."""
         proposal = self.propose(name, tickers)  # revalidate stored values
         store = self.store.expanduser()
-        spans = read_instrument_spans(store)
-        gaps = sorted(s for s in proposal.tickers if s not in spans)
+        gaps = self._store_gaps(proposal.tickers)
         if gaps:
-            raise UniverseGapError(
-                f"{len(gaps)} ticker(s) absent from the store at {store} — backfill"
-                f" them with data/build_store.py first: {' '.join(gaps)}"
-            )
+            # Lazy import: refresh pulls in numpy (multi-second import).
+            from data.refresh import extend_store
+
+            if self._fmp_client is None:
+                self._fmp_client = FmpClient()
+            extended = extend_store(store, self._fmp_client, gaps)
+            problems: list[str] = []
+            if extended.missing:
+                problems.append(
+                    f"no daily price data for {' '.join(extended.missing)}"
+                    " (delisted, renamed, or non-US symbols are the usual causes)"
+                )
+            if extended.gapped:
+                problems.append(
+                    f"unusable gapped price history for {' '.join(extended.gapped)}"
+                    " (mid-series holes, e.g. a listing that moved venues)"
+                )
+            if problems:
+                raise UniverseGapError(
+                    f"FMP has {'; '.join(problems)} — re-propose the universe"
+                    " without these tickers"
+                )
         instruments_path = make_universe(
             name=proposal.name,
             store=store,

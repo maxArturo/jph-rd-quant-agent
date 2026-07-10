@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -211,6 +212,107 @@ def refresh_store(
 
 
 # ---------------------------------------------------------------------------
+# Extending the store with new tickers (on-demand universe backfill)
+
+
+@dataclass(frozen=True)
+class ExtendResult:
+    """Outcome of one extend: bars added per new symbol, symbols excluded."""
+
+    added: dict[str, int]  # new symbol -> number of bars written
+    missing: tuple[str, ...]  # requested symbols FMP returned no bars for
+    gapped: tuple[str, ...] = ()  # symbols whose FMP bars have mid-series holes
+
+
+def extend_store(
+    store: Path, client: FmpClient, symbols: Sequence[str], end: DateLike | None = None
+) -> ExtendResult:
+    """Add new tickers to an existing store via full-history FMP backfill.
+
+    Existing tickers are carried across unchanged (raw bars recovered from
+    the bins); each requested symbol is fetched from the store's first
+    calendar date through ``end`` (default: the store's own last calendar
+    date, so new tickers never run ahead of the rest — the nightly refresh
+    advances everyone together) and merged through build_store's atomic
+    temp -> validate -> swap path, custom universes preserved. Split and
+    dividend history is refetched for every ticker because the rebuild
+    recomputes all adjustment factors — same trade-off refresh_store makes.
+
+    The store calendar is an invariant: bars on days the store has never
+    seen (foreign-venue history on US holidays — dual listings like GLXY
+    carry TSX days) are dropped, so an extend can never add calendar days
+    or punch NaN holes into existing tickers' spans. A symbol whose
+    surviving bars still have holes inside their own span (vendor gaps,
+    long halts) would fail store validation, so it is excluded and
+    reported in ``gapped`` rather than poisoning the whole batch.
+
+    Symbols FMP has no bars for are reported in ``missing`` and written
+    nowhere. Symbols already in the store are skipped (added=0, not missing).
+    """
+    store = store.expanduser()
+    calendar = read_calendar(store)
+    calendar_days = set(calendar)
+    existing_symbols = read_all_symbols(store)
+    universes = read_universes(store)
+    end_date = date.fromisoformat(_to_iso_date(end if end is not None else calendar[-1], "end"))
+
+    requested = list(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
+    new_symbols = [s for s in requested if s not in set(existing_symbols)]
+    if not new_symbols:
+        return ExtendResult(added={}, missing=())
+
+    fetched: dict[str, list[EodBar]] = {}
+    missing: list[str] = []
+    gapped: list[str] = []
+    for symbol in new_symbols:
+        bars = sorted(
+            (
+                b
+                for b in client.get_eod_bars(symbol, calendar[0], end_date)
+                if b.date <= end_date and b.date in calendar_days
+            ),
+            key=lambda b: b.date,
+        )
+        if not bars:
+            missing.append(symbol)
+            continue
+        bar_days = {b.date for b in bars}
+        span_days = [d for d in calendar if bars[0].date <= d <= bars[-1].date]
+        if any(day not in bar_days for day in span_days):
+            gapped.append(symbol)
+            continue
+        fetched[symbol] = bars
+
+    if not fetched:
+        return ExtendResult(added={}, missing=tuple(missing), gapped=tuple(gapped))
+
+    existing = {symbol: read_raw_bars(store, symbol, calendar) for symbol in existing_symbols}
+    bundles = [
+        TickerBundle(
+            symbol=symbol,
+            bars=existing[symbol],
+            splits=tuple(client.get_splits(symbol)),
+            dividends=tuple(client.get_dividends(symbol)),
+        )
+        for symbol in existing_symbols
+    ] + [
+        TickerBundle(
+            symbol=symbol,
+            bars=tuple(bars),
+            splits=tuple(client.get_splits(symbol)),
+            dividends=tuple(client.get_dividends(symbol)),
+        )
+        for symbol, bars in fetched.items()
+    ]
+    build_store(bundles, store, extra_instruments=universes)
+    return ExtendResult(
+        added={symbol: len(bars) for symbol, bars in fetched.items()},
+        missing=tuple(missing),
+        gapped=tuple(gapped),
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 
 
@@ -230,8 +332,43 @@ def main(argv: Any = None, client: FmpClient | None = None) -> int:
         help="last bar date to pull, YYYY-MM-DD (default: yesterday in America/New_York — "
         "never today; an in-progress session would land a partial bar)",
     )
+    parser.add_argument(
+        "--add-tickers",
+        default=None,
+        metavar="SYM,SYM,...",
+        help="extend the store with these new tickers (full-history backfill aligned to the"
+        " store's calendar) instead of refreshing existing ones",
+    )
     args = parser.parse_args(argv)
     fmp = client if client is not None else FmpClient()
+    if args.add_tickers is not None:
+        try:
+            extended = extend_store(
+                Path(args.store), fmp, args.add_tickers.split(","), args.end
+            )
+        except (RefreshError, BuildError, FmpError, AdjustmentError, ValueError, OSError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        for symbol, count in sorted(extended.added.items()):
+            print(f"added {symbol}: {count} bars")
+        failed = False
+        if extended.missing:
+            print(
+                f"ERROR: FMP has no data for: {' '.join(extended.missing)}", file=sys.stderr
+            )
+            failed = True
+        if extended.gapped:
+            print(
+                "ERROR: FMP bars have mid-series gaps (excluded) for: "
+                f"{' '.join(extended.gapped)}",
+                file=sys.stderr,
+            )
+            failed = True
+        if failed:
+            return 1
+        if not extended.added:
+            print("nothing to do: every requested ticker is already in the store")
+        return 0
     try:
         result = refresh_store(Path(args.store), fmp, args.end)
     except (RefreshError, BuildError, FmpError, AdjustmentError, ValueError, OSError) as exc:

@@ -57,6 +57,28 @@ Environment="APP_TPL=%h/rd-agent-q/research/app_tpl"
 # (APP_TPL cannot redirect the hardcoded template folders; research/us_quant.py).
 Environment="QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT=research.us_quant.USQlibFactorHypothesis2Experiment"
 Environment="QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT=research.us_quant.USQlibModelHypothesis2Experiment"
+# Execution environments (US-043): this box has docker but no conda, so qlib
+# backtests/model training must opt out of rdagent's conda default (QTDockerEnv,
+# image local_qlib:latest), and generated factor code runs with the repo venv's
+# interpreter. Feature validation + the factor prompt env are runtime-patched
+# to match (research/us_validation.py).
+Environment="MODEL_CoSTEER_ENV_TYPE=docker"
+Environment="FACTOR_CoSTEER_PYTHON_BIN=%h/rd-agent-q/.venv/bin/python"
+# Never rebuild local_qlib:latest inside a run: upstream prepare() would run
+# docker-py's LEGACY builder on every call (no BuildKit cache — a silent
+# hour-long rebuild). Ops owns the image; rebuild after a pin bump with:
+#   docker build -t local_qlib:latest <site-packages>/rdagent/scenarios/qlib/docker
+Environment="QLIB_DOCKER_BUILD_FROM_DOCKERFILE=false"
+# MLflow >= 3.6 (inside local_qlib:latest) raises MlflowException for the
+# ./mlruns filesystem tracking backend unless this opt-out is set; qlib's
+# recorder is hardwired to the file store, so every backtest dies in
+# create_exp without it. Merged into the qlib container env via
+# QlibDockerConf.env_dict (pydantic parses the JSON).
+Environment="QLIB_DOCKER_ENV_DICT={\"MLFLOW_ALLOW_FILE_STORE\":\"true\"}"
+# LiteLLM rejects temperature!=1 for the Claude models (rdagent defaults to
+# chat_temperature=0.5) — drop unsupported params instead of erroring
+# (research/CLAUDE.md; the first fin_quant chat call dies without this).
+Environment="LITELLM_DROP_PARAMS=true"
 # Keep spawned-run workspaces out of the repo, next to the trace state.
 Environment="WORKSPACE_PATH=%h/rdq-runs/server_ui/workspace"
 # LLM backend (CHAT_MODEL/EMBEDDING_MODEL + placeholder keys the proxy

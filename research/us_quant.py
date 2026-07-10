@@ -31,6 +31,8 @@ from rdagent.scenarios.qlib.proposal.model_proposal import (
     QlibModelHypothesis2Experiment,
 )
 
+from research.us_validation import install_us_validation
+
 if TYPE_CHECKING:
     from rdagent.components.coder.factor_coder.factor import FactorExperiment
     from rdagent.components.coder.model_coder.model import ModelExperiment
@@ -78,6 +80,13 @@ def repoint_us_templates(exp: ExpT) -> ExpT:
         if template is not None and workspace is not None:
             workspace.inject_code_from_folder(template)
     return exp
+
+
+# Resolving the QLIB_QUANT_* class paths imports this module inside every
+# fin_quant process during loop construction — before the rd_loop interaction
+# gate runs — so this import side effect is the seam that makes the run's
+# feature validation and factor env US-correct (see research/us_validation.py).
+install_us_validation()
 
 
 class USQlibFactorHypothesis2Experiment(QlibFactorHypothesis2Experiment):

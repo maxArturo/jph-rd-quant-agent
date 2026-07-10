@@ -146,6 +146,34 @@ class TestResearchUnit:
         assert "EnvironmentFile=%h/rd-agent-q/research/.env" in text
         assert "EnvironmentFile=-" not in text
 
+    def test_execution_env_wiring(self) -> None:
+        """US-043: no conda on this box — backtests/model training must opt
+        into docker, and generated factor code must run with the venv python.
+        The unit and run_us_quant.sh wire_env must stay in sync."""
+        unit_text = RESEARCH_UNIT.read_text()
+        assert 'Environment="MODEL_CoSTEER_ENV_TYPE=docker"' in unit_text
+        assert (
+            'Environment="FACTOR_CoSTEER_PYTHON_BIN=%h/rd-agent-q/.venv/bin/python"'
+            in unit_text
+        )
+        assert 'Environment="QLIB_DOCKER_BUILD_FROM_DOCKERFILE=false"' in unit_text
+        assert 'Environment="LITELLM_DROP_PARAMS=true"' in unit_text
+        # MLflow >= 3.6 in local_qlib:latest refuses qlib's ./mlruns file
+        # store without this opt-out (QlibDockerConf.env_dict JSON).
+        assert (
+            'Environment="QLIB_DOCKER_ENV_DICT='
+            '{\\"MLFLOW_ALLOW_FILE_STORE\\":\\"true\\"}"'
+        ) in unit_text
+        script_text = RUN_US_QUANT.read_text()
+        assert 'export MODEL_CoSTEER_ENV_TYPE="docker"' in script_text
+        assert 'export FACTOR_CoSTEER_PYTHON_BIN="${PYTHON}"' in script_text
+        assert 'export QLIB_DOCKER_BUILD_FROM_DOCKERFILE="false"' in script_text
+        assert 'export LITELLM_DROP_PARAMS="true"' in script_text
+        assert (
+            "export QLIB_DOCKER_ENV_DICT="
+            "'{\"MLFLOW_ALLOW_FILE_STORE\":\"true\"}'"
+        ) in script_text
+
     def test_unit_dates_match_run_us_quant_defaults(self) -> None:
         """The unit duplicates wire_env's date defaults (all three prefixes);
         this catches drift between ops/run_us_quant.sh and the unit."""
