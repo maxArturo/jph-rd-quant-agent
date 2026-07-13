@@ -233,13 +233,19 @@ def main() -> None:
 
         recorder = NotionRecorder(NotionClient(), databases, store, permalink=_permalink)
 
-    conversation = ConversationCore(
-        store=store, router=ModelRouter(), rdagent=rdagent, recorder=recorder
-    )
     poller = HypothesisPoller(
         store, rdagent, slack=web_client, channel_id=config.channel_id, recorder=recorder
     )
     promotions = PromotionFlow(store, recorder=recorder)
+    conversation = ConversationCore(
+        store=store,
+        router=ModelRouter(),
+        rdagent=rdagent,
+        recorder=recorder,
+        # Spoken decisions ride the same handlers as the buttons (US-044).
+        interactions=poller,
+        promotions=promotions,
+    )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),
         slack=web_client,

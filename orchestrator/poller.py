@@ -26,8 +26,8 @@ Run completion (US-022): every poll also checks the run's END status. When a
 run finishes, the poller posts the backtest metrics summary (qlib_res.csv)
 and uploads the equity-curve chart (ret.pkl -> PNG) to the owning thread,
 then moves the run row to its terminal status — which removes it from the
-``running`` set, so completion is handled exactly once. A successfully
-completed run's summary carries the Promote button (US-033; the click
+``running`` set, so completion is handled exactly once. A completed or
+operator-stopped run's summary carries the Promote button (US-033; the click
 handlers live in orchestrator/promotion.py).
 
 Notion audit trail (US-027): when a NotionRecorder is injected, each posted
@@ -47,7 +47,7 @@ from typing import Any, Protocol
 
 from orchestrator import summary
 from orchestrator.notion_recorder import NotionRecorder
-from orchestrator.promotion import promotion_offer_blocks
+from orchestrator.promotion import PROMOTABLE_STATUSES, promotion_offer_blocks
 from orchestrator.rdagent_client import (
     KIND_BASE_FEATURES,
     KIND_FEEDBACK,
@@ -429,19 +429,32 @@ class HypothesisPoller:
             "thread_ts": run.thread_ts,
             "text": text,
         }
-        # Promotion offer (US-033): only a successful run with resolvable
-        # artifacts is promotable, so only those summaries get the button.
-        if terminal_status(status) == "completed" and artifacts is not None:
+        # Promotion offer (US-033): completed AND operator-stopped runs with
+        # resolvable artifacts are promotable (unbounded orchestrator runs
+        # only ever end by an operator stop); failed runs never get the button.
+        if terminal_status(status) in PROMOTABLE_STATUSES and artifacts is not None:
             post_kwargs["blocks"] = promotion_offer_blocks(run.thread_ts, text)
         self._slack.chat_postMessage(**post_kwargs)
         if chart_png is not None:
-            self._slack.files_upload_v2(
-                channel=self._channel_id,
-                thread_ts=run.thread_ts,
-                filename="equity_curve.png",
-                title="Equity curve",
-                file=chart_png,
-            )
+            # The chart is supplementary — never let its upload block
+            # finalization. A PERSISTENT failure (e.g. the bot token missing
+            # the files:write scope) would otherwise throw before the status
+            # flip below and make every 15s poll re-post the whole summary
+            # forever. The metrics text (posted above) is the real payload;
+            # only its failure should retry.
+            try:
+                self._slack.files_upload_v2(
+                    channel=self._channel_id,
+                    thread_ts=run.thread_ts,
+                    filename="equity_curve.png",
+                    title="Equity curve",
+                    file=chart_png,
+                )
+            except Exception:  # noqa: BLE001 - degrade to text-only, keep finalizing
+                logger.exception(
+                    "equity chart upload failed for thread %s (summary text still posted)",
+                    run.thread_ts,
+                )
         self._store.update_run_status(run.thread_ts, terminal_status(status))
         if self._recorder is not None:
             self._recorder.record_idea_status(run.thread_ts, terminal_status(status))

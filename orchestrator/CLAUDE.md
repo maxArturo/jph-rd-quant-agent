@@ -206,15 +206,18 @@
   else -> `failed` (`terminal_status()` in poller.py).
 
 - Strategy promotion (US-033) lives in `orchestrator/promotion.py`
-  (`PromotionFlow`): the poller adds the Promote button to a completed run's
-  summary (`promotion_offer_blocks`), and app.py routes the three
+  (`PromotionFlow`): the poller adds the Promote button to a finished run's
+  summary (`promotion_offer_blocks`; statuses in `PROMOTABLE_STATUSES` =
+  completed AND operator-stopped — unbounded orchestrator runs only ever end
+  by an operator stop, so 'stopped' is their normal successful ending;
+  US-044), and app.py routes the three
   `run_promote`/`promote_confirm`/`promote_cancel` actions via the
   `PromotionHandler` protocol. Button values carry ONLY the thread_ts — the
   candidate (workspace, universe, topk/n_drop from the workspace's own conf
   via `execution.signal.load_strategy_params`, headline metrics) is
   re-derived from SQLite + run artifacts on every click, so buttons survive
   restarts with no pending-promotion state. Promotion refuses when the run
-  isn't `completed` or topk/n_drop can't be read (the rebalancer couldn't
+  is running/failed or topk/n_drop can't be read (the rebalancer couldn't
   reproduce the strategy); metrics merely degrade to n/a. Confirm pins
   workspace + config into the single `promoted_strategy` row (replacement is
   announced in-thread), writes a Decision Log row
@@ -222,6 +225,23 @@
   `promoted`. The rebalancer-side check is `execution/promoted.py` —
   keep the pinned config keys (universe/universe_tickers/topk/n_drop/
   thread_ts/session_path) in sync with what US-034 consumes.
+
+- Spoken hypothesis decisions + conversational promotion (US-044):
+  ConversationCore optionally takes `interactions=` (the HypothesisPoller) and
+  `promotions=` (the PromotionFlow) and, ONLY when wired, offers
+  `approve_hypothesis`/`reject_hypothesis` and `promote_run`/
+  `confirm_promotion` ToolSpecs — a spoken "approve" rides the exact same
+  poller/flow handlers as the buttons (protocols `HypothesisSteering` /
+  `PromotionManager` in conversation.py). The hypothesis tools act on the
+  thread's OLDEST pending row (the FIFO rule) and re-check the row's status
+  after the handler runs: a failed submit reports back as a normal tool
+  result (the handler already posted the failure in-thread), never resolves
+  the row. The promotion tools capture what the flow posted via a recording
+  `say` wrapper and return it verbatim so the model relays the actual
+  confirmation/refusal. Edit stays button-driven (the edit-reply interception
+  in app.py consumes the NEXT thread message raw — a conversational edit tool
+  would race it). Two-step promotion is preserved conversationally: the model
+  is prompted to require an explicit second yes before confirm_promotion.
 
 - OneCLI approvals bridge (US-039) lives in `orchestrator/approvals.py`
   (`ApprovalsBridge` + `OneCliApprovalsClient`): a second background thread

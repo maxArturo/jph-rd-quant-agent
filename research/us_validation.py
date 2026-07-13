@@ -39,6 +39,29 @@ US-only qlib store):
    path. Replaced by ``get_us_model_env``: a FRESH ``QlibDockerConf`` per
    call, caller volumes merged OVER the defaults (the qlib store mount
    survives), and the shared class default is never touched.
+5. ``CoSTEER`` (factor + model coders) defaults ``with_knowledge=True`` /
+   ``knowledge_self_gen=True``, so every evolve step queries and regenerates
+   an embedding-backed knowledge graph via
+   ``APIBackend().create_embedding`` -> ``voyage/voyage-3.5-lite`` (the RAG in
+   ``components/coder/CoSTEER/knowledge_management.py``). Voyage is the ONLY
+   embedding provider the OneCLI proxy injects, and its free tier (3 RPM /
+   10K TPM, no payment method) cannot sustain the volume: a run that has
+   already produced a WORKING factor crashes in ``update_success_task`` with
+   ``RuntimeError: Failed to create chat completion after 10 retries`` before
+   any backtest runs, so no ``runner result`` artifacts are ever written and
+   the orchestrator reports "No backtest artifacts were found". Embeddings are
+   the only Voyage user on the fin_quant critical path, but they cannot simply
+   be turned off: ``with_knowledge=False`` makes
+   ``MultiProcessEvolvingStrategy`` raise (``requires queried_knowledge``), so
+   the RAG graph query — which embeds the query node — always runs. Fix, in
+   two parts: (a) ``APIBackend.create_embedding`` is replaced with a
+   deterministic, network-free local vector (``_local_embedding``) so the
+   query path never touches Voyage; (b) ``knowledge_self_gen`` is forced off
+   so no cross-loop knowledge is accumulated (the graph stays empty, queries
+   return nothing, and ``update_success_task`` — the original crash site —
+   never runs). ``with_knowledge`` stays True as the strategy demands.
+   Re-enable full Voyage-backed RAG (once a payment method is added) with
+   ``RDQ_ENABLE_RAG=1`` — read at call/construction time, no reinstall needed.
 
 All are replaced at RUNTIME by assignment (the US-024 pattern — the pinned
 tree on disk stays untouched; tests/test_us_templates.py hashes it): the
@@ -66,6 +89,8 @@ in the store), RDQ_VALIDATION_START/END, RDQ_VALIDATION_TIMEOUT (seconds).
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import subprocess
 import sys
@@ -188,10 +213,98 @@ def get_us_model_env(
     return env
 
 
+def _rag_enabled() -> bool:
+    """Whether the CoSTEER knowledge base may use REAL (Voyage) embeddings.
+
+    Off by default: Voyage's free tier (the only proxy-injected embedding
+    provider) rate-limits at 3 RPM / 10K TPM with no payment method and
+    crashes runs (see module docstring #5). When off, embeddings are computed
+    locally (``_local_embedding``) and cross-loop knowledge accumulation is
+    disabled. Set ``RDQ_ENABLE_RAG=1`` to restore full Voyage-backed RAG once
+    a payment method exists — the knob is read at call/construction time, so
+    no reinstall is needed.
+    """
+    return os.environ.get("RDQ_ENABLE_RAG", "").strip().lower() in {"1", "true", "yes"}
+
+
+_EMBED_DIM = 256
+
+
+def _local_embedding(content: str) -> list[float]:
+    """A deterministic, network-free unit vector for one string.
+
+    CoSTEER's ``MultiProcessEvolvingStrategy`` HARD-REQUIRES a
+    ``queried_knowledge`` object (``with_knowledge`` must stay True), and
+    building it runs the RAG graph query, which embeds the query node — so
+    embeddings cannot simply be skipped. Voyage is the only proxy-injected
+    embedding provider and its free tier is unusable (docstring #5). This
+    stands in for it: SHA-256 of the content seeds a fixed-length unit vector,
+    stable across calls so cosine similarity is well-defined. Retrieval
+    becomes semantically meaningless, but with ``knowledge_self_gen`` off the
+    graph stays empty and queries return nothing anyway — the point is only to
+    satisfy the contract without the network.
+    """
+    digest = hashlib.sha256(content.encode("utf-8", "surrogatepass")).digest()
+    # Stretch the 32-byte digest deterministically to _EMBED_DIM floats.
+    raw = (digest * ((_EMBED_DIM // len(digest)) + 1))[:_EMBED_DIM]
+    vec = [(b / 255.0) * 2.0 - 1.0 for b in raw]
+    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / norm for x in vec]
+
+
+def make_us_create_embedding(orig_create_embedding: Any) -> Any:
+    """Wrap ``APIBackend.create_embedding``: local vectors unless RAG is on.
+
+    Preserves the upstream contract (str -> one vector, list -> list of
+    vectors) and, when ``RDQ_ENABLE_RAG=1``, delegates to the original Voyage
+    path. Idempotent via a marker attribute.
+    """
+    if getattr(orig_create_embedding, "_rdq_embed_shim", False):
+        return orig_create_embedding
+
+    def create_embedding(self: Any, input_content: Any, *args: Any, **kwargs: Any) -> Any:
+        if _rag_enabled():
+            return orig_create_embedding(self, input_content, *args, **kwargs)
+        if isinstance(input_content, str):
+            return _local_embedding(input_content)
+        return [_local_embedding(c) for c in input_content]
+
+    create_embedding._rdq_embed_shim = True  # type: ignore[attr-defined]
+    return create_embedding
+
+
+def disable_costeer_rag(costeer_cls: Any) -> None:
+    """Force ``knowledge_self_gen`` off unless RDQ_ENABLE_RAG is set.
+
+    Leaves ``with_knowledge`` at its default True — the evolving strategy
+    raises ``MultiProcessEvolvingStrategy requires queried_knowledge`` if it is
+    False. Turning OFF only ``knowledge_self_gen`` stops cross-loop knowledge
+    accumulation (``generate_knowledge``/``update_success_task`` — where a run
+    that had already produced a working factor used to crash), so the graph
+    stays empty and per-loop queries return nothing (with the local-embedding
+    shim above they also never touch the network). Both flags are keyword-only
+    on ``CoSTEER.__init__`` and never passed positionally, so overriding in
+    kwargs always wins; the knob is read per construction. Idempotent.
+    """
+    orig_init = costeer_cls.__init__
+    if getattr(orig_init, "_rdq_rag_shim", False):
+        return
+
+    def patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        if not _rag_enabled():
+            kwargs["knowledge_self_gen"] = False
+        orig_init(self, *args, **kwargs)
+
+    patched_init._rdq_rag_shim = True  # type: ignore[attr-defined]
+    costeer_cls.__init__ = patched_init
+
+
 def install_us_validation() -> None:
     """Point every upstream binding at the US implementations (idempotent)."""
     import rdagent.components.workflow.rd_loop as rd_loop
+    import rdagent.oai.backend.base as oai_base
     import rdagent.utils.qlib as rd_qlib
+    from rdagent.components.coder.CoSTEER import CoSTEER
     from rdagent.components.coder.factor_coder import config as factor_config
     from rdagent.components.coder.model_coder import conf as model_config
     from rdagent.scenarios.qlib.experiment import (
@@ -217,3 +330,7 @@ def install_us_validation() -> None:
     model_experiment.get_model_env = get_us_model_env
     quant_experiment.get_model_env = get_us_model_env
     QTDockerEnv.prepare = us_qt_docker_prepare
+    disable_costeer_rag(CoSTEER)
+    oai_base.APIBackend.create_embedding = make_us_create_embedding(
+        oai_base.APIBackend.create_embedding
+    )

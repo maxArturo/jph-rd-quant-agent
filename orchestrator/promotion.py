@@ -1,6 +1,7 @@
 """Strategy promotion flow: only deliberate choices ever trade (US-033).
 
-A completed run's summary carries a Promote button. Clicking it posts a
+A finished run's summary (completed, or deliberately stopped by the operator
+— see PROMOTABLE_STATUSES) carries a Promote button. Clicking it posts a
 confirmation that restates the universe, the TopkDropoutStrategy params
 (topk/n_drop read from the workspace's own qlib conf — the same values the
 rebalancer's signal extraction will trade), and the headline backtest
@@ -44,6 +45,13 @@ ACTION_PROMOTE_CANCEL = "promote_cancel"
 
 # runs.universe is always set by start_research; None only on pre-US-020 rows.
 FALLBACK_UNIVERSE = "us_liquid"
+
+# Run statuses whose artifacts may be promoted. 'stopped' is deliberate:
+# orchestrator-started runs are unbounded (they never complete on their own),
+# so the operator ends every successful one by stopping it at a SOTA result —
+# refusing 'stopped' would make promotion unreachable from Slack. 'failed'
+# and 'running' stay refused (no coherent final artifacts to pin).
+PROMOTABLE_STATUSES = frozenset({"completed", "stopped"})
 
 # Slack section blocks cap text at 3000 chars.
 _MAX_SECTION_TEXT = 2900
@@ -97,7 +105,7 @@ def _button(label: str, action_id: str, value: str, style: str | None = None) ->
 
 
 def promotion_offer_blocks(thread_ts: str, summary_text: str) -> list[dict[str, Any]]:
-    """The completed-run summary with its Promote button (posted by the poller)."""
+    """The finished-run summary with its Promote button (posted by the poller)."""
     return [
         _section(summary_text),
         {
@@ -234,9 +242,10 @@ class PromotionFlow:
         run = self._store.get_run(thread_ts)
         if run is None:
             raise PromotionError("this thread has no research run to promote")
-        if run.status != "completed":
+        if run.status not in PROMOTABLE_STATUSES:
             raise PromotionError(
-                f"the run is '{run.status}' — only a completed run can be promoted"
+                f"the run is '{run.status}' — only a completed or operator-stopped"
+                " run can be promoted"
             )
         try:
             artifacts = self._locate(run.session_path)

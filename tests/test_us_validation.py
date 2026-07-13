@@ -74,6 +74,101 @@ class TestValidator:
         assert us_validation.validate_us_features([]) is True
 
 
+class TestDisableRag:
+    """Voyage embeddings are the only Voyage user on the fin_quant critical
+    path, but with_knowledge cannot be turned off (the evolving strategy
+    requires queried_knowledge). Only knowledge_self_gen is forced off; the
+    query-path embedding is neutralized separately (see TestEmbeddingShim).
+    Uses a fake CoSTEER-shaped class — no rdagent import needed."""
+
+    @staticmethod
+    def _fake_costeer():
+        class FakeCoSTEER:
+            def __init__(self, settings, *, with_knowledge=True, knowledge_self_gen=True):
+                self.with_knowledge = with_knowledge
+                self.knowledge_self_gen = knowledge_self_gen
+
+        return FakeCoSTEER
+
+    def test_only_self_gen_forced_off_by_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("RDQ_ENABLE_RAG", raising=False)
+        cls = self._fake_costeer()
+        us_validation.disable_costeer_rag(cls)
+        inst = cls(settings=object())
+        # with_knowledge MUST stay True or MultiProcessEvolvingStrategy raises.
+        assert inst.with_knowledge is True
+        assert inst.knowledge_self_gen is False
+
+    def test_knob_re_enables_at_construction_time(self, monkeypatch) -> None:
+        cls = self._fake_costeer()
+        us_validation.disable_costeer_rag(cls)
+        # Same installed wrapper, knob flipped later — no reinstall.
+        monkeypatch.setenv("RDQ_ENABLE_RAG", "1")
+        inst = cls(settings=object())
+        assert inst.with_knowledge is True
+        assert inst.knowledge_self_gen is True
+
+    def test_idempotent_wrap(self, monkeypatch) -> None:
+        monkeypatch.delenv("RDQ_ENABLE_RAG", raising=False)
+        cls = self._fake_costeer()
+        us_validation.disable_costeer_rag(cls)
+        wrapped_once = cls.__init__
+        us_validation.disable_costeer_rag(cls)
+        assert cls.__init__ is wrapped_once  # not re-stacked
+        inst = cls(settings=object())
+        assert inst.knowledge_self_gen is False
+
+
+class TestEmbeddingShim:
+    """create_embedding must never hit Voyage when RAG is off, but must keep
+    the upstream contract (str -> one vector, list -> list of vectors)."""
+
+    def test_local_embedding_is_deterministic_unit_vector(self) -> None:
+        v1 = us_validation._local_embedding("some factor code")
+        v2 = us_validation._local_embedding("some factor code")
+        assert v1 == v2
+        assert len(v1) == us_validation._EMBED_DIM
+        norm = sum(x * x for x in v1) ** 0.5
+        assert abs(norm - 1.0) < 1e-9
+        assert us_validation._local_embedding("different") != v1
+
+    def test_wrapper_uses_local_and_never_calls_voyage_when_off(self, monkeypatch) -> None:
+        monkeypatch.delenv("RDQ_ENABLE_RAG", raising=False)
+        called = []
+
+        def orig(self, input_content, *a, **k):  # pragma: no cover - must not run
+            called.append(input_content)
+            raise AssertionError("Voyage path must not run when RAG is off")
+
+        wrapped = us_validation.make_us_create_embedding(orig)
+        # str -> single vector
+        one = wrapped(object(), "abc")
+        assert isinstance(one, list) and isinstance(one[0], float)
+        # list -> list of vectors, one per input
+        many = wrapped(object(), ["abc", "xyz"])
+        assert len(many) == 2 and many[0] == one  # 'abc' embeds identically
+        assert called == []
+
+    def test_wrapper_delegates_to_voyage_when_enabled(self, monkeypatch) -> None:
+        monkeypatch.setenv("RDQ_ENABLE_RAG", "1")
+        seen = []
+
+        def orig(self, input_content, *a, **k):
+            seen.append(input_content)
+            return "voyage-result"
+
+        wrapped = us_validation.make_us_create_embedding(orig)
+        assert wrapped(object(), "abc") == "voyage-result"
+        assert seen == ["abc"]
+
+    def test_wrapper_idempotent(self) -> None:
+        def orig(self, input_content, *a, **k):
+            return None
+
+        once = us_validation.make_us_create_embedding(orig)
+        assert us_validation.make_us_create_embedding(once) is once
+
+
 class TestInstall:
     """Binding swaps in the pinned tree (imports rdagent — seconds)."""
 
@@ -98,6 +193,14 @@ class TestInstall:
             assert module.get_factor_env is us_validation.get_us_factor_env
         for module in (model_config, model_experiment, quant_experiment):
             assert module.get_model_env is us_validation.get_us_model_env
+
+        from rdagent.components.coder.CoSTEER import CoSTEER
+
+        assert getattr(CoSTEER.__init__, "_rdq_rag_shim", False) is True
+
+        import rdagent.oai.backend.base as oai_base
+
+        assert getattr(oai_base.APIBackend.create_embedding, "_rdq_embed_shim", False) is True
 
     def test_us_quant_import_installs_the_shim(self) -> None:
         """The QLIB_QUANT_* class paths import research.us_quant inside every

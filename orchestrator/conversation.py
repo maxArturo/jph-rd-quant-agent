@@ -22,7 +22,13 @@ from orchestrator import prompts
 from orchestrator.llm import LLMError, ModelRouter, RefusalError, ToolSpec
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import RunHandle
-from orchestrator.state import Directive, DuplicateRunError, Run, StateStore
+from orchestrator.state import (
+    Directive,
+    DuplicateRunError,
+    PendingInteraction,
+    Run,
+    StateStore,
+)
 
 if TYPE_CHECKING:
     from orchestrator.universe import MaterializedUniverse, UniverseProposal
@@ -86,6 +92,28 @@ class TradingBreaker(Protocol):
     def clear_halt(self) -> None: ...
 
 
+class HypothesisSteering(Protocol):
+    """What the hypothesis-decision tools need from HypothesisPoller.
+
+    The poller's button handlers already own the full submit/resolve/notify
+    dance (and post their own outcome to the thread) — the conversational
+    tools reuse them verbatim so a spoken "approve" and an Approve click are
+    the same code path.
+    """
+
+    def approve(self, interaction_id: int, say: SayFn) -> None: ...
+
+    def reject(self, interaction_id: int, say: SayFn) -> None: ...
+
+
+class PromotionManager(Protocol):
+    """What the promotion tools need from PromotionFlow (stub-friendly)."""
+
+    def request_promotion(self, thread_ts: str, say: SayFn) -> None: ...
+
+    def confirm_promotion(self, thread_ts: str, say: SayFn) -> None: ...
+
+
 START_RESEARCH_SCHEMA: dict[str, Any] = {
     # No inputs: the run is driven entirely by the thread's saved directive.
     "type": "object",
@@ -144,6 +172,30 @@ HALT_TRADING_SCHEMA: dict[str, Any] = {
 
 RESUME_TRADING_SCHEMA: dict[str, Any] = {
     # No inputs: removes the breaker halt file.
+    "type": "object",
+    "properties": {},
+}
+
+APPROVE_HYPOTHESIS_SCHEMA: dict[str, Any] = {
+    # No inputs: acts on the thread's oldest awaiting hypothesis (FIFO).
+    "type": "object",
+    "properties": {},
+}
+
+REJECT_HYPOTHESIS_SCHEMA: dict[str, Any] = {
+    # No inputs: acts on the thread's oldest awaiting hypothesis (FIFO).
+    "type": "object",
+    "properties": {},
+}
+
+PROMOTE_RUN_SCHEMA: dict[str, Any] = {
+    # No inputs: promotes the thread's finished run.
+    "type": "object",
+    "properties": {},
+}
+
+CONFIRM_PROMOTION_SCHEMA: dict[str, Any] = {
+    # No inputs: confirms the thread's requested promotion.
     "type": "object",
     "properties": {},
 }
@@ -313,6 +365,8 @@ class ConversationCore:
         universes: UniverseManager | None = None,
         recorder: NotionRecorder | None = None,
         breaker: TradingBreaker | None = None,
+        interactions: HypothesisSteering | None = None,
+        promotions: PromotionManager | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -335,6 +389,11 @@ class ConversationCore:
         self._breaker: TradingBreaker = breaker
         # Optional Notion audit trail (US-027); None disables recording.
         self._recorder = recorder
+        # Optional wiring to the poller's button handlers / promotion flow.
+        # None (tests, partial wiring) simply leaves the matching tools out of
+        # the loop — the model never sees a tool it cannot execute.
+        self._interactions = interactions
+        self._promotions = promotions
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(self, thread_ts: str, text: str, say: SayFn) -> str:
@@ -345,19 +404,26 @@ class ConversationCore:
         """
         history = self._histories.setdefault(thread_ts, [])
         history.append({"role": "user", "content": text})
+        tools = [
+            self._save_directive_tool(thread_ts, say),
+            self._start_research_tool(thread_ts, say),
+            self._stop_run_tool(thread_ts, say),
+            self._resume_run_tool(thread_ts, say),
+            self._set_universe_tool(thread_ts, say),
+            self._confirm_universe_tool(thread_ts, say),
+            self._halt_trading_tool(thread_ts, say),
+            self._resume_trading_tool(thread_ts, say),
+        ]
+        if self._interactions is not None:
+            tools.append(self._approve_hypothesis_tool(thread_ts, say))
+            tools.append(self._reject_hypothesis_tool(thread_ts, say))
+        if self._promotions is not None:
+            tools.append(self._promote_run_tool(thread_ts, say))
+            tools.append(self._confirm_promotion_tool(thread_ts, say))
         try:
             final = self._router.judgment_tool_loop(
                 history,
-                [
-                    self._save_directive_tool(thread_ts, say),
-                    self._start_research_tool(thread_ts, say),
-                    self._stop_run_tool(thread_ts, say),
-                    self._resume_run_tool(thread_ts, say),
-                    self._set_universe_tool(thread_ts, say),
-                    self._confirm_universe_tool(thread_ts, say),
-                    self._halt_trading_tool(thread_ts, say),
-                    self._resume_trading_tool(thread_ts, say),
-                ],
+                tools,
                 system=self._system_prompt(thread_ts),
             )
         except RefusalError:
@@ -747,5 +813,161 @@ class ConversationCore:
                 " runs (that is resume_run)."
             ),
             input_schema=RESUME_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _awaiting_hypothesis(self, thread_ts: str) -> PendingInteraction:
+        """The thread's oldest hypothesis awaiting a decision, or raise.
+
+        FIFO rule (see poller.py): submitted answers go to the run's oldest
+        blocked request, so the tools may only ever act on the oldest row.
+        """
+        rows = self._store.list_pending_interactions(thread_ts, status="pending")
+        if rows:
+            return rows[0]
+        if self._store.list_pending_interactions(thread_ts, status="editing"):
+            raise ValueError(
+                "the proposed hypothesis is mid-edit — the operator's next plain"
+                " reply in this thread is consumed as the revised hypothesis"
+                " text, so there is nothing to approve or reject right now"
+            )
+        raise ValueError(
+            "no proposed hypothesis is awaiting a decision in this thread"
+        )
+
+    def _approve_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — acts on the thread's oldest awaiting hypothesis
+            assert self._interactions is not None  # tool only registered when wired
+            row = self._awaiting_hypothesis(thread_ts)
+            # The poller handler owns submit/resolve/notify and posts its own
+            # outcome (success or a submit-failure notice) to the thread.
+            self._interactions.approve(row.id, say)
+            resolved = self._store.get_pending_interaction(row.id)
+            if resolved is None or resolved.status != "approved":
+                return (
+                    "Submitting the approval to the run failed (the failure notice"
+                    " was posted in-thread) — the hypothesis is still awaiting a"
+                    " decision. Suggest the operator try again shortly."
+                )
+            logger.info("approved hypothesis #%s via chat for thread %s", row.id, thread_ts)
+            return (
+                "The hypothesis was approved and submitted to the run; the"
+                " confirmation was posted. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="approve_hypothesis",
+            description=(
+                "APPROVE the hypothesis currently awaiting the operator's decision"
+                " in this thread (same effect as its Approve button) — the run"
+                " implements it next. Call it only when the operator explicitly"
+                " approves in words ('approve', 'go ahead with it', 'LGTM')."
+                " Never approve on your own judgment or a lukewarm reply."
+            ),
+            input_schema=APPROVE_HYPOTHESIS_SCHEMA,
+            handler=handler,
+        )
+
+    def _reject_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — acts on the thread's oldest awaiting hypothesis
+            assert self._interactions is not None  # tool only registered when wired
+            row = self._awaiting_hypothesis(thread_ts)
+            self._interactions.reject(row.id, say)
+            resolved = self._store.get_pending_interaction(row.id)
+            if resolved is None or resolved.status != "rejected":
+                return (
+                    "Submitting the rejection to the run failed (the failure notice"
+                    " was posted in-thread) — the hypothesis is still awaiting a"
+                    " decision. Suggest the operator try again shortly."
+                )
+            logger.info("rejected hypothesis #%s via chat for thread %s", row.id, thread_ts)
+            return (
+                "The hypothesis was rejected — the run was told to discard it and"
+                " propose a materially different direction; the notice was posted."
+                " Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="reject_hypothesis",
+            description=(
+                "REJECT the hypothesis currently awaiting the operator's decision"
+                " in this thread (same effect as its Reject button) — the run"
+                " discards the idea and proposes a different direction. Call it"
+                " only when the operator explicitly rejects in words. For revised"
+                " wording they should use the hypothesis message's Edit button."
+            ),
+            input_schema=REJECT_HYPOTHESIS_SCHEMA,
+            handler=handler,
+        )
+
+    def _promote_run_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — promotes the thread's finished run
+            assert self._promotions is not None  # tool only registered when wired
+            # PromotionFlow posts either the confirmation or a refusal itself;
+            # capture what it said so the model can relay it faithfully.
+            posted: list[str] = []
+
+            def recording_say(**kwargs: Any) -> Any:
+                posted.append(str(kwargs.get("text", "")))
+                return say(**kwargs)
+
+            self._promotions.request_promotion(thread_ts, recording_say)
+            outcome = posted[-1] if posted else "(nothing was posted)"
+            logger.info("promotion requested via chat for thread %s", thread_ts)
+            return (
+                "The promotion request was processed; this was posted in-thread:\n"
+                f"{outcome}\n"
+                "If that is the confirmation restating the strategy, ask the"
+                " operator to explicitly confirm — only then call"
+                " confirm_promotion. If it is a refusal, relay the reason."
+            )
+
+        return ToolSpec(
+            name="promote_run",
+            description=(
+                "Start promoting this thread's finished research run to paper"
+                " trading (same effect as the summary's Promote button): posts a"
+                " confirmation restating exactly what the nightly rebalancer"
+                " would trade (universe, topk/n_drop, metrics). Nothing is"
+                " promoted until confirm_promotion. Call it only when the"
+                " operator explicitly asks to promote the run."
+            ),
+            input_schema=PROMOTE_RUN_SCHEMA,
+            handler=handler,
+        )
+
+    def _confirm_promotion_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — confirms the thread's requested promotion
+            assert self._promotions is not None  # tool only registered when wired
+            posted: list[str] = []
+
+            def recording_say(**kwargs: Any) -> Any:
+                posted.append(str(kwargs.get("text", "")))
+                return say(**kwargs)
+
+            self._promotions.confirm_promotion(thread_ts, recording_say)
+            outcome = posted[-1] if posted else "(nothing was posted)"
+            logger.info("promotion confirmed via chat for thread %s", thread_ts)
+            return (
+                "The promotion confirmation was processed; this was posted"
+                f" in-thread:\n{outcome}\n"
+                "Relay the outcome briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="confirm_promotion",
+            description=(
+                "CONFIRM the promotion of this thread's run — pins the strategy"
+                " for the nightly paper-trading rebalancer, replacing any"
+                " previously promoted strategy. Call it only after promote_run"
+                " posted the confirmation AND the operator explicitly confirmed"
+                " it (e.g. 'confirm', 'yes, promote it'). Never confirm without"
+                " that explicit second yes."
+            ),
+            input_schema=CONFIRM_PROMOTION_SCHEMA,
             handler=handler,
         )

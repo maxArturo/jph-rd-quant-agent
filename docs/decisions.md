@@ -628,3 +628,41 @@ model_experiment + quant_experiment) builds a FRESH `QlibDockerConf` per
 call and merges caller volumes over the defaults, never touching the shared
 class default. The forensic tell for a poisoned process: the qrun entry in
 the docker execution log shows `timeout ... 600` instead of 3600.
+
+## 2026-07-10 — US-044: spoken hypothesis decisions, conversational promotion, stopped runs promotable
+
+Driving a full research loop from Slack exposed two flow gaps. First,
+hypothesis approval was Block-Kit-button-only: the conversational core had no
+tool for it, so an operator answering "approve" in words got a chat reply and
+a forever-pending hypothesis (and anything driving Slack through the API —
+which cannot click buttons — was locked out entirely). Second, US-033's
+promotion was unreachable for orchestrator-started runs: they are unbounded
+(loop_n=None, never a natural END with end_code 0), so their terminal status
+is always 'stopped' — and both the Promote button (only attached to
+'completed' summaries) and `PromotionFlow._candidate` (refused anything but
+'completed') said no. The Promote path could never trigger, which is why
+rebalance kept aborting with "no promoted strategy exists".
+
+Decisions:
+
+- **Spoken decisions ride the button handlers.** ConversationCore now takes
+  `interactions=` (HypothesisPoller) + `promotions=` (PromotionFlow) and
+  offers `approve_hypothesis`/`reject_hypothesis`/`promote_run`/
+  `confirm_promotion` ToolSpecs only when wired. No second code path: the
+  tools call the same `poller.approve`/`flow.request_promotion` the buttons
+  call, act on the thread's oldest pending row (FIFO submit rule), and verify
+  by re-reading the row status. Edit stays button-driven — app.py's
+  edit-reply interception consumes the next raw thread message, and a
+  conversational edit would race it.
+- **Two explicit yeses for promotion, conversationally too.** promote_run
+  only posts the confirmation (captured via a recording say and returned to
+  the model verbatim); the system prompt requires the operator's explicit
+  second confirmation before confirm_promotion.
+- **'stopped' joined `PROMOTABLE_STATUSES`.** An operator stop at a SOTA
+  result is the normal successful ending of an unbounded run; the poller now
+  attaches the Promote button to stopped summaries as well, and the flow
+  accepts them. 'failed'/'running' stay refused. The out-of-band completion
+  path (RdAgentClient.stop leaving the row 'running' so the poller posts the
+  summary) is unchanged; the conversational stop_run still suppresses the
+  summary by flipping status first — promotion after it goes through
+  promote_run, which needs no summary message.

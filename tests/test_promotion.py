@@ -121,6 +121,20 @@ def test_completed_run_summary_offers_promote_button(
     assert button["text"]["text"] == "Promote to paper trading"
 
 
+def test_stopped_run_summary_offers_promote_button(
+    running_store: StateStore, tmp_path: Path
+) -> None:
+    # end_code -1 = operator stop — the only way an unbounded orchestrator run
+    # ever ends, so its summary must still offer promotion (US-044).
+    stopped = RunStatus(finished=True, end_code=-1, error_msg=None)
+    slack = completion_slack(running_store, promotable_artifacts(tmp_path), status=stopped)
+    (post,) = slack.posts
+    _section, actions = post["blocks"]
+    (button,) = actions["elements"]
+    assert button["action_id"] == ACTION_PROMOTE
+    assert button["value"] == THREAD
+
+
 def test_failed_run_summary_has_no_promote_button(
     running_store: StateStore, tmp_path: Path
 ) -> None:
@@ -193,14 +207,41 @@ def test_request_promotion_refuses_thread_without_run(tmp_path: Path) -> None:
     assert store.get_promoted_strategy() is None
 
 
-def test_request_promotion_refuses_uncompleted_run(
+def test_request_promotion_refuses_running_run(
     running_store: StateStore, tmp_path: Path
 ) -> None:
     flow = make_flow(running_store, promotable_artifacts(tmp_path))
     say = RecordingSay()
     flow.request_promotion(THREAD, say)
     assert "'running'" in say.calls[0]["text"]
-    assert "only a completed run" in say.calls[0]["text"]
+    assert "only a completed or operator-stopped run" in say.calls[0]["text"]
+
+
+def test_request_promotion_refuses_failed_run(
+    running_store: StateStore, tmp_path: Path
+) -> None:
+    running_store.update_run_status(THREAD, "failed")
+    flow = make_flow(running_store, promotable_artifacts(tmp_path))
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    assert "'failed'" in say.calls[0]["text"]
+    assert running_store.get_promoted_strategy() is None
+
+
+def test_request_promotion_allows_operator_stopped_run(
+    running_store: StateStore, tmp_path: Path
+) -> None:
+    # Orchestrator-started runs are unbounded; a deliberate stop at a SOTA
+    # result is their normal successful ending and must be promotable (US-044).
+    running_store.update_run_status(THREAD, "stopped")
+    flow = make_flow(running_store, promotable_artifacts(tmp_path))
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    assert "topk=50" in say.calls[0]["text"]  # confirmation, not a refusal
+    flow.confirm_promotion(THREAD, say)
+    promoted = running_store.get_promoted_strategy()
+    assert promoted is not None
+    assert promoted.config["universe"] == "us_liquid"
 
 
 def test_request_promotion_refuses_when_params_unreadable(

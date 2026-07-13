@@ -100,6 +100,7 @@ class FakeSlack:
         self.posts: list[dict[str, Any]] = []
         self.uploads: list[dict[str, Any]] = []
         self.fail = False
+        self.fail_upload = False
 
     def chat_postMessage(self, **kwargs: Any) -> None:  # noqa: N802 - slack_sdk casing
         if self.fail:
@@ -107,8 +108,8 @@ class FakeSlack:
         self.posts.append(kwargs)
 
     def files_upload_v2(self, **kwargs: Any) -> None:  # noqa: N802 - slack_sdk casing
-        if self.fail:
-            raise RuntimeError("slack down")
+        if self.fail or self.fail_upload:
+            raise RuntimeError("missing_scope: files:write")
         self.uploads.append(kwargs)
 
 
@@ -373,6 +374,24 @@ def test_corrupt_ret_pkl_still_posts_metrics_and_completes(
     assert slack.uploads == []
     run = store.get_run(THREAD)
     assert run is not None and run.status == "completed"  # no retry loop
+
+
+def test_chart_upload_failure_still_finalizes_run(
+    store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    """A persistent chart-upload failure (e.g. bot token missing files:write)
+    must not abort completion — otherwise the poller re-posts the summary
+    every cycle forever. The metrics text posts; the run finalizes."""
+    slack.fail_upload = True
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    poller = completion_poller(store, rd, slack, make_artifacts(tmp_path))
+    poller.poll_once()
+    poller.poll_once()  # run is no longer 'running' — not reposted
+    assert len(slack.posts) == 1  # summary text posted exactly once, no loop
+    assert "*IC:* 0.0432" in slack.posts[0]["text"]
+    assert slack.uploads == []  # upload attempted, swallowed
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "completed"
 
 
 def test_failed_run_without_artifacts_reports_honestly(

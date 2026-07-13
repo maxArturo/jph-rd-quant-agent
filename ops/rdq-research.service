@@ -79,6 +79,12 @@ Environment="QLIB_DOCKER_ENV_DICT={\"MLFLOW_ALLOW_FILE_STORE\":\"true\"}"
 # chat_temperature=0.5) — drop unsupported params instead of erroring
 # (research/CLAUDE.md; the first fin_quant chat call dies without this).
 Environment="LITELLM_DROP_PARAMS=true"
+# Voyage-backed CoSTEER RAG (research/us_validation.py shim #5). Off by
+# default because Voyage's free tier rate-limited runs to death; a payment
+# method was added 2026-07-10, so real embeddings + cross-loop knowledge
+# accumulation are back on. Unset (or remove) to fall back to the local
+# deterministic-embedding shim if Voyage misbehaves again.
+Environment="RDQ_ENABLE_RAG=1"
 # Keep spawned-run workspaces out of the repo, next to the trace state.
 Environment="WORKSPACE_PATH=%h/rdq-runs/server_ui/workspace"
 # LLM backend (CHAT_MODEL/EMBEDDING_MODEL + placeholder keys the proxy
