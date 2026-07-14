@@ -504,3 +504,24 @@ def test_bolt_routes_deny_button_to_handler(monkeypatch: pytest.MonkeyPatch) -> 
     app, handler = make_app(monkeypatch)
     dispatch_action(app, ACTION_ONECLI_DENY, "req-abc-123")
     assert handler.calls == [("deny", "req-abc-123")]
+
+
+def test_load_max_hypotheses_default_env_and_validation(tmp_path: Any) -> None:
+    from orchestrator.config import ConfigError, DEFAULT_MAX_HYPOTHESES, load_max_hypotheses
+
+    missing = tmp_path / "nope.env"
+    assert load_max_hypotheses(env_file=missing, environ={}) == DEFAULT_MAX_HYPOTHESES
+    assert load_max_hypotheses(env_file=missing, environ={"RDQ_MAX_HYPOTHESES": "3"}) == 3
+
+    env_file = tmp_path / "budget.env"
+    env_file.write_text("RDQ_MAX_HYPOTHESES=7\n")
+    assert load_max_hypotheses(env_file=env_file, environ={}) == 7
+    # process env wins over the file
+    assert load_max_hypotheses(env_file=env_file, environ={"RDQ_MAX_HYPOTHESES": "4"}) == 4
+
+    import pytest as _pytest
+
+    with _pytest.raises(ConfigError):
+        load_max_hypotheses(env_file=missing, environ={"RDQ_MAX_HYPOTHESES": "many"})
+    with _pytest.raises(ConfigError):
+        load_max_hypotheses(env_file=missing, environ={"RDQ_MAX_HYPOTHESES": "0"})

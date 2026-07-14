@@ -71,7 +71,7 @@ wire_env() {
   local valid_start="${RDQ_VALID_START:-2023-01-01}"
   local valid_end="${RDQ_VALID_END:-2024-12-31}"
   local test_start="${RDQ_TEST_START:-2025-01-01}"
-  local test_end="${RDQ_TEST_END:-2026-06-30}"
+  local test_end="${RDQ_TEST_END:-2026-07-10}"
 
   local prefix
   for prefix in QLIB_QUANT QLIB_FACTOR QLIB_MODEL; do

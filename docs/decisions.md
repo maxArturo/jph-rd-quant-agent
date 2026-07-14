@@ -666,3 +666,55 @@ Decisions:
   summary) is unchanged; the conversational stop_run still suppresses the
   summary by flipping status first — promotion after it goes through
   promote_run, which needs no summary message.
+
+## 2026-07-14 — US-045: autonomous hypothesis loop (auto-approve, budget stop, identical-error abort)
+
+Per-hypothesis Slack approval assumed an operator who can judge factor
+formulations; the actual operators can't (and shouldn't need to) — and the
+run history shows the engine's own propose→backtest→feedback loop handles
+failed hypotheses fine on its own (failures stay in the trace as negative
+evidence; SOTA only advances on wins). The human judgment points are the
+directive and the promotion, not the middle. Runs are now autonomous by
+default; the button flow survives behind `start_research supervised=true`.
+
+Decisions:
+
+- **Auto-approve rides the poller, not a new path.** Unsupervised runs (new
+  `runs.supervised` column, default 0 — pre-US-045 rows migrate to
+  autonomous) submit each hypothesis dict back unchanged, narrate it to the
+  thread without buttons (status `auto_approved`), and post a one-line
+  experiment verdict per auto-acked feedback. Leftover `pending` rows from a
+  supervised poller are auto-approved after a mode flip; `editing` rows still
+  block (the operator owns the FIFO slot).
+- **Budget stop, no stop-on-success.** After RDQ_MAX_HYPOTHESES submitted
+  hypotheses (default 10, config.py) the NEXT proposal is recorded
+  'cancelled' and the run stopped via /control — mid-run SOTA wins never end
+  a run early (history: aquamarine-method's trial-8 model beat its trial-2
+  SOTA after five failures). The run row deliberately stays 'running' so the
+  US-022 completion path posts the summary + Promote offer when the END
+  (end_code -1 → 'stopped', promotable per US-044) lands.
+- **Identical-error abort.** 3 consecutive failed feedbacks with the same
+  failure signature = a crashed environment repeating (e.g. the wiped-qlib
+  mount incidents), not research; the run is stopped at feedback-ack time and
+  the thread told an operator must look. Signature (`failure_signature`):
+  the `reason` text when present, else the innermost traceback frames from
+  `observations` — crash feedbacks arrive with an EMPTY reason, and
+  observations are salted with timestamps/indices and truncated at arbitrary
+  points, so digit-normalized frame lines are the stable identity (verified
+  live 2026-07-14: three qlib end-of-calendar IndexErrors aborted
+  slow-cayenne). Distinct signatures never abort — a judged-and-rejected
+  idea reads differently every time.
+- **qlib backtests need a calendar day AFTER test_end** (the trade calendar
+  indexes `calendar_index + 1` on the final step): setting
+  QLIB_*_TEST_END to the store's last calendar day makes every experiment
+  crash with `IndexError ... out of bounds` in `get_step_time`. Keep the
+  service's TEST_END at least one trading day short of the store end. This
+  also means a promoted workspace's pred.pkl can never satisfy the
+  rebalancer's freshness check directly — regenerating predictions with an
+  extended test segment (SignalRecord only, no backtest) is the intended
+  pre-trade step (PLAN's "re-run promoted workspace with test_end=today"),
+  still manual today.
+- **Budget/streak state derives from `pending_interactions` on every poll**
+  (new `StateStore.list_interactions`), so restarts resume with the same
+  counts and the halt is idempotent (the cancelled row suppresses retries;
+  a failed stop frees the row so the next poll retries).

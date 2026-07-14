@@ -441,9 +441,10 @@ def make_poller(
     tmp_path: Path,
     responses: list[FakeResponse],
     locate: Any = None,
+    supervised: bool = True,  # these tests exercise the button flow's recording
 ) -> tuple[HypothesisPoller, StateStore, FakeSession, StubRdAgent, FakeSlack]:
     recorder, store, session = make_recorder(tmp_path, responses)
-    store.create_run(THREAD, SESSION, universe="us_liquid")
+    store.create_run(THREAD, SESSION, universe="us_liquid", supervised=supervised)
     store.set_notion_page("idea", THREAD, "page-idea")
     rd = StubRdAgent()
     slack = FakeSlack()
@@ -469,6 +470,26 @@ def test_posted_hypothesis_records_hypothesis_log_row(tmp_path: Path) -> None:
     assert plain_text(props["Interaction Key"], "rich_text") == pending.key
     assert props["Action"] == {"select": {"name": "pending"}}
     assert props["Idea"] == {"relation": [{"id": "page-idea"}]}
+    assert store.get_notion_page("hypothesis", pending.key) == "page-hypo"
+
+
+def test_autonomous_hypothesis_records_auto_approved_action(tmp_path: Path) -> None:
+    poller, store, session, rd, slack = make_poller(
+        tmp_path,
+        [page_response("page-hypo"), page_response("page-hypo")],
+        supervised=False,
+    )
+    pending = interaction(KIND_HYPOTHESIS, HYPO_CONTENT)
+    rd.pending_by_trace[TRACE_ID] = [pending]
+
+    assert poller.poll_once() == 1
+
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
+    create, update = session.calls
+    assert create["json"]["parent"]["database_id"] == "db-hypo"
+    assert update["method"] == "PATCH"
+    assert update["url"].endswith("/v1/pages/page-hypo")
+    assert update["json"]["properties"] == {"Action": {"select": {"name": "auto_approved"}}}
     assert store.get_notion_page("hypothesis", pending.key) == "page-hypo"
 
 

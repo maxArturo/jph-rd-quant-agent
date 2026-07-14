@@ -196,7 +196,7 @@ def create_app(
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
-    from orchestrator.config import load_onecli_url
+    from orchestrator.config import load_max_hypotheses, load_onecli_url
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
     from orchestrator.notion_client import NotionClient
@@ -234,7 +234,12 @@ def main() -> None:
         recorder = NotionRecorder(NotionClient(), databases, store, permalink=_permalink)
 
     poller = HypothesisPoller(
-        store, rdagent, slack=web_client, channel_id=config.channel_id, recorder=recorder
+        store,
+        rdagent,
+        slack=web_client,
+        channel_id=config.channel_id,
+        recorder=recorder,
+        max_hypotheses=load_max_hypotheses(),
     )
     promotions = PromotionFlow(store, recorder=recorder)
     conversation = ConversationCore(

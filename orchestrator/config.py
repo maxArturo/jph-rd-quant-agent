@@ -117,3 +117,29 @@ def load_onecli_url(
     env = os.environ if environ is None else environ
     file_values = parse_env_file(env_file)
     return env.get("ONECLI_URL") or file_values.get("ONECLI_URL") or DEFAULT_ONECLI_URL
+
+
+# Autonomous-run hypothesis budget (US-045). Kept here (not in poller.py) so
+# operations can tune it per deployment without a code change.
+DEFAULT_MAX_HYPOTHESES = 10
+
+
+def load_max_hypotheses(
+    env_file: Path = DEFAULT_ENV_FILE,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """RDQ_MAX_HYPOTHESES: per-run hypothesis budget for autonomous runs."""
+    env = os.environ if environ is None else environ
+    file_values = parse_env_file(env_file)
+    raw = env.get("RDQ_MAX_HYPOTHESES") or file_values.get("RDQ_MAX_HYPOTHESES") or ""
+    if not raw:
+        return DEFAULT_MAX_HYPOTHESES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"RDQ_MAX_HYPOTHESES must be a positive integer (got {raw!r})."
+        ) from exc
+    if value < 1:
+        raise ConfigError(f"RDQ_MAX_HYPOTHESES must be >= 1 (got {value}).")
+    return value

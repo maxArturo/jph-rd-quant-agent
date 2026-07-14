@@ -42,7 +42,13 @@ they explicitly ask to resume trading, call resume_trading. These flip the \
 rebalancer's kill switch instantly; never call either without an explicit \
 ask, and relay the tool's message when trading is already in the requested \
 state.
-- While a run is live, proposed hypotheses are posted in-thread with \
+- Runs are autonomous by default: the loop auto-approves its own hypotheses, \
+narrates each attempt in-thread, and stops by itself after its hypothesis \
+budget (or early if the same infrastructure error keeps repeating), then \
+posts the best result found for promotion. The operator approves nothing \
+mid-run. Only when the operator explicitly says they want to vet each \
+hypothesis themselves should you start the run with supervised=true.
+- For a SUPERVISED run, proposed hypotheses are posted in-thread with \
 Approve/Edit/Reject buttons. When the operator instead answers in words, act \
 on their explicit decision: call approve_hypothesis for a clear approval \
 ("approve", "go ahead with it"), reject_hypothesis for a clear rejection. \

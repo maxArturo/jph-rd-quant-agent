@@ -115,9 +115,19 @@ class PromotionManager(Protocol):
 
 
 START_RESEARCH_SCHEMA: dict[str, Any] = {
-    # No inputs: the run is driven entirely by the thread's saved directive.
+    # The run is driven by the thread's saved directive; the only knob is the
+    # steering mode (US-045: autonomous is the default).
     "type": "object",
-    "properties": {},
+    "properties": {
+        "supervised": {
+            "type": "boolean",
+            "description": (
+                "Pass true ONLY when the operator explicitly asks to approve"
+                " each hypothesis themselves. Default (false): the run"
+                " auto-approves its hypotheses and stops on its own budget."
+            ),
+        },
+    },
 }
 
 STOP_RUN_SCHEMA: dict[str, Any] = {
@@ -247,11 +257,19 @@ def directive_instruction(directive: Directive) -> str:
 
 def format_run_started(run: Run) -> str:
     """Slack mrkdwn confirmation posted to the thread when a run starts."""
+    if run.supervised:
+        tail = "Hypotheses will be posted here for approval as the loop proposes them."
+    else:
+        tail = (
+            "The loop will try its hypotheses autonomously and narrate each one"
+            " here — no approvals needed. It stops on its own after its"
+            " hypothesis budget and posts the best result found."
+        )
     return (
         "*Research run started*\n"
         f"*Universe:* {run.universe}\n"
         f"*Session:* `{run.session_path}`\n"
-        "Hypotheses will be posted here for approval as the loop proposes them."
+        f"{tail}"
     )
 
 
@@ -485,7 +503,7 @@ class ConversationCore:
 
     def _start_research_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
-            del args  # no inputs — the saved directive drives the run
+            supervised = bool(args.get("supervised", False))
             directive = self._store.get_directive(thread_ts)
             if directive is None:
                 raise ValueError(
@@ -511,7 +529,11 @@ class ConversationCore:
             session_path = str(self._rdagent.trace_dir(handle.trace_id))
             try:
                 run = self._store.create_run(
-                    thread_ts, session_path, universe=universe, universe_tickers=tickers
+                    thread_ts,
+                    session_path,
+                    universe=universe,
+                    universe_tickers=tickers,
+                    supervised=supervised,
                 )
             except DuplicateRunError as exc:
                 # Lost a start race — don't leave the just-launched run orphaned.
@@ -521,10 +543,19 @@ class ConversationCore:
             if self._recorder is not None:
                 self._recorder.record_idea_status(thread_ts, "researching", universe=universe)
             logger.info("started research run %s for thread %s", handle.trace_id, thread_ts)
+            if supervised:
+                return (
+                    f"Research run started SUPERVISED (trace {handle.trace_id}) and"
+                    " recorded for this thread; the start notice was posted. Confirm"
+                    " briefly to the operator — hypotheses will arrive in this thread"
+                    " for their approval."
+                )
             return (
-                f"Research run started (trace {handle.trace_id}) and recorded for this"
-                " thread; the start notice was posted. Confirm briefly to the operator"
-                " — hypotheses will arrive in this thread for approval."
+                f"Research run started (trace {handle.trace_id}) and recorded for"
+                " this thread; the start notice was posted. Confirm briefly to the"
+                " operator — the run is autonomous: hypotheses are auto-approved and"
+                " narrated in this thread, and the run stops by itself after its"
+                " hypothesis budget, posting the best result for promotion."
             )
 
         return ToolSpec(
@@ -533,7 +564,10 @@ class ConversationCore:
                 "Start an RD-Agent research run for this thread's SAVED directive."
                 " Requires save_directive to have been called first; only one run"
                 " may exist per thread. Call it only when the operator explicitly"
-                " asks to start the research."
+                " asks to start the research. By default the run is autonomous"
+                " (hypotheses auto-approved, self-stopping); pass supervised=true"
+                " only when the operator explicitly wants to approve each"
+                " hypothesis themselves."
             ),
             input_schema=START_RESEARCH_SCHEMA,
             handler=handler,

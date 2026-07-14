@@ -166,6 +166,21 @@
   `pending`/`editing` — responses answer the oldest blocked request. If a
   Slack post or submit fails, free/keep the row so the next poll or click
   retries (never resolve a row whose submit didn't go through).
+- Autonomous runs (US-045, the DEFAULT — `runs.supervised=0`): the poller
+  auto-approves each hypothesis (submit unchanged → resolve `auto_approved` →
+  narrate to the thread, no buttons; narration is best-effort and never
+  unwinds a submit) and posts a one-line verdict per auto-acked feedback.
+  Brakes: after `max_hypotheses` submitted hypothesis rows (statuses in
+  `SUBMITTED_STATUSES`; RDQ_MAX_HYPOTHESES via config.py, default 10) the
+  next proposal is recorded 'cancelled' and the run stopped via /control —
+  the run row stays 'running' ON PURPOSE so the US-022 completion path posts
+  the summary + Promote offer; never flip it in the halt. 3 consecutive
+  failed feedbacks with identical `reason` text abort the run early
+  (infrastructure failure signature). All budget/streak state derives from
+  `StateStore.list_interactions` each poll — no in-memory counters, restarts
+  resume cleanly. Supervised runs come from `start_research supervised=true`
+  and keep the button flow above; `editing` rows block autonomous approval
+  too (operator owns the FIFO slot).
 - Reject has no upstream regenerate action — `rejection_payload()` rides the
   instruction in the hypothesis text (see docs/decisions.md US-021 entry)
   and MUST keep the exact constructor key set (`type(hypo)(**dict)`).

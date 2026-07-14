@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS runs (
     status       TEXT NOT NULL,
     universe     TEXT,
     universe_tickers TEXT,
+    supervised   INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -112,6 +113,9 @@ class Run:
     created_at: str
     updated_at: str
     universe_tickers: tuple[str, ...] | None = None
+    # Supervised runs gate each hypothesis on operator buttons (the pre-US-045
+    # flow); unsupervised runs auto-approve and stop on their own budget.
+    supervised: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,6 +167,7 @@ def _run_from_row(row: sqlite3.Row) -> Run:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         universe_tickers=None if tickers is None else tuple(json.loads(tickers)),
+        supervised=bool(row["supervised"]),
     )
 
 
@@ -221,6 +226,12 @@ class StateStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
             if "universe_tickers" not in columns:
                 conn.execute("ALTER TABLE runs ADD COLUMN universe_tickers TEXT")
+            # Column added in US-045: pre-existing runs become unsupervised
+            # (autonomous is the new default behavior).
+            if "supervised" not in columns:
+                conn.execute(
+                    "ALTER TABLE runs ADD COLUMN supervised INTEGER NOT NULL DEFAULT 0"
+                )
 
     # -- directives ---------------------------------------------------------
 
@@ -267,6 +278,7 @@ class StateStore:
         universe: str | None = None,
         status: str = "running",
         universe_tickers: Sequence[str] | None = None,
+        supervised: bool = False,
     ) -> Run:
         now = _utcnow()
         tickers = None if universe_tickers is None else tuple(universe_tickers)
@@ -278,18 +290,21 @@ class StateStore:
             created_at=now,
             updated_at=now,
             universe_tickers=tickers,
+            supervised=supervised,
         )
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO runs (thread_ts, session_path, status, universe,"
-                    " universe_tickers, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " universe_tickers, supervised, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         thread_ts,
                         session_path,
                         status,
                         universe,
                         None if tickers is None else json.dumps(list(tickers)),
+                        int(supervised),
                         now,
                         now,
                     ),
@@ -487,6 +502,20 @@ class StateStore:
             params.append(thread_ts)
         with self._connect() as conn:
             rows = conn.execute(query + " ORDER BY id", params).fetchall()
+        return [_interaction_from_row(row) for row in rows]
+
+    def list_interactions(self, thread_ts: str) -> list[PendingInteraction]:
+        """Every interaction of a thread, any status, oldest first.
+
+        The autonomous loop (US-045) derives its budget and failure-streak
+        state from this history instead of in-memory counters, so a restart
+        resumes with the same picture.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pending_interactions WHERE thread_ts = ? ORDER BY id",
+                (thread_ts,),
+            ).fetchall()
         return [_interaction_from_row(row) for row in rows]
 
     def resolve_pending_interaction(self, interaction_id: int, status: str) -> PendingInteraction:

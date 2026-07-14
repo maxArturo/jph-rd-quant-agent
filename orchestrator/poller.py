@@ -1,8 +1,28 @@
-"""Hypothesis poller: surface pending run interactions as Slack buttons (US-021).
+"""Hypothesis poller: drive run interactions, autonomously by default (US-021/US-045).
 
 A background thread polls the rdagent server_ui message stream for every run
-with status ``running`` and posts each new hypothesis to its owning thread as
-Block Kit Approve / Edit / Reject buttons. Interactions persist in
+with status ``running``. For an UNSUPERVISED run (the default since US-045)
+each new hypothesis is auto-approved — submitted back unchanged and narrated
+to the owning thread without buttons — because the engine's own
+propose→backtest→feedback loop already turns failures into better next
+hypotheses; the operator's judgment points are the directive and the
+promotion, not individual factor formulations. Two brakes bound the loop:
+
+- Budget: after ``max_hypotheses`` submitted hypotheses (default 10) the next
+  proposal stops the run via ``/control`` instead of being approved. The run
+  row stays ``running`` so the normal completion path (below) posts the
+  metrics summary and Promote offer once the END message lands.
+- Identical-error abort: ``identical_error_limit`` consecutive failed
+  feedbacks with the exact same reason text (the signature of a crashed
+  experiment, e.g. a broken qlib mount — not a judged-and-rejected idea) stop
+  the run early and tell the thread an operator needs to look.
+
+Both are derived from the ``pending_interactions`` history on every poll, so
+restarts resume with the same budget/streak state.
+
+For a SUPERVISED run (``start_research`` with ``supervised=true``) each new
+hypothesis is posted to its owning thread as Block Kit Approve / Edit /
+Reject buttons, exactly the pre-US-045 flow. Interactions persist in
 ``pending_interactions`` (keyed by ``PendingInteraction.key``, UNIQUE in the
 schema) so a restart neither drops nor double-posts them.
 
@@ -42,10 +62,12 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from orchestrator import summary
+from orchestrator.config import DEFAULT_MAX_HYPOTHESES
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.promotion import PROMOTABLE_STATUSES, promotion_offer_blocks
 from orchestrator.rdagent_client import (
@@ -77,6 +99,14 @@ ACTION_REJECT = "hypo_reject"
 # Row statuses an operator button/edit-reply may still act on.
 ACTIONABLE_STATUSES = frozenset({"pending", "editing"})
 
+# Autonomous loop (US-045): identical-error abort threshold. The hypothesis
+# budget default lives in config.py (env-tunable as RDQ_MAX_HYPOTHESES).
+DEFAULT_IDENTICAL_ERROR_LIMIT = 3
+
+# Hypothesis row statuses that consumed one iteration of the run (an answer
+# was submitted upstream). 'cancelled' rows never reached the run.
+SUBMITTED_STATUSES = frozenset({"approved", "edited", "rejected", "auto_approved"})
+
 # Slack section blocks cap text at 3000 chars.
 _MAX_SECTION_TEXT = 2900
 
@@ -102,6 +132,8 @@ class InteractionClient(Protocol):
     def trace_id_of(self, session_path: str) -> str: ...
 
     def status(self, trace_id: str) -> RunStatus: ...
+
+    def stop(self, trace_id: str) -> None: ...
 
 
 class SlackPoster(Protocol):
@@ -155,6 +187,96 @@ def hypothesis_blocks(interaction_id: int, content: dict[str, Any]) -> list[dict
             ],
         },
     ]
+
+
+def autonomous_hypothesis_text(
+    content: dict[str, Any], iteration: int, maximum: int
+) -> str:
+    """Narration for an auto-approved hypothesis (no buttons — audit trail only)."""
+    action = content.get("action")
+    header = (
+        f":arrow_forward: *Hypothesis {iteration}/{maximum}*"
+        + (f" (`{action}`)" if action else "")
+        + " — auto-approved, experiment running."
+    )
+    lines = [header, f"*Hypothesis:* {content.get('hypothesis', '')}"]
+    reason = content.get("concise_reason") or content.get("reason")
+    if reason:
+        lines.append(f"*Why:* {reason}")
+    text = "\n".join(lines)
+    if len(text) > _MAX_SECTION_TEXT:
+        text = text[: _MAX_SECTION_TEXT - 1] + "…"
+    return text
+
+
+def feedback_outcome_text(content: dict[str, Any]) -> str:
+    """One-line experiment verdict for the thread (autonomous runs only)."""
+    reason = str(content.get("reason") or "").strip()
+    snippet = f"\n_{reason[:280]}…_" if len(reason) > 280 else (f"\n_{reason}_" if reason else "")
+    if content.get("decision"):
+        return ":white_check_mark: Experiment result: *beat the best so far* — new baseline (SOTA)." + snippet
+    return ":heavy_multiplication_x: Experiment result: did not beat the best so far." + snippet
+
+
+def budget_exhausted_text(maximum: int) -> str:
+    return (
+        f":checkered_flag: Hypothesis budget reached ({maximum} ideas tried) —"
+        " stopping the run. The final summary of the best result found will"
+        " post here shortly, with the option to promote it."
+    )
+
+
+def identical_error_text(limit: int, signature: str) -> str:
+    sig = signature[:400] + ("…" if len(signature) > 400 else "")
+    return (
+        f":rotating_light: Stopping the run early: the last {limit} experiments"
+        " failed with the *identical* error, which points at an infrastructure"
+        " problem rather than the research ideas themselves. An operator should"
+        f" take a look; the run can be resumed once it's fixed.\n```{sig}```"
+    )
+
+
+@dataclass(frozen=True)
+class LoopState:
+    """The autonomous loop's budget/streak view of one thread's history."""
+
+    submitted_hypotheses: int
+    error_streak: int
+    error_signature: str | None
+
+
+def failure_signature(content: dict[str, Any]) -> str:
+    """Stable identity of a failed feedback, for the identical-error streak.
+
+    Judged-and-rejected ideas carry the summarizer's ``reason`` prose (unique
+    every time). Crashed experiments instead arrive with an EMPTY reason and
+    the raw failure text in ``observations`` — prefixed by hypothesis-specific
+    render context and salted with timestamps/indices. Use the tail (the
+    traceback's crash site) with digit runs normalized, so the same crash
+    matches across iterations while different crashes don't.
+    """
+    reason = str(content.get("reason") or "").strip()
+    if reason:
+        return _normalize_digits(reason)
+    observations = str(content.get("observations") or "").strip()
+    if not observations:
+        return ""
+    normalized = _normalize_digits(observations)
+    # Upstream truncates observations at arbitrary points, so raw tails
+    # misalign between iterations. The innermost traceback frames identify
+    # the crash site regardless of where the cut landed.
+    frames = [
+        line.strip()
+        for line in normalized.splitlines()
+        if line.strip().startswith('File "')
+    ]
+    if frames:
+        return "\n".join(frames[-3:])
+    return normalized[-600:]
+
+
+def _normalize_digits(text: str) -> str:
+    return "".join("#" if ch.isdigit() else ch for ch in text)
 
 
 def terminal_status(status: RunStatus) -> str:
@@ -217,6 +339,8 @@ class HypothesisPoller:
         interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
         recorder: NotionRecorder | None = None,
+        max_hypotheses: int = DEFAULT_MAX_HYPOTHESES,
+        identical_error_limit: int = DEFAULT_IDENTICAL_ERROR_LIMIT,
     ) -> None:
         self._store = store
         self._rdagent = rdagent
@@ -226,6 +350,9 @@ class HypothesisPoller:
         self._locate = locate
         # Optional Notion audit trail (US-027); None disables recording.
         self._recorder = recorder
+        # Autonomous loop brakes (US-045); apply to unsupervised runs only.
+        self._max_hypotheses = max_hypotheses
+        self._identical_error_limit = identical_error_limit
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -277,15 +404,22 @@ class HypothesisPoller:
             if interaction.kind in (KIND_INIT_PARAMS, KIND_BASE_FEATURES):
                 continue  # pre-answered by start_run
             if interaction.kind == KIND_HYPOTHESIS:
-                row = self._store.get_pending_interaction_by_key(interaction.key)
-                if row is None:
-                    posted += self._post_hypothesis(run, trace_id, interaction)
-                    break  # the run is blocked on it; nothing later is answerable yet
-                if row.status in ACTIONABLE_STATUSES:
-                    break  # still awaiting the operator
-                continue  # resolved — later interactions may now be live
+                if run.supervised:
+                    row = self._store.get_pending_interaction_by_key(interaction.key)
+                    if row is None:
+                        posted += self._post_hypothesis(run, trace_id, interaction)
+                        break  # the run is blocked on it; nothing later is answerable yet
+                    if row.status in ACTIONABLE_STATUSES:
+                        break  # still awaiting the operator
+                    continue  # resolved — later interactions may now be live
+                narrated, proceed = self._advance_autonomous(run, trace_id, interaction)
+                posted += narrated
+                if not proceed:
+                    break
+                continue
             if interaction.kind == KIND_FEEDBACK:
-                self._auto_ack_feedback(run, trace_id, interaction)
+                if not self._auto_ack_feedback(run, trace_id, interaction):
+                    break  # the run was aborted for repeated identical errors
                 continue
             logger.warning(
                 "unknown interaction kind %r for run %s (key %s) — skipped",
@@ -294,6 +428,154 @@ class HypothesisPoller:
                 interaction.key,
             )
         return posted
+
+    # -- autonomous loop (US-045) ---------------------------------------------
+
+    def _loop_state(self, thread_ts: str) -> LoopState:
+        """Budget/streak state, derived from the thread's interaction history."""
+        submitted = 0
+        feedbacks: list[dict[str, Any]] = []
+        for row in self._store.list_interactions(thread_ts):
+            kind = row.payload.get("kind")
+            if kind == KIND_HYPOTHESIS and row.status in SUBMITTED_STATUSES:
+                submitted += 1
+            elif kind == KIND_FEEDBACK and row.status == "auto_approved":
+                feedbacks.append(row.payload.get("content") or {})
+        streak = 0
+        signature: str | None = None
+        for content in reversed(feedbacks):
+            if content.get("decision"):
+                break
+            sig = failure_signature(content)
+            if not sig or (signature is not None and sig != signature):
+                break
+            signature = sig
+            streak += 1
+        return LoopState(
+            submitted_hypotheses=submitted,
+            error_streak=streak,
+            error_signature=signature,
+        )
+
+    def _advance_autonomous(
+        self, run: Run, trace_id: str, interaction: PendingInteraction
+    ) -> tuple[int, bool]:
+        """Handle one hypothesis interaction of an unsupervised run.
+
+        Returns ``(narrations_posted, proceed)`` — ``proceed`` is False when
+        the run is now blocked (a failed submit will retry next poll) or was
+        just stopped (budget spent / error streak).
+        """
+        row = self._store.get_pending_interaction_by_key(interaction.key)
+        if row is not None:
+            if row.status == "pending":
+                # Posted with buttons before this run went autonomous (mode
+                # flip mid-run, e.g. the US-045 deploy): approve it now.
+                if not self._submit_quietly(trace_id, row.payload["content"], run):
+                    return 0, False
+                self._store.resolve_pending_interaction(row.id, "auto_approved")
+                if self._recorder is not None:
+                    self._recorder.record_hypothesis_action(row.interaction_key, "auto_approved")
+                self._narrate(run, autonomous_hypothesis_text(
+                    row.payload["content"],
+                    self._loop_state(run.thread_ts).submitted_hypotheses,
+                    self._max_hypotheses,
+                ))
+                return 1, True
+            if row.status == "editing":
+                return 0, False  # the operator is mid-edit; keep the FIFO blocked
+            return 0, True  # already resolved — later interactions may be live
+
+        state = self._loop_state(run.thread_ts)
+        if state.submitted_hypotheses >= self._max_hypotheses:
+            self._halt_run(
+                run, trace_id, interaction, budget_exhausted_text(self._max_hypotheses)
+            )
+            return 0, False
+        if state.error_streak >= self._identical_error_limit and state.error_signature:
+            # Backstop: the abort at feedback-ack time already tried to stop
+            # the run; a proposal arriving anyway means that stop failed.
+            self._halt_run(
+                run,
+                trace_id,
+                interaction,
+                identical_error_text(self._identical_error_limit, state.error_signature),
+            )
+            return 0, False
+
+        row = self._store.add_pending_interaction(
+            run.thread_ts,
+            interaction.key,
+            {"trace_id": trace_id, "kind": interaction.kind, "content": interaction.content},
+        )
+        if row is None:  # lost an insert race with another poller
+            return 0, True
+        if not self._submit_quietly(trace_id, interaction.content, run):
+            self._store.delete_pending_interaction(row.id)
+            return 0, False
+        self._store.resolve_pending_interaction(row.id, "auto_approved")
+        if self._recorder is not None:
+            self._recorder.record_hypothesis(run.thread_ts, interaction.key, interaction.content)
+            self._recorder.record_hypothesis_action(interaction.key, "auto_approved")
+        self._narrate(run, autonomous_hypothesis_text(
+            interaction.content, state.submitted_hypotheses + 1, self._max_hypotheses
+        ))
+        logger.info(
+            "auto-approved hypothesis %s (%d/%d) for thread %s",
+            interaction.key,
+            state.submitted_hypotheses + 1,
+            self._max_hypotheses,
+            run.thread_ts,
+        )
+        return 1, True
+
+    def _halt_run(
+        self, run: Run, trace_id: str, interaction: PendingInteraction, message: str
+    ) -> None:
+        """Stop a run instead of answering its newest proposal.
+
+        The proposal's row is recorded as 'cancelled' so it never counts
+        against the budget and the halt is not re-attempted every poll. The
+        run row deliberately stays 'running': the stop surfaces as an END
+        message (end_code -1), and the normal completion path posts the
+        summary + Promote offer and flips the status.
+        """
+        row = self._store.add_pending_interaction(
+            run.thread_ts,
+            interaction.key,
+            {"trace_id": trace_id, "kind": interaction.kind, "content": interaction.content},
+        )
+        if row is None:
+            return  # already handled (e.g. by a concurrent poll)
+        try:
+            self._rdagent.stop(trace_id)
+        except Exception:  # noqa: BLE001 - free the key so the next poll retries the stop
+            self._store.delete_pending_interaction(row.id)
+            logger.exception("failed to stop run for thread %s", run.thread_ts)
+            return
+        self._store.resolve_pending_interaction(row.id, "cancelled")
+        if self._recorder is not None:
+            self._recorder.record_hypothesis(run.thread_ts, interaction.key, interaction.content)
+            self._recorder.record_hypothesis_action(interaction.key, "cancelled")
+        self._narrate(run, message)
+        logger.info("halted run for thread %s: %s", run.thread_ts, message.splitlines()[0])
+
+    def _submit_quietly(self, trace_id: str, payload: dict[str, Any], run: Run) -> bool:
+        try:
+            self._rdagent.submit(trace_id, payload)
+        except Exception:  # noqa: BLE001 - the next poll retries
+            logger.exception("autonomous submit failed for thread %s", run.thread_ts)
+            return False
+        return True
+
+    def _narrate(self, run: Run, text: str) -> None:
+        """Best-effort thread narration — never blocks or fails the loop."""
+        try:
+            self._slack.chat_postMessage(
+                channel=self._channel_id, thread_ts=run.thread_ts, text=text
+            )
+        except Exception:  # noqa: BLE001 - narration is auxiliary to the submit
+            logger.exception("failed to narrate to thread %s", run.thread_ts)
 
     def _post_hypothesis(self, run: Run, trace_id: str, interaction: PendingInteraction) -> int:
         row = self._store.add_pending_interaction(
@@ -319,23 +601,47 @@ class HypothesisPoller:
         logger.info("posted hypothesis %s to thread %s", interaction.key, run.thread_ts)
         return 1
 
-    def _auto_ack_feedback(self, run: Run, trace_id: str, interaction: PendingInteraction) -> None:
+    def _auto_ack_feedback(self, run: Run, trace_id: str, interaction: PendingInteraction) -> bool:
+        """Ack one feedback; returns False when the run was just aborted."""
         row = self._store.add_pending_interaction(
             run.thread_ts,
             interaction.key,
             {"trace_id": trace_id, "kind": interaction.kind, "content": interaction.content},
         )
         if row is None:
-            return  # already acknowledged
+            return True  # already acknowledged
         try:
             self._rdagent.submit(trace_id, interaction.content)
         except Exception:  # noqa: BLE001 - free the key so the next poll retries the ack
             self._store.delete_pending_interaction(row.id)
             logger.exception("failed to auto-ack feedback for thread %s", run.thread_ts)
-            return
+            return True
         self._store.resolve_pending_interaction(row.id, "auto_approved")
         self._record_experiment(run, interaction)
         logger.info("auto-acknowledged feedback %s for thread %s", interaction.key, run.thread_ts)
+        if run.supervised:
+            return True
+        self._narrate(run, feedback_outcome_text(interaction.content))
+        # Identical-error abort (US-045): N consecutive failures with the same
+        # reason text is an environment problem repeating, not research.
+        state = self._loop_state(run.thread_ts)
+        if state.error_streak >= self._identical_error_limit and state.error_signature:
+            self._narrate(
+                run,
+                identical_error_text(self._identical_error_limit, state.error_signature),
+            )
+            try:
+                self._rdagent.stop(trace_id)
+            except Exception:  # noqa: BLE001 - the halt check on the next proposal retries
+                logger.exception("failed to stop erroring run for thread %s", run.thread_ts)
+                return True
+            logger.info(
+                "aborted run for thread %s after %d identical failures",
+                run.thread_ts,
+                state.error_streak,
+            )
+            return False
+        return True
 
     def _record_experiment(self, run: Run, interaction: PendingInteraction) -> None:
         """Record the just-judged experiment as a Backtest Results row (US-027).

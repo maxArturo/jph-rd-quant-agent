@@ -281,3 +281,44 @@ def test_migration_adds_universe_tickers_to_legacy_db(db_path: Path) -> None:
     store.create_run("333.444", "/logs/run2", universe_tickers=["NVDA"])
     fresh = store.get_run("333.444")
     assert fresh is not None and fresh.universe_tickers == ("NVDA",)
+
+
+def test_run_supervised_roundtrip_and_default(store: StateStore) -> None:
+    run = store.create_run("111.222", "/logs/run1", supervised=True)
+    assert run.supervised is True
+    fetched = store.get_run("111.222")
+    assert fetched is not None and fetched.supervised is True
+
+    bare = store.create_run("333.444", "/logs/run2")
+    assert bare.supervised is False  # autonomous is the default (US-045)
+    fetched_bare = store.get_run("333.444")
+    assert fetched_bare is not None and fetched_bare.supervised is False
+
+
+def test_migration_adds_supervised_to_legacy_db(db_path: Path) -> None:
+    """DBs created before US-045 lack runs.supervised; legacy runs go autonomous."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE runs (thread_ts TEXT PRIMARY KEY, session_path TEXT NOT NULL,"
+            " status TEXT NOT NULL, universe TEXT, universe_tickers TEXT,"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO runs VALUES ('111.222', '/logs/run1', 'running', 'us_liquid',"
+            " NULL, '2026-01-01', '2026-01-01')"
+        )
+    store = StateStore(db_path)  # migration runs here
+    legacy = store.get_run("111.222")
+    assert legacy is not None and legacy.supervised is False
+
+
+def test_list_interactions_returns_all_statuses_oldest_first(store: StateStore) -> None:
+    first = store.add_pending_interaction("t1", "k1", {"kind": "hypothesis"})
+    second = store.add_pending_interaction("t1", "k2", {"kind": "feedback"})
+    store.add_pending_interaction("t2", "k3", {"kind": "hypothesis"})  # other thread
+    assert first is not None and second is not None
+    store.resolve_pending_interaction(first.id, "auto_approved")
+
+    rows = store.list_interactions("t1")
+    assert [r.interaction_key for r in rows] == ["k1", "k2"]
+    assert [r.status for r in rows] == ["auto_approved", "pending"]

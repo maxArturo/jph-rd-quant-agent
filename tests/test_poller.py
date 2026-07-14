@@ -75,7 +75,9 @@ class StubRdAgent:
         self.pending_by_trace: dict[str, list[PendingInteraction]] = {}
         self.status_by_trace: dict[str, RunStatus] = {}
         self.submitted: list[tuple[str, Any]] = []
+        self.stopped: list[str] = []
         self.fail_submit = False
+        self.fail_stop = False
         self.broken_sessions: set[str] = set()
 
     def pending(self, trace_id: str) -> list[PendingInteraction]:
@@ -93,6 +95,11 @@ class StubRdAgent:
 
     def status(self, trace_id: str) -> RunStatus:
         return self.status_by_trace.get(trace_id, RunStatus(finished=False))
+
+    def stop(self, trace_id: str) -> None:
+        if self.fail_stop:
+            raise RuntimeError("control endpoint unreachable")
+        self.stopped.append(trace_id)
 
 
 class FakeSlack:
@@ -127,8 +134,10 @@ class RecordingSay:
 
 @pytest.fixture
 def store(tmp_path: Path) -> StateStore:
+    # Supervised: the button-driven flow these legacy tests exercise (US-021).
+    # Autonomous-run behavior (US-045, the default) is tested separately below.
     s = StateStore(tmp_path / "state.sqlite")
-    s.create_run(THREAD, SESSION, universe="us_liquid")
+    s.create_run(THREAD, SESSION, universe="us_liquid", supervised=True)
     return s
 
 
@@ -655,3 +664,252 @@ def test_non_edit_message_still_reaches_the_conversational_core(
         app, user_message("regular chat", ts="1751900020.000300", thread_ts=THREAD)
     )
     assert conversation.calls == [(THREAD, "regular chat")]
+
+
+# --- autonomous runs (US-045) -------------------------------------------------
+
+FAILED_FEEDBACK: dict[str, Any] = {
+    "decision": False,
+    "observations": "crashed",
+    "reason": "The experiment fails due to ValueError: data missing",
+    "hypothesis_evaluation": "",
+    "new_hypothesis": "",
+    "code_change_summary": "",
+}
+
+
+@pytest.fixture
+def auto_store(tmp_path: Path) -> StateStore:
+    s = StateStore(tmp_path / "state.sqlite")
+    s.create_run(THREAD, SESSION, universe="us_liquid")  # supervised defaults False
+    return s
+
+
+@pytest.fixture
+def auto_poller(auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack) -> HypothesisPoller:
+    return HypothesisPoller(
+        auto_store, rd, slack, CHANNEL, max_hypotheses=3, identical_error_limit=2
+    )
+
+
+def seed_resolved(
+    store: StateStore, kind: str, content: dict[str, Any], ts: str, status: str
+) -> None:
+    """A prior interaction as the poller would have recorded it."""
+    row = store.add_pending_interaction(
+        THREAD,
+        interaction(kind, content, ts=ts).key,
+        {"trace_id": TRACE_ID, "kind": kind, "content": content},
+    )
+    assert row is not None
+    store.resolve_pending_interaction(row.id, status)
+
+
+def test_autonomous_hypothesis_is_auto_approved_and_narrated(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    assert auto_poller.poll_once() == 1
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]  # unchanged constructor dict
+    (post,) = slack.posts
+    assert post["thread_ts"] == THREAD
+    assert "blocks" not in post  # narration only — no buttons
+    assert "1/3" in post["text"]
+    assert HYPO_CONTENT["hypothesis"] in post["text"]
+    rows = auto_store.list_pending_interactions(THREAD, status="auto_approved")
+    assert len(rows) == 1
+
+    assert auto_poller.poll_once() == 0  # dedup: answered requests stay in the stream
+    assert len(rd.submitted) == 1
+    assert len(slack.posts) == 1
+
+
+def test_autonomous_submit_failure_retries_next_poll(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    rd.fail_submit = True
+    assert auto_poller.poll_once() == 0
+    assert auto_store.list_interactions(THREAD) == []  # key freed for the retry
+    assert slack.posts == []
+
+    rd.fail_submit = False
+    assert auto_poller.poll_once() == 1
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
+
+
+def test_autonomous_narration_failure_does_not_unwind_the_submit(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    slack.fail = True
+    auto_poller.poll_once()
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
+    rows = auto_store.list_pending_interactions(THREAD, status="auto_approved")
+    assert len(rows) == 1  # the submit is what counts; narration is best-effort
+
+    slack.fail = False
+    auto_poller.poll_once()
+    assert len(rd.submitted) == 1  # never re-submitted
+
+
+def test_budget_reached_stops_run_instead_of_approving(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    # 3 submitted hypotheses (mixed statuses all count as consumed iterations).
+    seed_resolved(auto_store, KIND_HYPOTHESIS, HYPO_CONTENT, "t1", "auto_approved")
+    seed_resolved(auto_store, KIND_HYPOTHESIS, HYPO_CONTENT, "t2", "approved")
+    seed_resolved(auto_store, KIND_HYPOTHESIS, HYPO_CONTENT, "t3", "rejected")
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT, ts="t4")]
+
+    assert auto_poller.poll_once() == 0
+    assert rd.stopped == [TRACE_ID]
+    assert rd.submitted == []  # the 4th hypothesis was never approved
+    (post,) = slack.posts
+    assert "budget" in post["text"].lower()
+    row = auto_store.get_pending_interaction_by_key(interaction(KIND_HYPOTHESIS, HYPO_CONTENT, ts="t4").key)
+    assert row is not None and row.status == "cancelled"
+    run = auto_store.get_run(THREAD)
+    assert run is not None and run.status == "running"  # completion path flips it
+
+    auto_poller.poll_once()
+    assert rd.stopped == [TRACE_ID]  # halt not re-attempted every poll
+
+
+def test_budget_stop_failure_retries_next_poll(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    for ts in ("t1", "t2", "t3"):
+        seed_resolved(auto_store, KIND_HYPOTHESIS, HYPO_CONTENT, ts, "auto_approved")
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT, ts="t4")]
+    rd.fail_stop = True
+    auto_poller.poll_once()
+    assert rd.stopped == []
+    assert slack.posts == []  # nothing announced until the stop actually lands
+
+    rd.fail_stop = False
+    auto_poller.poll_once()
+    assert rd.stopped == [TRACE_ID]
+
+
+def test_feedback_outcome_is_narrated_for_autonomous_runs(
+    auto_poller: HypothesisPoller, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, FEEDBACK_CONTENT)]
+    auto_poller.poll_once()
+    assert rd.submitted == [(TRACE_ID, FEEDBACK_CONTENT)]
+    (post,) = slack.posts
+    assert "beat the best" in post["text"]
+    assert rd.stopped == []  # success never stops the run (no stop-on-success)
+
+
+def test_identical_error_streak_aborts_the_run(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    seed_resolved(auto_store, KIND_FEEDBACK, FAILED_FEEDBACK, "f1", "auto_approved")
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, FAILED_FEEDBACK, ts="f2")]
+
+    auto_poller.poll_once()
+    assert rd.submitted == [(TRACE_ID, FAILED_FEEDBACK)]  # still acked (FIFO unblocked)
+    assert rd.stopped == [TRACE_ID]
+    assert any("identical" in p["text"] for p in slack.posts)
+
+
+def test_distinct_failure_reasons_do_not_abort(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    seed_resolved(auto_store, KIND_FEEDBACK, FAILED_FEEDBACK, "f1", "auto_approved")
+    different = {**FAILED_FEEDBACK, "reason": "IC did not improve enough over SOTA"}
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, different, ts="f2")]
+    auto_poller.poll_once()
+    assert rd.stopped == []
+
+
+def test_success_breaks_the_error_streak(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    seed_resolved(auto_store, KIND_FEEDBACK, FAILED_FEEDBACK, "f1", "auto_approved")
+    seed_resolved(auto_store, KIND_FEEDBACK, FEEDBACK_CONTENT, "f2", "auto_approved")
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, FAILED_FEEDBACK, ts="f3")]
+    auto_poller.poll_once()
+    assert rd.stopped == []  # f1 and f3 are not consecutive
+
+
+def test_leftover_pending_row_is_auto_approved_after_mode_flip(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    # Posted with buttons by a pre-US-045 poller, still unanswered.
+    row = auto_store.add_pending_interaction(
+        THREAD,
+        interaction(KIND_HYPOTHESIS, HYPO_CONTENT).key,
+        {"trace_id": TRACE_ID, "kind": KIND_HYPOTHESIS, "content": HYPO_CONTENT},
+    )
+    assert row is not None
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+
+    assert auto_poller.poll_once() == 1
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
+    refreshed = auto_store.get_pending_interaction(row.id)
+    assert refreshed is not None and refreshed.status == "auto_approved"
+
+
+def test_editing_row_still_blocks_an_autonomous_run(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    row = auto_store.add_pending_interaction(
+        THREAD,
+        interaction(KIND_HYPOTHESIS, HYPO_CONTENT).key,
+        {"trace_id": TRACE_ID, "kind": KIND_HYPOTHESIS, "content": HYPO_CONTENT},
+    )
+    assert row is not None
+    auto_store.resolve_pending_interaction(row.id, "editing")
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+
+    assert auto_poller.poll_once() == 0
+    assert rd.submitted == []  # the operator's edit reply owns the FIFO slot
+
+
+def test_crashed_experiments_match_by_observations_tail(
+    auto_poller: HypothesisPoller, auto_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    """Crash feedbacks have an EMPTY reason; the streak must key on the
+    observations traceback tail with timestamps/indices normalized."""
+
+    traceback_tail = "\n".join(
+        f'  File "/workspace/qlib/qlib/{mod}.py", line {line}, in {fn}\n    {call}'
+        for mod, line, fn, call in [
+            ("cli/run", 147, "workflow", "recorder = task_train(...)"),
+            ("model/trainer", 127, "task_train", "_exe_task(task_config)"),
+            ("model/trainer", 71, "_exe_task", "r.generate()"),
+            ("workflow/record_temp", 236, "generate", "artifact_dict = self._generate(...)"),
+            ("workflow/record_temp", 489, "_generate", "portfolio_metric_dict = normal_backtest(...)"),
+            ("backtest/__init__", 276, "backtest", "return backtest_loop(...)"),
+            ("backtest/backtest", 89, "collect_data_loop", "trade_strategy.generate_trade_decision(...)"),
+            ("backtest/utils", 131, "get_step_time", "return self._calendar[calendar_index + 1]"),
+        ]
+    )
+
+    def crash(ts_salt: str, idx: int, prefix: str) -> dict[str, Any]:
+        return {
+            "decision": False,
+            "reason": "",
+            "observations": (
+                f"Failed to run this experiment, because [8:MainThread]({ts_salt}) "
+                f"INFO - qlib.qrun - render context: {prefix}\n"
+                f"{traceback_tail}\n"
+                f"IndexError: index {idx} is out of bounds for axis 0 with size {idx}"
+            ),
+            "hypothesis_evaluation": "",
+            "new_hypothesis": "",
+            "code_change_summary": "",
+        }
+
+    seed_resolved(
+        auto_store, KIND_FEEDBACK, crash("2026-07-14 12:46:38,778", 2897, "['factor_a']"), "f1", "auto_approved"
+    )
+    rd.pending_by_trace[TRACE_ID] = [
+        interaction(KIND_FEEDBACK, crash("2026-07-14 12:50:55,193", 2897, "['factor_b_different']"), ts="f2")
+    ]
+    auto_poller.poll_once()
+    assert rd.stopped == [TRACE_ID]  # identical crash site despite differing salt/prefix
+    assert any("identical" in p["text"] for p in slack.posts)

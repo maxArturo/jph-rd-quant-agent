@@ -303,10 +303,13 @@ def test_refusal_posts_notice_and_keeps_history_clean(tmp_path: Path) -> None:
 # --- start_research (US-020) --------------------------------------------------
 
 
-def start_research_script(final_reply: str = "Run started — watch this thread.") -> list[Any]:
+def start_research_script(
+    final_reply: str = "Run started — watch this thread.",
+    tool_input: dict[str, Any] | None = None,
+) -> list[Any]:
     """Model turn 1: call start_research; turn 2: confirm in text."""
     return [
-        message("tool_use", [tool_use_block("tu_sr", "start_research", {})]),
+        message("tool_use", [tool_use_block("tu_sr", "start_research", tool_input or {})]),
         message("end_turn", [text_block(final_reply)]),
     ]
 
@@ -349,6 +352,26 @@ def test_start_research_launches_run_and_writes_row(tmp_path: Path) -> None:
     assert say.calls[0]["text"] == format_run_started(run)
     assert reply == "Run started — watch this thread."
     assert launcher.stopped == []
+
+    # Autonomous by default (US-045): no per-hypothesis approvals.
+    assert run.supervised is False
+    assert "no approvals needed" in say.calls[0]["text"]
+
+
+def test_start_research_supervised_flag_gates_hypotheses(tmp_path: Path) -> None:
+    client = FakeClient(
+        judgment_messages=start_research_script(tool_input={"supervised": True})
+    )
+    launcher = StubLauncher()
+    core, store = make_core(tmp_path, client, launcher)
+    store.create_directive(THREAD, objective="Test something")
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "research it, I want to approve each hypothesis", say)
+
+    run = store.get_run(THREAD)
+    assert run is not None and run.supervised is True
+    assert "for approval" in say.calls[0]["text"]
 
 
 def test_directive_instruction_omits_missing_constraints(tmp_path: Path) -> None:
