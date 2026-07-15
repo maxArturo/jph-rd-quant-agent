@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -36,6 +37,11 @@ DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 
 ORDER_TYPES = frozenset({"market", "limit"})
 ORDER_SIDES = frozenset({"buy", "sell"})
+
+# Portfolio-history timestamps are epoch seconds; the trading day they belong
+# to is the Eastern (market) date, same convention as rebalance.py's
+# submitted_at handling.
+_MARKET_TZ = ZoneInfo("America/New_York")
 
 
 class AlpacaError(RuntimeError):
@@ -58,6 +64,11 @@ class Account:
     equity: float
     cash: float
     buying_power: float
+    # Optional read-visibility fields (US-046): absent in older stubs, so they
+    # parse as None rather than being required.
+    last_equity: float | None = None  # equity at the previous trading day's close
+    long_market_value: float | None = None
+    short_market_value: float | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +79,8 @@ class Position:
     avg_entry_price: float
     current_price: float | None
     market_value: float | None
+    unrealized_pl: float | None = None  # dollars since entry
+    unrealized_plpc: float | None = None  # fraction since entry (0.05 = +5%)
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,23 @@ class CancelledOrder:
 
     id: str
     status: int  # per-order HTTP status (200 = cancel accepted)
+
+
+@dataclass(frozen=True)
+class PortfolioEntry:
+    """One data point from GET /v2/account/portfolio/history."""
+
+    date: dt.date  # market (Eastern) date of the data point
+    equity: float | None
+    profit_loss: float | None  # dollars vs the previous data point
+    profit_loss_pct: float | None  # fraction vs the previous data point
+
+
+@dataclass(frozen=True)
+class PortfolioHistory:
+    timeframe: str
+    base_value: float | None  # equity at the start of the requested period
+    entries: list[PortfolioEntry]
 
 
 @dataclass(frozen=True)
@@ -126,6 +156,13 @@ def _parse_account(row: dict[str, Any]) -> Account:
         equity=_float(row["equity"], "equity", "account"),
         cash=_float(row["cash"], "cash", "account"),
         buying_power=_float(row["buying_power"], "buying_power", "account"),
+        last_equity=_opt_float(row.get("last_equity"), "last_equity", "account"),
+        long_market_value=_opt_float(
+            row.get("long_market_value"), "long_market_value", "account"
+        ),
+        short_market_value=_opt_float(
+            row.get("short_market_value"), "short_market_value", "account"
+        ),
     )
 
 
@@ -137,6 +174,57 @@ def _parse_position(row: dict[str, Any]) -> Position:
         avg_entry_price=_float(row["avg_entry_price"], "avg_entry_price", "positions"),
         current_price=_opt_float(row.get("current_price"), "current_price", "positions"),
         market_value=_opt_float(row.get("market_value"), "market_value", "positions"),
+        unrealized_pl=_opt_float(row.get("unrealized_pl"), "unrealized_pl", "positions"),
+        unrealized_plpc=_opt_float(
+            row.get("unrealized_plpc"), "unrealized_plpc", "positions"
+        ),
+    )
+
+
+def _parse_portfolio_history(row: dict[str, Any]) -> PortfolioHistory:
+    """Column arrays -> row entries; points with a null timestamp are dropped.
+
+    Unlike the account/orders endpoints, portfolio history carries JSON
+    numbers (not strings), with nulls for days the account had no value yet.
+    """
+    timestamps = row.get("timestamp") or []
+    if not isinstance(timestamps, list):
+        raise AlpacaError(
+            f"expected a timestamp array in portfolio history, got: {timestamps!r}"
+        )
+
+    def column(name: str) -> list[Any]:
+        values = row.get(name) or []
+        return values if isinstance(values, list) else []
+
+    equity = column("equity")
+    profit_loss = column("profit_loss")
+    profit_loss_pct = column("profit_loss_pct")
+
+    def at(values: list[Any], index: int, field: str) -> float | None:
+        if index >= len(values):
+            return None
+        return _opt_float(values[index], field, "portfolio history")
+
+    entries: list[PortfolioEntry] = []
+    for index, stamp in enumerate(timestamps):
+        if stamp is None:
+            continue
+        moment = dt.datetime.fromtimestamp(
+            _float(stamp, "timestamp", "portfolio history"), tz=_MARKET_TZ
+        )
+        entries.append(
+            PortfolioEntry(
+                date=moment.date(),
+                equity=at(equity, index, "equity"),
+                profit_loss=at(profit_loss, index, "profit_loss"),
+                profit_loss_pct=at(profit_loss_pct, index, "profit_loss_pct"),
+            )
+        )
+    return PortfolioHistory(
+        timeframe=str(row.get("timeframe", "")),
+        base_value=_opt_float(row.get("base_value"), "base_value", "portfolio history"),
+        entries=entries,
     )
 
 
@@ -194,6 +282,22 @@ class AlpacaClient:
         """GET /v2/positions: all open positions (empty list when flat)."""
         rows = self._expect_list(self._request("GET", "/v2/positions"), "/v2/positions")
         return [_parse_position(row) for row in rows]
+
+    def get_portfolio_history(
+        self, period: str = "1M", timeframe: str = "1D"
+    ) -> PortfolioHistory:
+        """GET /v2/account/portfolio/history: equity and P/L over time.
+
+        ``period`` is an Alpaca duration string (1D/1W/1M/3M/1A/all);
+        ``timeframe`` is the sampling interval (1D for daily points —
+        profit_loss[i] is then the dollar move from day i-1's close to day
+        i's). Both are passed through verbatim; Alpaca rejects bad values.
+        """
+        params = {"period": period, "timeframe": timeframe}
+        row = self._request("GET", "/v2/account/portfolio/history", params=params)
+        return _parse_portfolio_history(
+            self._expect_dict(row, "/v2/account/portfolio/history")
+        )
 
     def list_orders(
         self,

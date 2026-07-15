@@ -767,7 +767,9 @@ def test_budget_reached_stops_run_instead_of_approving(
     assert rd.submitted == []  # the 4th hypothesis was never approved
     (post,) = slack.posts
     assert "budget" in post["text"].lower()
-    row = auto_store.get_pending_interaction_by_key(interaction(KIND_HYPOTHESIS, HYPO_CONTENT, ts="t4").key)
+    row = auto_store.get_pending_interaction_by_key(
+        interaction(KIND_HYPOTHESIS, HYPO_CONTENT, ts="t4").key
+    )
     assert row is not None and row.status == "cancelled"
     run = auto_store.get_run(THREAD)
     assert run is not None and run.status == "running"  # completion path flips it
@@ -882,9 +884,9 @@ def test_crashed_experiments_match_by_observations_tail(
             ("model/trainer", 127, "task_train", "_exe_task(task_config)"),
             ("model/trainer", 71, "_exe_task", "r.generate()"),
             ("workflow/record_temp", 236, "generate", "artifact_dict = self._generate(...)"),
-            ("workflow/record_temp", 489, "_generate", "portfolio_metric_dict = normal_backtest(...)"),
+            ("workflow/record_temp", 489, "_generate", "pm_dict = normal_backtest(...)"),
             ("backtest/__init__", 276, "backtest", "return backtest_loop(...)"),
-            ("backtest/backtest", 89, "collect_data_loop", "trade_strategy.generate_trade_decision(...)"),
+            ("backtest/backtest", 89, "collect_data_loop", "strategy.generate_decision(...)"),
             ("backtest/utils", 131, "get_step_time", "return self._calendar[calendar_index + 1]"),
         ]
     )
@@ -905,10 +907,18 @@ def test_crashed_experiments_match_by_observations_tail(
         }
 
     seed_resolved(
-        auto_store, KIND_FEEDBACK, crash("2026-07-14 12:46:38,778", 2897, "['factor_a']"), "f1", "auto_approved"
+        auto_store,
+        KIND_FEEDBACK,
+        crash("2026-07-14 12:46:38,778", 2897, "['factor_a']"),
+        "f1",
+        "auto_approved",
     )
     rd.pending_by_trace[TRACE_ID] = [
-        interaction(KIND_FEEDBACK, crash("2026-07-14 12:50:55,193", 2897, "['factor_b_different']"), ts="f2")
+        interaction(
+            KIND_FEEDBACK,
+            crash("2026-07-14 12:50:55,193", 2897, "['factor_b_different']"),
+            ts="f2",
+        )
     ]
     auto_poller.poll_once()
     assert rd.stopped == [TRACE_ID]  # identical crash site despite differing salt/prefix

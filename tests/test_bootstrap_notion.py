@@ -198,4 +198,4 @@ def test_main_end_to_end_with_mocked_http(
     out = capsys.readouterr().out
     assert "created" in out and str(config_path) in out
     loaded = yaml.safe_load(config_path.read_text())
-    assert len(loaded["notion"]["databases"]) == 5
+    assert len(loaded["notion"]["databases"]) == 6

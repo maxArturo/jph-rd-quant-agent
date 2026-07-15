@@ -190,6 +190,18 @@
   injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
   synchronous. See dispatch_action in tests/test_poller.py.
 
+- Broker visibility (US-046): check_account/check_orders/check_pnl are
+  READ-ONLY ToolSpecs in ConversationCore behind the `BrokerReader` protocol
+  (default: the real `execution.alpaca_client.AlpacaClient` — the
+  rdq-orchestrator identity holds the paper secret, so proxy injection just
+  works). They return formatted text straight to the model (no say() post —
+  the model's reply carries the numbers); broker errors surface as error
+  tool_results, never crash the turn. Never give the core a write-capable
+  broker method: trading stays with the rebalancer, and the only trading
+  control here remains the breaker halt. "Day P/L" caveat for prompts/tools:
+  pre-open, equity-vs-last_equity is ~0 — check_pnl's history covers
+  completed days. Tests: tests/test_broker_tools.py (StubBroker + FakeClient
+  scripts; assert the tool_result fed back in stream_calls[1]).
 - Trading halt/resume (US-038): halt_trading/resume_trading are ToolSpecs in
   ConversationCore like the run-lifecycle tools, but they flip the
   REBALANCER's kill switch (execution/breaker.py halt file on the default

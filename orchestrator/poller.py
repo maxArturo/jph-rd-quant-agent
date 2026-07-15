@@ -214,7 +214,10 @@ def feedback_outcome_text(content: dict[str, Any]) -> str:
     reason = str(content.get("reason") or "").strip()
     snippet = f"\n_{reason[:280]}…_" if len(reason) > 280 else (f"\n_{reason}_" if reason else "")
     if content.get("decision"):
-        return ":white_check_mark: Experiment result: *beat the best so far* — new baseline (SOTA)." + snippet
+        return (
+            ":white_check_mark: Experiment result: *beat the best so far* — new baseline (SOTA)."
+            + snippet
+        )
     return ":heavy_multiplication_x: Experiment result: did not beat the best so far." + snippet
 
 

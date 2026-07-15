@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import pathlib
 from typing import Any
@@ -18,6 +19,7 @@ from execution.alpaca_client import (
     CalendarDay,
     CancelledOrder,
     Order,
+    PortfolioEntry,
     Position,
 )
 
@@ -150,6 +152,26 @@ class TestAccount:
         with pytest.raises(AlpacaError, match="equity"):
             client.get_account()
 
+    def test_visibility_fields_parse_when_present(self) -> None:
+        row = dict(
+            ACCOUNT_ROW,
+            last_equity="99500.75",
+            long_market_value="59999.75",
+            short_market_value="0",
+        )
+        client, _, _ = make_client([FakeResponse(200, row)])
+        account = client.get_account()
+        assert account.last_equity == 99500.75
+        assert account.long_market_value == 59999.75
+        assert account.short_market_value == 0.0
+
+    def test_visibility_fields_default_to_none(self) -> None:
+        client, _, _ = make_client([FakeResponse(200, ACCOUNT_ROW)])
+        account = client.get_account()
+        assert account.last_equity is None
+        assert account.long_market_value is None
+        assert account.short_market_value is None
+
 
 class TestPositions:
     def test_get_positions_parses_long_and_short(self) -> None:
@@ -178,6 +200,22 @@ class TestPositions:
             Position("AAPL", 10.0, "long", 190.25, 200.5, 2005.0),
             Position("TSLA", -5.0, "short", 300.0, None, None),
         ]
+
+    def test_unrealized_pl_fields_parse_when_present(self) -> None:
+        row = {
+            "symbol": "AAPL",
+            "qty": "10",
+            "side": "long",
+            "avg_entry_price": "190.25",
+            "current_price": "200.5",
+            "market_value": "2005",
+            "unrealized_pl": "102.5",
+            "unrealized_plpc": "0.0539",
+        }
+        client, _, _ = make_client([FakeResponse(200, [row])])
+        (position,) = client.get_positions()
+        assert position.unrealized_pl == 102.5
+        assert position.unrealized_plpc == 0.0539
 
     def test_flat_account_returns_empty_list(self) -> None:
         client, _, _ = make_client([FakeResponse(200, [])])
@@ -382,6 +420,57 @@ class TestGetCalendar:
 
         client, _, _ = make_client([FakeResponse(200, [])])
         assert client.get_calendar(dt.date(2026, 7, 4), dt.date(2026, 7, 4)) == []
+
+
+class TestPortfolioHistory:
+    # 2026-07-13/14 pre-open (13:30 UTC = 09:30 Eastern) daily points.
+    HISTORY_ROW = {
+        "timestamp": [1783949400, 1784035800],
+        "equity": [100000.0, 100250.5],
+        "profit_loss": [0.0, 250.5],
+        "profit_loss_pct": [0.0, 0.002505],
+        "base_value": 100000.0,
+        "timeframe": "1D",
+    }
+
+    def test_parses_daily_entries_with_market_dates(self) -> None:
+        client, session, _ = make_client([FakeResponse(200, self.HISTORY_ROW)])
+        history = client.get_portfolio_history(period="1W")
+        assert session.calls[0]["url"] == f"{BASE_URL}/v2/account/portfolio/history"
+        assert session.calls[0]["params"] == {"period": "1W", "timeframe": "1D"}
+        assert history.timeframe == "1D"
+        assert history.base_value == 100000.0
+        assert [e.date.isoformat() for e in history.entries] == ["2026-07-13", "2026-07-14"]
+        assert history.entries[1] == PortfolioEntry(
+            date=dt.date(2026, 7, 14),
+            equity=100250.5,
+            profit_loss=250.5,
+            profit_loss_pct=0.002505,
+        )
+
+    def test_null_values_and_ragged_columns_become_none(self) -> None:
+        row = {
+            "timestamp": [1783949400, None, 1784035800],
+            "equity": [None, 100000.0, 100250.5],
+            "profit_loss": [0.0],
+            "profit_loss_pct": None,
+            "base_value": None,
+            "timeframe": "1D",
+        }
+        client, _, _ = make_client([FakeResponse(200, row)])
+        history = client.get_portfolio_history()
+        # The null-timestamp point is dropped; missing columns read as None.
+        assert len(history.entries) == 2
+        assert history.entries[0].equity is None
+        assert history.entries[0].profit_loss == 0.0
+        assert history.entries[1].profit_loss is None
+        assert history.entries[1].profit_loss_pct is None
+        assert history.base_value is None
+
+    def test_non_dict_payload_raises(self) -> None:
+        client, _, _ = make_client([FakeResponse(200, [1, 2])])
+        with pytest.raises(AlpacaError, match="expected a JSON object"):
+            client.get_portfolio_history()
 
 
 class TestErrorsAndRetries:

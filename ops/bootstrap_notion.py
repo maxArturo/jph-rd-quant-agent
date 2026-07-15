@@ -1,7 +1,7 @@
-"""Bootstrap the five Notion databases under the parent page.
+"""Bootstrap the six Notion databases under the parent page.
 
-Creates Research Ideas, Hypothesis Log, Backtest Results, Decision Log and
-Trade Ledger with the property schemas defined in
+Creates Research Ideas, Hypothesis Log, Backtest Results, Decision Log,
+Trade Ledger and Account Snapshots with the property schemas defined in
 docs/reference/notion-schema.md (keep database_properties() below in sync
 with that document), then writes the database ids into
 orchestrator/config.yaml.
@@ -52,6 +52,13 @@ _SELECT = {
         "cancelled",
         "expired",
     ],
+    "snapshot_outcome": [
+        "traded",
+        "no_trade",
+        "gate_rejected",
+        "breaker_tripped",
+        "halted",
+    ],
 }
 
 
@@ -61,6 +68,11 @@ def _select(options_key: str) -> dict[str, Any]:
 
 def _number() -> dict[str, Any]:
     return {"number": {"format": "number"}}
+
+
+def _percent() -> dict[str, Any]:
+    # Values are stored as fractions (0.0125) and rendered by Notion as 1.25%.
+    return {"number": {"format": "percent"}}
 
 
 def _relation(ideas_db_id: str) -> dict[str, Any]:
@@ -127,6 +139,23 @@ def database_properties(ideas_db_id: str) -> dict[str, dict[str, Any]]:
             "Submitted At": {"date": {}},
             "Notes": {"rich_text": {}},
         },
+        "Account Snapshots": {
+            "Snapshot": {"title": {}},
+            "Date": {"date": {}},
+            "Equity": _number(),
+            "Cash": _number(),
+            "Long Value": _number(),
+            "Short Value": _number(),
+            "Positions": _number(),
+            "Day P/L": _number(),
+            "Day P/L %": _percent(),
+            "P/L Day": {"date": {}},
+            "Orders Placed": _number(),
+            "Orders Filled": _number(),
+            "Outcome": _select("snapshot_outcome"),
+            "Breaker": {"rich_text": {}},
+            "Notes": {"rich_text": {}},
+        },
     }
 
 
@@ -137,11 +166,12 @@ CONFIG_KEYS = {
     "Backtest Results": "backtest_results",
     "Decision Log": "decision_log",
     "Trade Ledger": "trade_ledger",
+    "Account Snapshots": "account_snapshots",
 }
 
 
 def bootstrap(client: NotionClient, parent_page_id: str) -> dict[str, dict[str, str]]:
-    """Ensure all five databases exist; return title -> {id, action}.
+    """Ensure all six databases exist; return title -> {id, action}.
 
     ``action`` is "created" or "exists" so callers can report what happened.
     """
@@ -194,7 +224,7 @@ def write_config(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bootstrap the five Notion databases under the parent page."
+        description="Bootstrap the six Notion databases under the parent page."
     )
     parser.add_argument(
         "--parent-page-id",

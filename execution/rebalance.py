@@ -19,6 +19,12 @@ and exits 0 without submitting anything. Note the breaker's clean-pass
 high-water-mark update still happens on a dry run (recording an equity peak
 is state the kill switch should have either way).
 
+Every day the pipeline obtained a broker snapshot also writes one Account
+Snapshots row to Notion (execution/account_log.py, US-047) — equity, cash,
+previous completed day's P/L, order counts, outcome — on traded, no-trade,
+gate-rejected, breaker-tripped and halted days alike; dry runs and earlier
+aborts write nothing.
+
 Sources of truth wired here (each decided in its own story):
 
 * Trading-day check: the Alpaca market calendar (GET /v2/calendar) — the
@@ -45,7 +51,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from execution.alpaca_client import AlpacaClient, AlpacaError, Order, Position
+from execution.account_log import AccountSnapshotLog
+from execution.alpaca_client import Account, AlpacaClient, AlpacaError, Order, Position
 from execution.breaker import (
     Breaker,
     BreakerError,
@@ -360,6 +367,7 @@ def format_daily_summary(
     no_trade_note: str | None = None,
     ledger_failures: Sequence[str] = (),
     breaker_state: str | None = None,
+    warnings: Sequence[str] = (),
 ) -> str:
     """The daily Slack digest: orders placed, fills, rejections, equity.
 
@@ -386,7 +394,48 @@ def format_daily_summary(
         lines.append(breaker_state)
     for failure in ledger_failures:
         lines.append(f"WARNING: Trade Ledger write failed — {failure}")
+    for warning in warnings:
+        lines.append(f"WARNING: {warning}")
     return "\n".join(lines)
+
+
+def _record_snapshot(
+    snapshots: AccountSnapshotLog | None,
+    client: AlpacaClient,
+    as_of: dt.date,
+    account: Account,
+    positions: Sequence[Position],
+    outcome: str,
+    breaker: Breaker,
+    orders_placed: int = 0,
+    orders_filled: int = 0,
+    note: str = "",
+) -> list[str]:
+    """Write the day's Account Snapshot row (US-047); returns WARNING lines.
+
+    Best-effort end to end: the portfolio-history fetch (previous completed
+    day's P/L) degrades to an empty Day P/L rather than blocking the row, and
+    write failures come back as summary warnings, never exceptions.
+    """
+    if snapshots is None:
+        return []
+    history = None
+    try:
+        history = client.get_portfolio_history(period="1M", timeframe="1D")
+    except AlpacaError as exc:
+        snapshots.failures.append(f"portfolio history fetch: {exc}")
+    snapshots.record_daily(
+        as_of,
+        account,
+        positions,
+        outcome,
+        orders_placed=orders_placed,
+        orders_filled=orders_filled,
+        breaker_state=breaker_state_line(breaker),
+        history=history,
+        note=note,
+    )
+    return [f"Account Snapshot: {failure}" for failure in snapshots.failures]
 
 
 def _safe_notify(notify: Notify, text: str) -> None:
@@ -412,6 +461,7 @@ def run_rebalance(
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     ledger: TradeLedger | None = None,
+    snapshots: AccountSnapshotLog | None = None,
 ) -> int:
     """Run the full rebalance chain; returns the process exit code.
 
@@ -466,14 +516,25 @@ def run_rebalance(
             breaker = Breaker(load_breaker_config())
         gate = evaluate_orders(diff.orders, account, positions, len(todays_orders), limits)
         if gate.rejections:
+            rejection_messages = [r.message for r in gate.rejections]
             summary = format_daily_summary(
                 as_of,
                 account.equity,
                 [],
                 [],
-                rejections=[r.message for r in gate.rejections],
+                rejections=rejection_messages,
                 no_trade_note="order gate rejected the batch — nothing submitted",
                 breaker_state=breaker_state_line(breaker),
+                warnings=_record_snapshot(
+                    snapshots,
+                    client,
+                    as_of,
+                    account,
+                    positions,
+                    "gate_rejected",
+                    breaker,
+                    note="; ".join(rejection_messages),
+                ),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
@@ -484,6 +545,11 @@ def run_rebalance(
         if trip is not None:
             if trip.reason is BreakerReason.HALT_FILE:
                 message = f"rebalance halted ({as_of}): {trip.message}"
+                for warning in _record_snapshot(
+                    snapshots, client, as_of, account, positions, "halted", breaker,
+                    note=trip.message,
+                ):
+                    message += f"\nWARNING: {warning}"
                 _safe_notify(notify, message)
                 print(message)
                 return 0
@@ -495,6 +561,10 @@ def run_rebalance(
                 rejections=[trip.message],
                 no_trade_note="circuit breaker tripped — nothing submitted",
                 breaker_state=breaker_state_line(breaker),
+                warnings=_record_snapshot(
+                    snapshots, client, as_of, account, positions, "breaker_tripped",
+                    breaker, note=trip.message,
+                ),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
@@ -512,6 +582,10 @@ def run_rebalance(
                 [],
                 no_trade_note="no orders — book already on target",
                 breaker_state=breaker_state_line(breaker),
+                warnings=_record_snapshot(
+                    snapshots, client, as_of, account, positions, "no_trade", breaker,
+                    note="no orders — book already on target",
+                ),
             )
             _safe_notify(notify, summary)
             return 0
@@ -537,6 +611,17 @@ def run_rebalance(
             final,
             ledger_failures=ledger.failures if ledger is not None else (),
             breaker_state=breaker_state_line(breaker),
+            warnings=_record_snapshot(
+                snapshots,
+                client,
+                as_of,
+                account,
+                positions,
+                "traded",
+                breaker,
+                orders_placed=len(submitted),
+                orders_filled=sum(1 for order in final if order.status == "filled"),
+            ),
         )
         _safe_notify(notify, summary)
         print(summary)
@@ -627,6 +712,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
     ledger: TradeLedger | None = None
+    snapshots: AccountSnapshotLog | None = None
     if not args.no_notion:
         from orchestrator.notion_client import NotionClient
         from orchestrator.notion_recorder import RecorderConfigError, load_notion_databases
@@ -640,7 +726,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        ledger = TradeLedger(NotionClient(), databases.trade_ledger)
+        notion = NotionClient()
+        ledger = TradeLedger(notion, databases.trade_ledger)
+        snapshots = AccountSnapshotLog(notion, databases.account_snapshots)
 
     return run_rebalance(
         AlpacaClient(),
@@ -652,6 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         poll_timeout_seconds=args.poll_timeout,
         poll_interval_seconds=args.poll_interval,
         ledger=ledger,
+        snapshots=snapshots,
     )
 
 

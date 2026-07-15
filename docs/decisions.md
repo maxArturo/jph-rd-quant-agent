@@ -718,3 +718,45 @@ Decisions:
   (new `StateStore.list_interactions`), so restarts resume with the same
   counts and the halt is idempotent (the cancelled row suppresses retries;
   a failed stop frees the row so the next poll retries).
+
+## 2026-07-15 — US-046/US-047: broker visibility tools + Notion Account Snapshots
+
+**Problem:** asked "did the orders get executed?", the Slack agent could only
+shrug — it had run-lifecycle tools and the kill switch, but no eyes on the
+Alpaca paper account. And nothing tracked the account's P/L over time: the
+Trade Ledger records orders, not equity, so "how are we doing?" had no
+durable answer.
+
+**Decision (US-046, orchestrator):** no MCP server — the repo's standalone
+constraint and existing patterns cover it. `AlpacaClient` gained the read
+fields/endpoint the tools need (`Account.last_equity`/`long_market_value`/
+`short_market_value`, `Position.unrealized_pl(pc)` — all optional-parse so
+older stubs keep working — and `get_portfolio_history()`, GET
+/v2/account/portfolio/history, the one Alpaca payload with JSON numbers
+instead of strings). ConversationCore offers three READ-ONLY ToolSpecs
+behind the `BrokerReader` protocol (default: real `AlpacaClient`;
+`rdq-orchestrator` has held the paper secret since setup): `check_account`
+(equity, since-prev-close move, cash, positions with unrealized P/L, breaker
+state), `check_orders` (status/limit-filtered order list with fills),
+`check_pnl` (daily equity/P-L history). The core still holds no handle that
+can trade — order placement stays exclusively with the rebalancer.
+
+**Decision (US-047, execution):** sixth Notion database **Account
+Snapshots**, sole writer `execution/account_log.py` (`AccountSnapshotLog`,
+best-effort like the Trade Ledger, failures surface as summary WARNINGs).
+`run_rebalance` writes ONE row on every day it obtained a broker snapshot —
+traded / no_trade / gate_rejected / breaker_tripped / halted (the `Outcome`
+select) — and nothing on dry runs or earlier aborts. **"Day P/L" is the
+previous COMPLETED trading day** (latest portfolio-history point strictly
+before as_of): the rebalancer runs pre-open, when equity-vs-last_equity is
+~0 by construction, so the last completed day is the honest daily number
+("Day P/L %" stores the fraction; the property uses Notion's percent
+format). History-fetch failures degrade to a row without Day P/L plus a
+warning, never an abort.
+
+Bootstrap rerun 2026-07-15 created the database
+(39e9b1a4-36cf-81cc-b793-cf5e472b7c70). Note the schema-change coupling:
+`NotionDatabases` now REQUIRES `account_snapshots`, so a config.yaml from
+before the rerun makes `load_notion_databases()` raise — orchestrator
+degrades to recording-disabled, but the rebalancer refuses to trade until
+`ops/bootstrap_notion.py` reruns.

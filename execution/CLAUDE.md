@@ -136,6 +136,19 @@
   Trade Ledger schema in docs/reference/notion-schema.md; Alpaca statuses map
   through `ledger_status()` (canceled -> cancelled; non-terminal ->
   submitted/partially_filled).
+- `execution/account_log.py` (`AccountSnapshotLog`, US-047) is the Notion
+  Account Snapshots database's SOLE writer: one row per rebalance day the
+  pipeline obtained a broker snapshot (Outcome select: traded / no_trade /
+  gate_rejected / breaker_tripped / halted); dry runs and earlier aborts
+  write nothing. Best-effort like TradeLedger — failures collect in
+  `.failures` and reach the daily summary via `_record_snapshot()`'s warning
+  lines (`format_daily_summary(warnings=...)`). "Day P/L" is the PREVIOUS
+  completed trading day (`previous_day_pnl()` picks the latest
+  portfolio-history point strictly before as_of) because the pre-open run
+  time makes same-day P/L ~0; "Day P/L %" stores a fraction (the Notion
+  property renders percent). The history fetch (`get_portfolio_history`,
+  the one Alpaca payload with JSON numbers, not strings) is itself guarded —
+  an outage degrades to a row without Day P/L plus a warning.
 - The daily Slack digest is `rebalance.format_daily_summary()` (equity,
   orders placed, fills via fill_summary, gate/breaker rejections, ledger
   warnings). It is posted on every day the pipeline reaches the gate:

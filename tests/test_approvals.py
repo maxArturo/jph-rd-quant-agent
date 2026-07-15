@@ -507,7 +507,11 @@ def test_bolt_routes_deny_button_to_handler(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_load_max_hypotheses_default_env_and_validation(tmp_path: Any) -> None:
-    from orchestrator.config import ConfigError, DEFAULT_MAX_HYPOTHESES, load_max_hypotheses
+    from orchestrator.config import (
+        DEFAULT_MAX_HYPOTHESES,
+        ConfigError,
+        load_max_hypotheses,
+    )
 
     missing = tmp_path / "nope.env"
     assert load_max_hypotheses(env_file=missing, environ={}) == DEFAULT_MAX_HYPOTHESES

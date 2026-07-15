@@ -3,6 +3,7 @@
 # Database ids are not secrets (auth is injected by the OneCLI proxy).
 notion:
   databases:
+    account_snapshots: 39e9b1a4-36cf-81cc-b793-cf5e472b7c70
     backtest_results: 3989b1a4-36cf-81a3-b1dd-ce1ce20f535a
     decision_log: 3989b1a4-36cf-8145-9aa1-cdb3ed98c643
     hypothesis_log: 3989b1a4-36cf-81a8-a866-c9fd16c3b104

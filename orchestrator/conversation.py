@@ -31,6 +31,7 @@ from orchestrator.state import (
 )
 
 if TYPE_CHECKING:
+    from execution.alpaca_client import Account, Order, PortfolioHistory, Position
     from orchestrator.universe import MaterializedUniverse, UniverseProposal
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,32 @@ class TradingBreaker(Protocol):
     def halt(self, note: str = "") -> None: ...
 
     def clear_halt(self) -> None: ...
+
+
+class BrokerReader(Protocol):
+    """What the read-only account tools need from AlpacaClient (US-046).
+
+    Strictly the read endpoints — the conversational core must never hold a
+    handle that can place, cancel, or liquidate (trading stays with the
+    nightly rebalancer; the only trading control here is the breaker halt).
+    """
+
+    def get_account(self) -> Account: ...
+
+    def get_positions(self) -> list[Position]: ...
+
+    def list_orders(
+        self,
+        status: str = "open",
+        limit: int | None = None,
+        symbols: list[str] | None = None,
+        after: str | None = None,
+        until: str | None = None,
+    ) -> list[Order]: ...
+
+    def get_portfolio_history(
+        self, period: str = "1M", timeframe: str = "1D"
+    ) -> PortfolioHistory: ...
 
 
 class HypothesisSteering(Protocol):
@@ -184,6 +211,41 @@ RESUME_TRADING_SCHEMA: dict[str, Any] = {
     # No inputs: removes the breaker halt file.
     "type": "object",
     "properties": {},
+}
+
+CHECK_ACCOUNT_SCHEMA: dict[str, Any] = {
+    # No inputs: one fresh snapshot of the paper account and its positions.
+    "type": "object",
+    "properties": {},
+}
+
+CHECK_ORDERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["open", "closed", "all"],
+            "description": (
+                "Which orders to list: open (still working), closed"
+                " (terminal), or all (default — newest first)."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max orders to return (default 10, max 50).",
+        },
+    },
+}
+
+CHECK_PNL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "period": {
+            "type": "string",
+            "enum": ["1W", "1M", "3M", "1A", "all"],
+            "description": "Lookback window for the P/L history (default 1M).",
+        },
+    },
 }
 
 APPROVE_HYPOTHESIS_SCHEMA: dict[str, Any] = {
@@ -344,6 +406,90 @@ def format_trading_resumed(halt_file: Path) -> str:
     )
 
 
+def _signed_usd(value: float) -> str:
+    return f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
+
+
+def _signed_pct(fraction: float) -> str:
+    return f"{fraction * 100:+.2f}%"
+
+
+def format_account_report(
+    account: Account, positions: Sequence[Position], trading_state: str
+) -> str:
+    """Plain-text account snapshot returned to the model by check_account."""
+    lines = [
+        f"paper account ({account.status.lower() or 'unknown status'})",
+        f"equity: ${account.equity:,.2f}",
+    ]
+    if account.last_equity is not None:
+        change = account.equity - account.last_equity
+        pct = f" ({_signed_pct(change / account.last_equity)})" if account.last_equity else ""
+        lines.append(f"since previous close: {_signed_usd(change)}{pct}")
+    lines.append(f"cash: ${account.cash:,.2f}; buying power: ${account.buying_power:,.2f}")
+    if not positions:
+        lines.append("positions: none (flat)")
+    else:
+        lines.append(f"positions ({len(positions)}):")
+        for p in sorted(positions, key=lambda p: p.symbol):
+            value = f"${p.market_value:,.2f}" if p.market_value is not None else "value n/a"
+            pl = ""
+            if p.unrealized_pl is not None:
+                pl = f", unrealized {_signed_usd(p.unrealized_pl)}"
+                if p.unrealized_plpc is not None:
+                    pl += f" ({_signed_pct(p.unrealized_plpc)})"
+            lines.append(f"  {p.symbol}: {p.qty:g} @ avg ${p.avg_entry_price:,.2f}, {value}{pl}")
+    lines.append(f"trading: {trading_state}")
+    return "\n".join(lines)
+
+
+def format_orders_report(orders: Sequence[Order], status: str) -> str:
+    """Plain-text order list (newest first) returned to the model by check_orders."""
+    if not orders:
+        return f"no {status} orders found on the paper account"
+    lines = [f"{len(orders)} {status} order(s), newest first:"]
+    for order in orders:
+        stamp = (order.submitted_at or "unknown time").replace("T", " ")[:16]
+        qty = order.qty if order.qty is not None else order.filled_qty
+        limit = f" @ limit ${order.limit_price:,.2f}" if order.limit_price is not None else ""
+        if order.status == "filled" and order.filled_avg_price is not None:
+            fill = f"filled {order.filled_qty:g} @ ${order.filled_avg_price:,.2f}"
+        elif order.filled_qty:
+            fill = f"{order.status}, {order.filled_qty:g} filled"
+        else:
+            fill = order.status
+        lines.append(f"  {stamp} {order.side} {qty:g} {order.symbol}{limit} — {fill}")
+    return "\n".join(lines)
+
+
+def format_pnl_report(history: PortfolioHistory, period: str) -> str:
+    """Plain-text equity/P-L history returned to the model by check_pnl."""
+    valued = [e for e in history.entries if e.equity]
+    if not valued:
+        return f"no portfolio history with equity values for period {period}"
+    base = history.base_value if history.base_value else valued[0].equity
+    last = valued[-1]
+    assert last.equity is not None  # `valued` filtered on truthy equity
+    lines = [f"portfolio P/L over {period} (daily points):"]
+    if base:
+        change = last.equity - base
+        lines.append(
+            f"period total: {_signed_usd(change)} ({_signed_pct(change / base)}) — "
+            f"equity ${base:,.2f} -> ${last.equity:,.2f}"
+        )
+    for entry in valued[-10:]:
+        day_pl = "P/L n/a"
+        if entry.profit_loss is not None:
+            day_pl = _signed_usd(entry.profit_loss)
+            if entry.profit_loss_pct is not None:
+                day_pl += f" ({_signed_pct(entry.profit_loss_pct)})"
+        equity = f"${entry.equity:,.2f}" if entry.equity is not None else "n/a"
+        lines.append(f"  {entry.date.isoformat()}: equity {equity}, day {day_pl}")
+    if len(valued) > 10:
+        lines.append(f"  (showing the last 10 of {len(valued)} days)")
+    return "\n".join(lines)
+
+
 def duplicate_run_message(existing: Run) -> str:
     return (
         f"this thread already has a research run (status: {existing.status}, "
@@ -383,6 +529,7 @@ class ConversationCore:
         universes: UniverseManager | None = None,
         recorder: NotionRecorder | None = None,
         breaker: TradingBreaker | None = None,
+        broker: BrokerReader | None = None,
         interactions: HypothesisSteering | None = None,
         promotions: PromotionManager | None = None,
     ) -> None:
@@ -400,11 +547,19 @@ class ConversationCore:
             from execution.breaker import Breaker, load_breaker_config
 
             breaker = Breaker(load_breaker_config())
+        if broker is None:
+            # Read-only paper-account visibility (US-046): rdq-orchestrator
+            # holds the paper-api.alpaca.markets secret, so the same proxy
+            # injection that serves the rebalancer serves these reads.
+            from execution.alpaca_client import AlpacaClient
+
+            broker = AlpacaClient()
         self._store = store
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
         self._universes: UniverseManager = universes
         self._breaker: TradingBreaker = breaker
+        self._broker: BrokerReader = broker
         # Optional Notion audit trail (US-027); None disables recording.
         self._recorder = recorder
         # Optional wiring to the poller's button handlers / promotion flow.
@@ -431,6 +586,9 @@ class ConversationCore:
             self._confirm_universe_tool(thread_ts, say),
             self._halt_trading_tool(thread_ts, say),
             self._resume_trading_tool(thread_ts, say),
+            self._check_account_tool(),
+            self._check_orders_tool(),
+            self._check_pnl_tool(),
         ]
         if self._interactions is not None:
             tools.append(self._approve_hypothesis_tool(thread_ts, say))
@@ -847,6 +1005,79 @@ class ConversationCore:
                 " runs (that is resume_run)."
             ),
             input_schema=RESUME_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _trading_state_line(self) -> str:
+        """One line of breaker context for the account report (never raises)."""
+        try:
+            if self._breaker.halted:
+                note = self._breaker.halt_note
+                return f"HALTED{f' — {note}' if note else ''} (resume_trading lifts it)"
+            return "active (nightly rebalancer will trade the promoted strategy)"
+        except Exception as exc:  # noqa: BLE001 - breaker state must not sink a read
+            return f"breaker state unreadable ({exc})"
+
+    def _check_account_tool(self) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — one fresh snapshot
+            account = self._broker.get_account()
+            positions = self._broker.get_positions()
+            return format_account_report(account, positions, self._trading_state_line())
+
+        return ToolSpec(
+            name="check_account",
+            description=(
+                "READ-ONLY snapshot of the desk's Alpaca paper account: equity,"
+                " P/L since the previous close, cash, buying power, every open"
+                " position with its unrealized P/L, and whether trading is"
+                " halted. Use it whenever the operator asks about the account,"
+                " the book, positions, or how we're doing today."
+            ),
+            input_schema=CHECK_ACCOUNT_SCHEMA,
+            handler=handler,
+        )
+
+    def _check_orders_tool(self) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            status = str(args.get("status") or "all")
+            if status not in ("open", "closed", "all"):
+                raise ValueError("status must be one of open/closed/all")
+            limit = args.get("limit")
+            limit = 10 if limit is None else max(1, min(int(limit), 50))
+            orders = self._broker.list_orders(status=status, limit=limit)
+            return format_orders_report(orders, status)
+
+        return ToolSpec(
+            name="check_orders",
+            description=(
+                "READ-ONLY list of the paper account's orders (newest first)"
+                " with fill status and prices. Use it whenever the operator"
+                " asks whether orders were placed or executed — e.g. last"
+                " night's rebalance. It cannot place or cancel anything."
+            ),
+            input_schema=CHECK_ORDERS_SCHEMA,
+            handler=handler,
+        )
+
+    def _check_pnl_tool(self) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            period = str(args.get("period") or "1M")
+            if period not in ("1W", "1M", "3M", "1A", "all"):
+                raise ValueError("period must be one of 1W/1M/3M/1A/all")
+            history = self._broker.get_portfolio_history(period=period, timeframe="1D")
+            return format_pnl_report(history, period)
+
+        return ToolSpec(
+            name="check_pnl",
+            description=(
+                "READ-ONLY daily equity and P/L history of the paper account"
+                " over a lookback window (default 1M): period total plus the"
+                " last few daily P/L points. Use it when the operator asks"
+                " about performance, returns, or P/L over time; for just"
+                " today's number, check_account already reports it."
+            ),
+            input_schema=CHECK_PNL_SCHEMA,
             handler=handler,
         )
 

@@ -1,6 +1,6 @@
 # Notion database schemas
 
-The system's durable record lives in five Notion databases under one parent
+The system's durable record lives in six Notion databases under one parent
 page ("Automated AI Quant Investment",
 `3979b1a4-36cf-8046-baa5-cc14c1ca7665`). `ops/bootstrap_notion.py` creates
 them (idempotently, matched by title) and writes their IDs into
@@ -26,6 +26,7 @@ concurrent-edit conflicts (Notion 409s on concurrent saves).
 | Backtest Results | orchestrator NotionRecorder (poller experiment-feedback path) |
 | Decision Log     | orchestrator NotionRecorder (operator tools: promote, halt/resume) |
 | Trade Ledger     | execution rebalancer (`execution/ledger.py` TradeLedger, US-035) |
+| Account Snapshots | execution rebalancer (`execution/account_log.py` AccountSnapshotLog, US-047) |
 
 Inside the orchestrator process, `orchestrator/notion_recorder.py`
 (`NotionRecorder`, US-027) is the single write funnel for the first four
@@ -114,6 +115,33 @@ rejection. Reconciled against Alpaca order history by `ops/reconcile.py`.
 | Filled Avg Price | number    |                                                           |
 | Submitted At     | date      |                                                           |
 | Notes            | rich_text | gate/breaker context, rejection reasons                   |
+
+## Account Snapshots
+
+One row per rebalance day: the paper account's status and daily P/L. Written
+on every day the pipeline obtained a broker snapshot (traded, no-trade,
+gate-rejected, breaker-tripped, and operator-halted days) — dry runs and
+earlier aborts write nothing. "Day P/L" is the PREVIOUS completed trading
+day's move (from Alpaca portfolio history): the rebalancer runs pre-open,
+when the current day's P/L is still ~0 by definition.
+
+| Property      | Type      | Notes                                                       |
+| ------------- | --------- | ----------------------------------------------------------- |
+| Snapshot      | title     | human line, e.g. "2026-07-15 — equity $101,250.50"           |
+| Date          | date      | the rebalance (as_of) trading day                            |
+| Equity        | number    | account equity at snapshot time (pre-open)                   |
+| Cash          | number    |                                                              |
+| Long Value    | number    | long market value (omitted when Alpaca sends none)           |
+| Short Value   | number    | short market value (omitted when Alpaca sends none)          |
+| Positions     | number    | open position count                                          |
+| Day P/L       | number    | previous completed day's P/L in dollars                      |
+| Day P/L %     | number    | same, as a fraction (percent format: 0.0125 renders 1.25%)   |
+| P/L Day       | date      | which trading day the Day P/L columns cover                  |
+| Orders Placed | number    | orders submitted this run                                    |
+| Orders Filled | number    | of those, filled by the end of the fill poll                 |
+| Outcome       | select    | traded / no_trade / gate_rejected / breaker_tripped / halted |
+| Breaker       | rich_text | breaker_state_line() output                                  |
+| Notes         | rich_text | rejection/trip reasons, halt note                            |
 
 ## Conventions
 

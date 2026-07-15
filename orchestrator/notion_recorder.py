@@ -52,13 +52,14 @@ class RecorderConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class NotionDatabases:
-    """The five database ids bootstrap_notion.py writes into config.yaml."""
+    """The six database ids bootstrap_notion.py writes into config.yaml."""
 
     research_ideas: str
     hypothesis_log: str
     backtest_results: str
     decision_log: str
     trade_ledger: str
+    account_snapshots: str
 
 
 def load_notion_databases(config_path: Path = DEFAULT_CONFIG_PATH) -> NotionDatabases:

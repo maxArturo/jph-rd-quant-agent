@@ -63,6 +63,7 @@ DBS = NotionDatabases(
     backtest_results="db-bt",
     decision_log="db-dec",
     trade_ledger="db-tl",
+    account_snapshots="db-snap",
 )
 
 DIRECTIVE = Directive(
@@ -334,6 +335,7 @@ def test_load_notion_databases_from_repo_config() -> None:
         databases.backtest_results,
         databases.decision_log,
         databases.trade_ledger,
+        databases.account_snapshots,
     ):
         assert db_id  # bootstrap has run; ids are committed in config.yaml
 
