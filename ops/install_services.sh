@@ -14,6 +14,8 @@ UNITS=(
   rdq-research.service
   rdq-data-refresh.service
   rdq-data-refresh.timer
+  rdq-pred-refresh.service
+  rdq-pred-refresh.timer
   rdq-rebalance.service
   rdq-rebalance.timer
   rdq-sweep.service

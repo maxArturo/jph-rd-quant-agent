@@ -22,8 +22,18 @@ INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUNBOOK = REPO_ROOT / "ops" / "runbook.md"
 
 LONG_RUNNING = ["rdq-orchestrator.service", "rdq-research.service"]
-TIMERS = ["rdq-data-refresh.timer", "rdq-rebalance.timer", "rdq-sweep.timer"]
-ONESHOTS = ["rdq-data-refresh.service", "rdq-rebalance.service", "rdq-sweep.service"]
+TIMERS = [
+    "rdq-data-refresh.timer",
+    "rdq-pred-refresh.timer",
+    "rdq-rebalance.timer",
+    "rdq-sweep.timer",
+]
+ONESHOTS = [
+    "rdq-data-refresh.service",
+    "rdq-pred-refresh.service",
+    "rdq-rebalance.service",
+    "rdq-sweep.service",
+]
 
 HEALTHY_SS = (
     "LISTEN 0 128 127.0.0.1:19899 0.0.0.0:* users:((\"python\",pid=4242,fd=3))\n"

@@ -77,8 +77,16 @@ def make_flow(
     store: StateStore,
     artifacts: RunArtifacts,
     recorder: NotionRecorder | None = None,
+    snapshot: Any = None,
 ) -> PromotionFlow:
-    return PromotionFlow(store, recorder=recorder, locate=lambda _session: artifacts)
+    """Flow over stub artifacts; snapshot defaults to a no-op (fixture
+    workspaces have no docker logs for the real US-048 snapshot to recover)."""
+    return PromotionFlow(
+        store,
+        recorder=recorder,
+        locate=lambda _session: artifacts,
+        snapshot=snapshot if snapshot is not None else lambda _workspace: None,
+    )
 
 
 # --- Promote button on the completion summary (poller) -----------------------
@@ -314,6 +322,34 @@ def test_confirm_promotion_refusal_promotes_nothing(
     flow.confirm_promotion(THREAD, say)
     assert "Cannot promote" in say.calls[0]["text"]
     assert running_store.get_promoted_strategy() is None
+
+
+def test_confirm_promotion_snapshots_pred_refresh(store: StateStore, tmp_path: Path) -> None:
+    """US-048: confirming captures the refresh snapshot for the pinned workspace."""
+    snapshotted: list[Path] = []
+    flow = make_flow(store, promotable_artifacts(tmp_path), snapshot=snapshotted.append)
+    flow.confirm_promotion(THREAD, RecordingSay())
+    assert snapshotted == [tmp_path / "workspace"]
+
+
+def test_confirm_promotion_snapshot_failure_warns_but_promotes(
+    store: StateStore, tmp_path: Path
+) -> None:
+    """US-048: a snapshot failure must never block the promotion — the manual
+    refresh procedure still exists and the rebalancer's gate backstops."""
+
+    def broken_snapshot(_workspace: Path) -> None:
+        raise RuntimeError("no docker logs")
+
+    flow = make_flow(store, promotable_artifacts(tmp_path), snapshot=broken_snapshot)
+    say = RecordingSay()
+    flow.confirm_promotion(THREAD, say)
+
+    assert store.get_promoted_strategy() is not None
+    (call,) = say.calls
+    assert "promoted to paper trading" in call["text"]
+    assert "Pred-refresh snapshot failed" in call["text"]
+    assert "no docker logs" in call["text"]
 
 
 def test_cancel_promotion_changes_nothing(store: StateStore, tmp_path: Path) -> None:

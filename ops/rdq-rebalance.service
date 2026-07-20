@@ -20,7 +20,7 @@
 
 [Unit]
 Description=RD-Agent(Q) nightly paper rebalance (Alpaca paper via rdq-exec-paper OneCLI identity)
-After=network-online.target rdq-data-refresh.service
+After=network-online.target rdq-data-refresh.service rdq-pred-refresh.service
 Wants=network-online.target
 
 [Service]

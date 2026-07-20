@@ -14,6 +14,13 @@ The candidate is re-derived from the run row + artifacts on every click
 (nothing is cached in memory or in button values beyond the thread_ts), so
 buttons keep working across orchestrator restarts.
 
+Confirming also snapshots everything the automated morning prediction
+refresh needs into the workspace (conf_pred_refresh.yaml + pred_refresh.env,
+US-048 — see execution/pred_refresh.py) while the run's logs still exist. A
+snapshot failure warns in-thread but never blocks the promotion: the manual
+refresh procedure remains available, and the rebalancer's stale-pred abort
+is the backstop.
+
 The other half of the story lives in execution/promoted.py: the rebalancer
 entrypoint refuses to run when no promoted strategy exists.
 """
@@ -26,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from execution import signal
+from execution import pred_refresh, signal
 from orchestrator import summary
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, locate_artifacts
@@ -170,11 +177,13 @@ class PromotionFlow:
         recorder: NotionRecorder | None = None,
         locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
         load_params: Callable[[Path], signal.StrategyParams] = signal.load_strategy_params,
+        snapshot: Callable[[Path], object] = pred_refresh.snapshot_pred_refresh,
     ) -> None:
         self._store = store
         self._recorder = recorder
         self._locate = locate
         self._load_params = load_params
+        self._snapshot = snapshot
 
     # -- button handlers ------------------------------------------------------
 
@@ -212,6 +221,21 @@ class PromotionFlow:
             lines.append(
                 f":arrows_counterclockwise: Replaced the previously promoted strategy"
                 f" (workspace `{previous.workspace_path}`, promoted {previous.promoted_at})."
+            )
+        # US-048: capture everything the morning prediction refresh needs while
+        # the run's logs still exist. Warn-don't-block: the manual refresh
+        # procedure still works and the rebalancer's stale-pred abort backstops.
+        try:
+            self._snapshot(candidate.workspace)
+        except Exception as exc:  # noqa: BLE001 - any failure becomes a warning
+            logger.warning(
+                "pred-refresh snapshot failed for %s: %s", candidate.workspace, exc
+            )
+            lines.append(
+                f":warning: Pred-refresh snapshot failed ({exc}) — the automated morning"
+                " prediction refresh cannot run for this strategy until"
+                f" {pred_refresh.SNAPSHOT_CONF_NAME} and {pred_refresh.SNAPSHOT_ENV_NAME}"
+                " exist in the workspace (tasks/us-048-automated-pred-refresh.md)."
             )
         say(text="\n".join(lines), thread_ts=thread_ts)
         logger.info(

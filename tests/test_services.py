@@ -15,6 +15,8 @@ UNIT = REPO_ROOT / "ops" / "rdq-orchestrator.service"
 RESEARCH_UNIT = REPO_ROOT / "ops" / "rdq-research.service"
 REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-data-refresh.service"
 REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-data-refresh.timer"
+PRED_REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-pred-refresh.service"
+PRED_REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-pred-refresh.timer"
 REBALANCE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance.service"
 REBALANCE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance.timer"
 SWEEP_UNIT = REPO_ROOT / "ops" / "rdq-sweep.service"
@@ -227,10 +229,55 @@ class TestRefreshUnits:
         _systemd_analyze_verify(REFRESH_TIMER)
 
 
+class TestPredRefreshUnits:
+    def test_exist(self) -> None:
+        assert PRED_REFRESH_UNIT.is_file()
+        assert PRED_REFRESH_TIMER.is_file()
+
+    def test_runs_local_refresh_oneshot(self) -> None:
+        """US-048: purely local work (docker + filesystem + SQLite read) — no
+        onecli wrapper; timer-driven oneshot convention (enable the timer)."""
+        text = PRED_REFRESH_UNIT.read_text()
+        assert "python -m execution.pred_refresh" in text
+        assert "onecli run" not in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_ordered_after_data_refresh(self) -> None:
+        """US-048: the refresh trains on the store the data refresh just
+        advanced — systemd ordering covers the overlap case."""
+        after = re.search(r"^After=(.+)$", PRED_REFRESH_UNIT.read_text(), re.MULTILINE)
+        assert after and "rdq-data-refresh.service" in after.group(1)
+
+    def test_timer_between_data_refresh_and_rebalance(self) -> None:
+        days, hhmm = timer_schedule(PRED_REFRESH_TIMER)
+        assert days == "Mon..Fri"
+        _, data_refresh_time = timer_schedule(REFRESH_TIMER)
+        _, rebalance_time = timer_schedule(REBALANCE_TIMER)
+        assert data_refresh_time < hhmm < rebalance_time
+        # a missed refresh is harmless to catch up (short-circuits when fresh)
+        assert "Persistent=true" in PRED_REFRESH_TIMER.read_text()
+        assert "WantedBy=timers.target" in PRED_REFRESH_TIMER.read_text()
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(PRED_REFRESH_UNIT)
+        _systemd_analyze_verify(PRED_REFRESH_TIMER)
+
+
 class TestRebalanceUnits:
     def test_exist(self) -> None:
         assert REBALANCE_UNIT.is_file()
         assert REBALANCE_TIMER.is_file()
+
+    def test_ordered_after_pred_refresh(self) -> None:
+        """US-048: an in-flight prediction refresh must delay the rebalance
+        rather than race it (After= holds a queued start until it finishes)."""
+        after = re.search(r"^After=(.+)$", REBALANCE_UNIT.read_text(), re.MULTILINE)
+        assert after and "rdq-pred-refresh.service" in after.group(1)
 
     def test_runs_rebalance_under_exec_paper_identity(self) -> None:
         text = REBALANCE_UNIT.read_text()
@@ -313,6 +360,8 @@ class TestInstallScript:
         assert "rdq-research.service" in text
         assert "rdq-data-refresh.service" in text
         assert "rdq-data-refresh.timer" in text
+        assert "rdq-pred-refresh.service" in text
+        assert "rdq-pred-refresh.timer" in text
         assert "rdq-rebalance.service" in text
         assert "rdq-rebalance.timer" in text
         assert "rdq-sweep.service" in text

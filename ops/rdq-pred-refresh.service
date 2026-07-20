@@ -1,0 +1,32 @@
+# RD-Agent(Q) morning prediction refresh for the promoted strategy (US-048).
+#
+# Re-runs the promoted workspace's SignalRecord-only conf
+# (conf_pred_refresh.yaml + pred_refresh.env, snapshotted at promote time) in
+# the local_qlib docker image with test_end=<today NY>, so the 08:00
+# rebalance trades fresh predictions instead of aborting "predictions stale"
+# every morning after the data refresh advances the store. The rebalancer's
+# own freshness gate stays as the backstop when this fails. Skips cleanly
+# (exit 0, Slack notice) when nothing is promoted or predictions are already
+# fresh; any failure exits nonzero and posts to Slack.
+#
+# Purely local work (docker + filesystem + SQLite read) — no onecli wrapper,
+# so no proxy env exists and Slack posts go direct (no NO_PROXY needed).
+# qrun output streams to <workspace>/logs/pred_refresh_<date>.log.
+#
+# Started by rdq-pred-refresh.timer (weekday 06:45 America/New_York, between
+# the 06:30 data refresh and the 08:00 rebalance); no [Install] section on
+# purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-pred-refresh.timer
+# Logs:     journalctl --user -u rdq-pred-refresh.service
+
+[Unit]
+Description=RD-Agent(Q) morning prediction refresh (promoted workspace, SignalRecord-only qrun)
+After=network-online.target rdq-data-refresh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=%h/rd-agent-q/.venv/bin/python -m execution.pred_refresh

@@ -760,3 +760,60 @@ Bootstrap rerun 2026-07-15 created the database
 before the rerun makes `load_notion_databases()` raise — orchestrator
 degrades to recording-disabled, but the rebalancer refuses to trade until
 `ops/bootstrap_notion.py` reruns.
+
+## 2026-07-20 — US-048: automated daily prediction refresh for the promoted strategy
+
+**Problem:** the freshness gate (`execution/signal.py::assert_fresh`) is
+structural — TEST_END must stay short of the store end, so every promoted
+workspace's pred.pkl goes stale the first morning the data refresh advances
+the store. Since promotion (2026-07-14) every rebalance without a manual
+docker pred-refresh aborted "predictions stale" (07-16 onward, daily).
+
+**Decisions (execution/pred_refresh.py + orchestrator/promotion.py):**
+
+- **Promotion snapshots everything inference needs.** `confirm_promotion`
+  now calls `snapshot_pred_refresh(workspace)`: picks the conf the SOTA run
+  actually executed (sota variant only while its combined_factors_df.parquet
+  still exists — RD-Agent cleans it otherwise — else baseline), reduces
+  `record:` to SignalRecord ONLY by text surgery (jinja placeholders must
+  survive; no SigAna/PortAna means no backtest, which is what sidesteps
+  qlib's end-of-calendar IndexError at `test_end=today`), and recovers the
+  rendered jinja context from the workspace's docker_execution logs
+  ("Render the template with the context" line; `num_features` from the
+  training log when it isn't a context var) into `pred_refresh.env`.
+  Snapshot failure warns in-thread but never blocks promotion (manual
+  procedure + rebalancer gate backstop). The currently promoted workspace
+  (5d19a1fb…) was backfilled manually 2026-07-14; the code regenerates its
+  two files byte-identically (verified).
+- **Ship the proven re-fit, not exact-weights re-predict.** The refresh
+  re-runs the snapshot conf via docker (`local_qlib:latest`, QTDockerEnv
+  mount parity) with `test_end=<today NY>` — a fresh ~13-min stochastic
+  re-fit, not the promoted weights. Exact-weights re-predict from
+  params.pkl stays a follow-up.
+- **Separate timer, rebalance gate stays the backstop.**
+  `rdq-pred-refresh.{service,timer}` at 06:45 ET between the 06:30 data
+  refresh and the 08:00 rebalance; both neighbors carry `After=` ordering so
+  an in-flight refresh delays a queued rebalance instead of racing it. No
+  onecli wrapper (purely local work; Slack posts direct). Timer
+  Persistent=true — a caught-up refresh short-circuits when predictions are
+  already fresh, and a late one lets the operator rerun an aborted
+  rebalance without manual docker work.
+- **Self-check = the exact rebalancer gate.** After qrun, `locate_pred` +
+  `assert_fresh` for today must pass or the run exits 1 + Slack-notifies.
+  Exit 0 on refreshed / already-fresh / nothing-promoted (clean skip).
+- **Operational hardening from the 2026-07-15 incident:** qrun output
+  streams to `logs/pred_refresh_<date>.log` (a real file, never a pipe — a
+  lost pipe reader froze training mid-epoch and cost a trading day);
+  `chmod -R 777 mlruns` runs INSIDE the container (files are root-owned; a
+  host-side chmod can't); the container is named
+  `rdq-pred-refresh-<date>` so a stuck one is findable and a same-day rerun
+  fails loudly on the name instead of doubling up.
+- **Disk growth bounded:** refresh runs (artifacts exactly
+  {pred,label,params}.pkl) beyond the newest 5 are pruned after each
+  success; anything with other artifacts (the promoted backtest itself) is
+  never a candidate.
+
+First live run 2026-07-20 (Monday, supervised via `systemctl --user start`):
+see the run log + Slack notice. Milestone to watch: 5 consecutive trading
+days data refresh → pred refresh → rebalance all green with zero manual
+steps.

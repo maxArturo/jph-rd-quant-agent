@@ -25,12 +25,14 @@ LONG_RUNNING=(
 # Timers that must be active (waiting counts as active).
 TIMERS=(
   rdq-data-refresh.timer
+  rdq-pred-refresh.timer
   rdq-rebalance.timer
   rdq-sweep.timer
 )
 # Timer-driven oneshots: healthy is "anything but failed" (dead between runs).
 ONESHOTS=(
   rdq-data-refresh.service
+  rdq-pred-refresh.service
   rdq-rebalance.service
   rdq-sweep.service
 )

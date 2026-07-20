@@ -1,0 +1,24 @@
+# Weekday 06:45 America/New_York trigger for rdq-pred-refresh.service (US-048).
+#
+# Slotted between rdq-data-refresh.timer (06:30 ET — advancing the store is
+# exactly what stales the promoted pred.pkl) and rdq-rebalance.timer
+# (08:00 ET): a ~13 min GRU re-fit finishes with an hour to spare, and the
+# service's own timeout keeps a runaway train from colliding with the
+# rebalance. Explicit timezone so US DST never drifts the run relative to
+# the market session.
+#
+# Persistent=true: a refresh missed while the box was down is harmless to
+# catch up — the run short-circuits when predictions are already fresh, and
+# a late refresh lets the operator rerun an aborted rebalance without the
+# manual docker procedure.
+
+[Unit]
+Description=Weekday 06:45 America/New_York trigger for the promoted-strategy prediction refresh
+
+[Timer]
+OnCalendar=Mon..Fri 06:45 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
