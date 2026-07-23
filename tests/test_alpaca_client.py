@@ -490,6 +490,27 @@ class TestErrorsAndRetries:
         with pytest.raises(AlpacaAuthError):
             client.get_positions()
 
+    def test_403_with_401_family_code_is_still_auth(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(403, {"code": 40110000, "message": "access key verification failed"})]
+        )
+        with pytest.raises(AlpacaAuthError):
+            client.get_positions()
+
+    def test_403_business_rejection_is_not_an_auth_error(self) -> None:
+        # 40310000 "insufficient buying power" is a 403 on a validly-authed
+        # request (the 2026-07-23 abort): it must NOT tell the operator to
+        # re-vault working credentials.
+        client, _, _ = make_client(
+            [FakeResponse(403, {"code": 40310000, "message": "insufficient buying power"})]
+        )
+        with pytest.raises(AlpacaError) as excinfo:
+            client.get_positions()
+        assert not isinstance(excinfo.value, AlpacaAuthError)
+        message = str(excinfo.value)
+        assert "insufficient buying power" in message
+        assert "ops/setup_onecli.sh" not in message
+
     def test_429_honors_retry_after_then_succeeds(self) -> None:
         client, session, sleeps = make_client(
             [

@@ -11,6 +11,12 @@
   POST /v2/orders is ambiguous (the order may have been accepted) and a blind
   retry could double-submit. Don't "improve" this with generic transient
   retries; idempotent replay needs `client_order_id` dedup, not client loops.
+- 401/403 split (2026-07-23 incident): `AlpacaAuthError` (the re-vault-your-
+  secrets message) is 401, or 403 whose body has no structured code or a
+  401-family code. A 403 with a 403-family body code (40310000 "insufficient
+  buying power") is a business rejection of a validly-authed request and
+  raises plain `AlpacaError` — the body code's leading three digits mirror
+  the HTTP status (`_auth_failure`). Don't fold these back together.
 - Alpaca v2 wire quirks: numeric fields arrive as STRINGS ("equity":
   "100000.25"); position `qty` is signed (negative = short) alongside a
   `side` field; notional orders have `qty: null`; DELETE /v2/orders/{id}
@@ -86,13 +92,25 @@
   day.txt`). Predictions are made FROM day T FOR T+1, so pred dated the last
   completed trading day is fresh for a pre-open rebalance.
 - `execution/rebalance.py` is the pipeline assembly (US-034): market calendar
-  -> promoted load -> signal -> diff -> gate -> breaker -> submit -> poll
-  fills. `run_rebalance()` returns the process exit code — 0 for traded /
-  dry-run / nothing-to-trade / operator halt, 1 for every
+  -> promoted load -> signal -> diff -> buying-power cap -> gate -> breaker
+  -> submit -> poll fills. `run_rebalance()` returns the process exit code —
+  0 for traded / dry-run / nothing-to-trade / operator halt, 1 for every
   abort-without-trading (the reason is posted via the injected `notify`
   callable AND printed). Known aborts are the `_ABORT_ERRORS` tuple; anything
   else notifies then re-raises (bugs must crash loudly). Keep new failure
   modes inside that contract.
+- Buying-power cap (`cap_buys_to_buying_power`, 2026-07-23 incident): buys
+  are funded solely by the snapshot's `buying_power` — Alpaca reserves
+  qty*limit when it accepts a buy and credits sells only on FILL, so a
+  pre-open batch sized off equity can 403 (40310000) mid-submission with
+  orders already live. Sells always pass; buys keep the diff's deterministic
+  order and are taken while they fit (at-limit passes, strictly-over defers,
+  same boundary semantics as the gate). Deferred buys become
+  `SkippedDelta(reason="insufficient_buying_power")` entries merged into
+  `DiffResult.skipped` (plan "skipped:" lines) and WARNING lines in the
+  daily summary; the gate evaluates the CAPPED batch; tomorrow's diff
+  re-proposes whatever was deferred once today's sells settle. An
+  all-buys-deferred day is a no-trade day (exit 0), not an abort.
 - Rebalance conventions downstream stories rely on: the trading-day check is
   Alpaca `GET /v2/calendar` (the qlib store calendar ends at the last built
   bar and cannot say whether *today* trades); "today" for the day-order count

@@ -15,11 +15,12 @@ import pytest
 from execution.alpaca_client import AlpacaClient, Order
 from execution.breaker import Breaker, BreakerConfig
 from execution.ledger import TradeLedger
-from execution.order_gate import Limits
+from execution.order_gate import Limits, ProposedOrder
 from execution.rebalance import (
     RebalanceError,
     _strategy_params,
     build_reference_prices,
+    cap_buys_to_buying_power,
     day_traded_notional,
     fill_summary,
     format_daily_summary,
@@ -87,6 +88,7 @@ class FakeBroker:
         existing_orders: list[dict[str, Any]] | None = None,
         fill_countdown: int | None = 0,
         post_fail_after: int | None = None,
+        buying_power: float | None = None,
     ) -> None:
         self.session = RoutedSession()
         self.positions = positions or []
@@ -102,7 +104,7 @@ class FakeBroker:
             "currency": "USD",
             "equity": str(equity),
             "cash": str(equity),
-            "buying_power": str(equity * 2),
+            "buying_power": str(equity * 2 if buying_power is None else buying_power),
         }
         self.session.route("GET", "/v2/account", lambda p, j: FakeResponse(200, account_row))
         self.session.route(
@@ -313,6 +315,71 @@ def test_live_run_submits_exact_orders_and_polls_fills(env: SimpleNamespace) -> 
     assert len(notes) == 1
     assert "2/2 orders filled" in notes[0]
     assert "buy 250 AAPL: filled @ $201.00" in notes[0]
+
+
+# ------------------------------------------------- buying-power cap (2026-07-23)
+
+
+def test_cap_defers_buys_beyond_buying_power_and_keeps_sells() -> None:
+    orders = [
+        ProposedOrder(symbol="COST", side="sell", qty=3, limit_price=900.0),
+        ProposedOrder(symbol="AAPL", side="buy", qty=10, limit_price=100.0),  # 1,000
+        ProposedOrder(symbol="MSFT", side="buy", qty=10, limit_price=400.0),  # 4,000
+        ProposedOrder(symbol="NVDA", side="buy", qty=1, limit_price=200.0),  # 200
+    ]
+    kept, deferred = cap_buys_to_buying_power(orders, 1_500.0)
+    # The sell never consumes buying power; MSFT is over the remaining $500,
+    # but NVDA after it still fits — order stays deterministic, gaps close up.
+    assert [o.symbol for o in kept] == ["COST", "AAPL", "NVDA"]
+    assert [s.symbol for s in deferred] == ["MSFT"]
+    assert deferred[0].reason == "insufficient_buying_power"
+    assert "buy 10 MSFT @ 400.00" in deferred[0].message
+
+
+def test_cap_exactly_at_buying_power_passes() -> None:
+    orders = [ProposedOrder(symbol="AAPL", side="buy", qty=10, limit_price=100.0)]
+    kept, deferred = cap_buys_to_buying_power(orders, 1_000.0)
+    assert [o.symbol for o in kept] == ["AAPL"]
+    assert deferred == []
+
+
+def test_cap_sells_pass_with_zero_buying_power() -> None:
+    orders = [
+        ProposedOrder(symbol="COST", side="sell", qty=3, limit_price=900.0),
+        ProposedOrder(symbol="AAPL", side="buy", qty=1, limit_price=100.0),
+    ]
+    kept, deferred = cap_buys_to_buying_power(orders, 0.0)
+    assert [o.symbol for o in kept] == ["COST"]
+    assert [s.symbol for s in deferred] == ["AAPL"]
+
+
+def test_live_run_defers_buys_over_buying_power_and_warns(
+    env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The env plan is buy 250 AAPL @ 201 ($50,250) then buy 125 MSFT @ 402
+    # ($50,250): with $60k buying power AAPL fits, MSFT must be deferred —
+    # NOT submitted into a mid-batch 403 (the 2026-07-23 incident).
+    broker = FakeBroker(buying_power=60_000.0)
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+
+    posts = [c["json"] for c in broker.session.posts()]
+    assert [p["symbol"] for p in posts] == ["AAPL"]
+    assert "skipped: MSFT" in capsys.readouterr().out
+    assert len(notes) == 1
+    assert "1/1 orders filled" in notes[0]
+    assert "WARNING: MSFT: buy 125 MSFT @ 402.00 deferred" in notes[0]
+    assert "buying power" in notes[0]
+
+
+def test_live_run_all_buys_deferred_is_a_no_trade_day(env: SimpleNamespace) -> None:
+    broker = FakeBroker(buying_power=1_000.0)
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+    assert broker.session.posts() == []
+    assert "no orders — every buy deferred for buying power" in notes[0]
+    assert "WARNING: AAPL" in notes[0]
+    assert "WARNING: MSFT" in notes[0]
 
 
 def test_full_exit_of_dropped_position_uses_snapshot_price_fallback(

@@ -3,7 +3,15 @@
 Chains the tested execution pieces end-to-end, in the PRD's order:
 
     market-calendar check -> promoted strategy load -> signal extraction
-    -> order diff -> order gate -> circuit breaker -> submit -> poll fills
+    -> order diff -> buying-power cap -> order gate -> circuit breaker
+    -> submit -> poll fills
+
+The buying-power cap (cap_buys_to_buying_power) defers buys the account
+snapshot's buying_power cannot fund — Alpaca reserves qty * limit_price when
+it accepts a buy and credits sells only on fill, so a pre-open batch sized
+off equity can 403 (40310000) mid-submission otherwise. Deferred buys appear
+as skipped lines in the plan and WARNING lines in the daily summary;
+tomorrow's diff re-proposes them once today's sells settle.
 
 Abort policy: every failure posts to the Slack channel and exits nonzero —
 except a halt-file breaker trip, which posts a "halted" notice and exits 0
@@ -43,6 +51,7 @@ Sources of truth wired here (each decided in its own story):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import math
 import sys
@@ -65,6 +74,7 @@ from execution.diff import (
     DEFAULT_MIN_REBALANCE_NOTIONAL_USD,
     DiffError,
     DiffResult,
+    SkippedDelta,
     compute_orders,
 )
 from execution.ledger import TradeLedger
@@ -245,6 +255,45 @@ def format_plan(diff: DiffResult, as_of: dt.date, dry_run: bool) -> str:
     for skip in diff.skipped:
         lines.append(f"  skipped: {skip.message}")
     return "\n".join(lines)
+
+
+def cap_buys_to_buying_power(
+    orders: Sequence[ProposedOrder], buying_power: float
+) -> tuple[list[ProposedOrder], list[SkippedDelta]]:
+    """Defer buys the snapshot's buying power cannot cover; sells always pass.
+
+    Alpaca reserves qty * limit_price the moment a buy limit order is
+    accepted and does NOT credit unfilled sells, so a pre-open batch is
+    funded solely by the account snapshot's buying_power — sell proceeds
+    only exist after fills (the 2026-07-23 mid-batch 40310000 abort). Buys
+    keep the diff's deterministic order and are taken while they fit
+    (exactly-at-limit passes, strictly-over defers, matching the gate's
+    boundary semantics); each deferred buy comes back as a SkippedDelta so
+    the plan and summary report it. Tomorrow's diff re-proposes whatever
+    was deferred once today's sells have settled.
+    """
+    kept: list[ProposedOrder] = []
+    deferred: list[SkippedDelta] = []
+    remaining = buying_power
+    for order in orders:
+        if order.side == "buy":
+            if order.notional > remaining:
+                deferred.append(
+                    SkippedDelta(
+                        symbol=order.symbol,
+                        reason="insufficient_buying_power",
+                        message=(
+                            f"{order.symbol}: {order.describe()} deferred — notional "
+                            f"${order.notional:,.2f} exceeds the ${remaining:,.2f} "
+                            "buying power left (unfilled sells do not fund pre-open "
+                            "buys; tomorrow's diff re-proposes it)"
+                        ),
+                    )
+                )
+                continue
+            remaining -= order.notional
+        kept.append(order)
+    return kept, deferred
 
 
 def submit_orders(
@@ -508,6 +557,16 @@ def run_rebalance(
             limit_offset_pct=limit_offset_pct,
         )
 
+        # 5b. Buying-power cap: defer buys the snapshot's buying_power cannot
+        # cover (Alpaca reserves qty*limit at accept, credits sells only on
+        # fill) instead of 403ing mid-batch with orders already live.
+        kept_orders, deferred = cap_buys_to_buying_power(diff.orders, account.buying_power)
+        if deferred:
+            diff = dataclasses.replace(
+                diff, orders=kept_orders, skipped=[*diff.skipped, *deferred]
+            )
+        deferred_warnings = [skip.message for skip in deferred]
+
         # 6. Gate: any rejected order aborts the whole batch. The rejection
         # notice is the day's summary (equity + every violated limit).
         if limits is None:
@@ -575,16 +634,22 @@ def run_rebalance(
         if dry_run:
             return 0
         if not diff.orders:
+            no_trade_note = (
+                "no orders — every buy deferred for buying power"
+                if deferred
+                else "no orders — book already on target"
+            )
             summary = format_daily_summary(
                 as_of,
                 account.equity,
                 [],
                 [],
-                no_trade_note="no orders — book already on target",
+                no_trade_note=no_trade_note,
                 breaker_state=breaker_state_line(breaker),
-                warnings=_record_snapshot(
+                warnings=deferred_warnings
+                + _record_snapshot(
                     snapshots, client, as_of, account, positions, "no_trade", breaker,
-                    note="no orders — book already on target",
+                    note=no_trade_note,
                 ),
             )
             _safe_notify(notify, summary)
@@ -611,7 +676,8 @@ def run_rebalance(
             final,
             ledger_failures=ledger.failures if ledger is not None else (),
             breaker_state=breaker_state_line(breaker),
-            warnings=_record_snapshot(
+            warnings=deferred_warnings
+            + _record_snapshot(
                 snapshots,
                 client,
                 as_of,

@@ -49,7 +49,12 @@ class AlpacaError(RuntimeError):
 
 
 class AlpacaAuthError(AlpacaError):
-    """401/403 from Alpaca: the OneCLI proxy did not inject valid credentials."""
+    """Alpaca refused the credentials (see _auth_failure for the 403 split).
+
+    Not every 403 lands here: Alpaca also uses 403 for business rejections
+    of validly-authed requests (40310000 "insufficient buying power") —
+    those raise plain AlpacaError so operators aren't sent to re-vault
+    secrets that work (2026-07-23 incident)."""
 
 
 class AlpacaRateLimitError(AlpacaError):
@@ -456,7 +461,7 @@ class AlpacaClient:
                 self._sleep(self._retry_delay(response, attempt))
                 attempt += 1
                 continue
-            if status in (401, 403):
+            if status in (401, 403) and _auth_failure(status, response):
                 raise AlpacaAuthError(
                     f"Alpaca returned {status} for {method} {path}: no valid paper "
                     "credentials were injected. Run this process under `onecli run "
@@ -487,6 +492,32 @@ class AlpacaClient:
 def _decimal_str(value: float) -> str:
     """Wire form for qty/price: '15' for whole numbers, '15.5' otherwise."""
     return f"{value:g}" if value != int(value) else str(int(value))
+
+
+def _auth_failure(status: int, response: Any) -> bool:
+    """Whether a 401/403 means bad credentials rather than a refused request.
+
+    401 always does. A 403's meaning lives in the body's Alpaca error code,
+    whose leading three digits mirror an HTTP status: a 401-family code
+    (40110000 "access key verification failed") or no code at all (bare
+    {"message": "forbidden"}) is auth; a 403-family code (40310000
+    "insufficient buying power") is a business rejection of a validly-authed
+    request.
+    """
+    if status == 401:
+        return True
+    code = _body_error_code(response)
+    return code is None or code // 100000 == 401
+
+
+def _body_error_code(response: Any) -> int | None:
+    """The structured Alpaca error code from the body, or None if absent."""
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _error_detail(response: Any) -> str:
