@@ -95,25 +95,37 @@ def _static_loader_deps(conf_text: str) -> list[str]:
     return re.findall(r'config:\s*"([^"]+\.parquet)"', conf_text)
 
 
+# Candidate source confs, most-specific first, per workspace family: model
+# experiments write conf_{sota,baseline}_factors_model.yaml; factor
+# experiments write conf_combined_factors{_sota_model,}.yaml + conf_baseline.yaml.
+_SOURCE_CONF_CANDIDATES = (
+    "conf_sota_factors_model.yaml",
+    "conf_baseline_factors_model.yaml",
+    "conf_combined_factors_sota_model.yaml",
+    "conf_combined_factors.yaml",
+    "conf_baseline.yaml",
+)
+
+
 def choose_source_conf(workspace: Path) -> Path:
     """The conf the promoted run actually executed.
 
-    The sota variant needs combined_factors_df.parquet, which RD-Agent cleans
-    up after runs without SOTA factor experiments — so it is only the right
-    source when its data dependencies still exist; otherwise the baseline
-    conf is what produced the promoted artifacts.
+    The combined/sota variants need combined_factors_df.parquet, which
+    RD-Agent cleans up after runs without SOTA factor experiments — a conf is
+    only the right source when its data dependencies still exist; otherwise
+    the plain baseline conf is what produced the promoted artifacts.
     """
-    sota = workspace / "conf_sota_factors_model.yaml"
-    baseline = workspace / "conf_baseline_factors_model.yaml"
-    if sota.is_file():
-        deps = _static_loader_deps(sota.read_text())
+    for name in _SOURCE_CONF_CANDIDATES:
+        conf = workspace / name
+        if not conf.is_file():
+            continue
+        deps = _static_loader_deps(conf.read_text())
         if all((workspace / dep).is_file() for dep in deps):
-            return sota
-    if baseline.is_file():
-        return baseline
+            return conf
     raise PredRefreshError(
-        f"no usable source conf in {workspace}: need conf_baseline_factors_model.yaml, "
-        "or conf_sota_factors_model.yaml with its parquet dependencies still on disk"
+        f"no usable source conf in {workspace}: need one of "
+        f"{', '.join(_SOURCE_CONF_CANDIDATES)} with its parquet dependencies "
+        "still on disk"
     )
 
 

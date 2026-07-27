@@ -169,6 +169,41 @@ def test_snapshot_without_any_conf_raises(tmp_path: Path) -> None:
         choose_source_conf(tmp_path / "empty")
 
 
+def make_factor_workspace(tmp_path: Path, parquet: bool = True) -> Path:
+    """A factor-experiment workspace (2026-07-24 incident): the conf family is
+    conf_combined_factors{_sota_model,}.yaml + conf_baseline.yaml, not the
+    model-experiment *_factors_model.yaml names."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "conf_baseline.yaml").write_text(BASELINE_CONF)
+    (workspace / "conf_combined_factors.yaml").write_text(SOTA_CONF)
+    (workspace / "conf_combined_factors_sota_model.yaml").write_text(SOTA_CONF)
+    if parquet:
+        (workspace / "combined_factors_df.parquet").write_bytes(b"parquet")
+    logs = workspace / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / "docker_execution_20260714_151810.log").write_text(
+        f"boilerplate\n{CONTEXT_LINE}\nmore lines\n{TRAIN_LINE}\n"
+    )
+    return workspace
+
+
+def test_snapshot_supports_factor_workspace_conf_names(tmp_path: Path) -> None:
+    workspace = make_factor_workspace(tmp_path)
+    assert choose_source_conf(workspace).name == "conf_combined_factors_sota_model.yaml"
+    conf_path, env_path = snapshot_pred_refresh(workspace)
+    assert conf_path.is_file() and env_path.is_file()
+    records = rendered(conf_path.read_text())["task"]["record"]
+    assert [r["class"] for r in records] == ["SignalRecord"]
+
+
+def test_factor_workspace_falls_back_to_baseline_when_parquet_cleaned(
+    tmp_path: Path,
+) -> None:
+    workspace = make_factor_workspace(tmp_path, parquet=False)
+    assert choose_source_conf(workspace).name == "conf_baseline.yaml"
+
+
 # --- snapshot: context recovery -----------------------------------------------
 
 
