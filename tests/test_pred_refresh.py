@@ -20,6 +20,8 @@ from jinja2 import Environment, Undefined
 from execution.pred_refresh import (
     PredRefreshError,
     choose_source_conf,
+    describe_cross_section,
+    describe_promoted,
     docker_command,
     load_env_file,
     prune_refresh_runs,
@@ -28,7 +30,7 @@ from execution.pred_refresh import (
     run_pred_refresh,
     snapshot_pred_refresh,
 )
-from orchestrator.state import StateStore
+from orchestrator.state import PromotedStrategy, StateStore
 from tests.test_signal import write_calendar, write_pred
 
 AS_OF = dt.date(2026, 7, 17)  # Friday
@@ -230,7 +232,15 @@ def promoted_env(tmp_path: Path, snapshot: bool = True) -> tuple[Path, Path, Pat
     if snapshot:
         snapshot_pred_refresh(workspace)
     db_path = tmp_path / "state.sqlite"
-    StateStore(db_path).set_promoted_strategy(str(workspace), {"topk": 50, "n_drop": 5})
+    StateStore(db_path).set_promoted_strategy(
+        str(workspace),
+        {
+            "universe": "ai_deployers",
+            "universe_tickers": ["AAPL", "MSFT", "NVDA"],
+            "topk": 50,
+            "n_drop": 5,
+        },
+    )
     store_path = tmp_path / "us_data"
     write_calendar(store_path / "calendars" / "day.txt", CALENDAR)
     return workspace, db_path, store_path
@@ -263,6 +273,12 @@ def test_refresh_happy_path_posts_success(tmp_path: Path) -> None:
     (notice,) = notices
     assert "pred refresh (2026-07-17)" in notice
     assert FRESH_DAY in notice
+    # Recall context (US-048 follow-up): what strategy, which scores.
+    assert "strategy: GeneralPTNN on ai_deployers (3 tickers)" in notice
+    assert "top-50/drop-5 selection" in notice
+    assert "workspace " in notice and "promoted 20" in notice
+    assert "2 names scored" in notice
+    assert "top 2: AAPL +1.000, MSFT +0.500" in notice
     # qrun output went to a real log file inside the workspace.
     assert (workspace / "logs" / "pred_refresh_20260717.log").is_file()
 
@@ -315,6 +331,9 @@ def test_refresh_short_circuits_when_already_fresh(tmp_path: Path) -> None:
     )
     assert rc == 0
     assert "already fresh" in notices[0]
+    # The recall context rides along on the short-circuit path too.
+    assert "strategy: GeneralPTNN on ai_deployers" in notices[0]
+    assert f"latest cross-section {FRESH_DAY}: 1 name scored" in notices[0]
 
 
 def test_refresh_skips_cleanly_without_promotion(tmp_path: Path) -> None:
@@ -372,6 +391,49 @@ def test_refresh_crash_notifies_then_raises(tmp_path: Path) -> None:
             notices.append, as_of=AS_OF, db_path=db_path, store_path=store_path, runner=runner
         )
     assert "pred refresh CRASHED" in notices[0]
+
+
+# --- Slack recall context ---------------------------------------------------------
+
+
+def test_describe_promoted_degrades_on_sparse_config(tmp_path: Path) -> None:
+    """A minimal promoted config (no universe, no snapshot conf on disk) must
+    still yield a line — never fail a refresh over missing recall fields."""
+    workspace = tmp_path / "84fb86bd624d48d7bd5282f3c9c27fce"
+    workspace.mkdir()
+    promoted = PromotedStrategy(
+        workspace_path=str(workspace),
+        config={},
+        promoted_at="2026-07-24T00:49:42.988677+00:00",
+    )
+    line = describe_promoted(promoted)
+    assert line == "strategy: workspace 84fb86bd, promoted 2026-07-24"
+
+
+def test_describe_promoted_reads_model_class_from_snapshot(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    snapshot_pred_refresh(workspace)
+    promoted = PromotedStrategy(
+        workspace_path=str(workspace),
+        config={"universe": "ai_deployers", "universe_tickers": ["A", "B"], "topk": 5, "n_drop": 1},
+        promoted_at="2026-07-24T00:00:00+00:00",
+    )
+    line = describe_promoted(promoted)
+    assert "GeneralPTNN on ai_deployers (2 tickers)" in line
+    assert "top-5/drop-1 selection" in line
+    # The SignalRecord kwarg `model: <MODEL>` must not be mistaken for the
+    # model block header.
+    assert "<MODEL>" not in line
+
+
+def test_describe_cross_section_ranks_and_caps_top_names() -> None:
+    import pandas as pd
+
+    scores = pd.Series({"AAPL": 0.1, "MSFT": 0.9, "NVDA": 0.5, "IBM": -0.2, "ACN": 0.3, "WIT": 0.2})
+    line = describe_cross_section(dt.date(2026, 8, 4), scores, top_n=5)
+    assert line.startswith("latest cross-section 2026-08-04: 6 names scored; top 5: ")
+    assert "MSFT +0.900, NVDA +0.500, ACN +0.300, WIT +0.200, AAPL +0.100" in line
+    assert "IBM" not in line
 
 
 # --- pruning --------------------------------------------------------------------
