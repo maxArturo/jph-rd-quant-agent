@@ -53,7 +53,7 @@ from pathlib import Path
 from execution import signal
 from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
 from execution.rebalance import DEFAULT_STORE_PATH, MARKET_TZ, Notify, _safe_notify
-from orchestrator.state import DEFAULT_DB_PATH
+from orchestrator.state import DEFAULT_DB_PATH, PromotedStrategy
 
 SNAPSHOT_CONF_NAME = "conf_pred_refresh.yaml"
 SNAPSHOT_ENV_NAME = "pred_refresh.env"
@@ -303,14 +303,68 @@ def _docker_runner(command: Sequence[str], log_path: Path, timeout_seconds: floa
     return proc.returncode
 
 
-def _already_fresh(workspace: Path, as_of: dt.date, calendar_path: Path) -> bool:
-    """Would the rebalancer's freshness gate pass right now?"""
+def _fresh_cross_section(
+    workspace: Path, as_of: dt.date, calendar_path: Path
+) -> tuple[dt.date, object] | None:
+    """(pred_date, scores) if the rebalancer's freshness gate passes right now."""
     try:
-        pred_date, _ = signal.load_latest_cross_section(signal.locate_pred(workspace))
+        pred_date, scores = signal.load_latest_cross_section(signal.locate_pred(workspace))
         signal.assert_fresh(pred_date, as_of, calendar_path)
     except signal.SignalError:
-        return False
-    return True
+        return None
+    return pred_date, scores
+
+
+def _model_class(conf_path: Path) -> str | None:
+    """The model class the snapshot conf trains (e.g. GeneralPTNN).
+
+    Matches only a bare ``model:`` block header — the SignalRecord kwarg
+    ``model: <MODEL>`` has text after the colon and never matches.
+    """
+    if not conf_path.is_file():
+        return None
+    match = re.search(r"^\s*model:\s*\n\s*class:\s*(\S+)", conf_path.read_text(), re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def describe_promoted(promoted: PromotedStrategy) -> str:
+    """One Slack line of recall: WHICH strategy these predictions belong to.
+
+    Every field is optional — the line degrades gracefully rather than ever
+    failing a refresh over a sparse promoted config.
+    """
+    workspace = Path(promoted.workspace_path).expanduser()
+    config = promoted.config or {}
+    bits: list[str] = []
+    model = _model_class(workspace / SNAPSHOT_CONF_NAME)
+    universe = config.get("universe")
+    tickers = config.get("universe_tickers") or []
+    if universe:
+        scope = f"{model} on {universe}" if model else str(universe)
+        if tickers:
+            scope += f" ({len(tickers)} tickers)"
+        bits.append(scope)
+    elif model:
+        bits.append(model)
+    topk, n_drop = config.get("topk"), config.get("n_drop")
+    if topk is not None and n_drop is not None:
+        bits.append(f"top-{topk}/drop-{n_drop} selection")
+    bits.append(f"workspace {workspace.name[:8]}")
+    if promoted.promoted_at:
+        bits.append(f"promoted {promoted.promoted_at[:10]}")
+    return "strategy: " + ", ".join(bits)
+
+
+def describe_cross_section(pred_date: dt.date, scores: object, top_n: int = 5) -> str:
+    """One Slack line on the scores the rebalancer will trade from."""
+    ordered = scores.sort_values(ascending=False)  # type: ignore[attr-defined]
+    shown = ordered.head(top_n)
+    top = ", ".join(f"{sym} {val:+.3f}" for sym, val in shown.items())
+    count = len(ordered)
+    return (
+        f"latest cross-section {pred_date}: {count} name{'s' if count != 1 else ''} scored; "
+        f"top {len(shown)}: {top}"
+    )
 
 
 def prune_refresh_runs(workspace: Path, keep: int = DEFAULT_KEEP_REFRESH_RUNS) -> int:
@@ -376,8 +430,14 @@ def run_pred_refresh(
                 f"and {SNAPSHOT_ENV_NAME} — re-promote the strategy (promotion snapshots "
                 "them) or run execution.pred_refresh.snapshot_pred_refresh by hand"
             )
-        if _already_fresh(workspace, as_of, calendar_path):
-            message = f"pred refresh ({as_of}): predictions already fresh — nothing to do"
+        fresh = _fresh_cross_section(workspace, as_of, calendar_path)
+        if fresh is not None:
+            pred_date, scores = fresh
+            message = (
+                f"pred refresh ({as_of}): predictions already fresh — nothing to do"
+                f"\n• {describe_promoted(promoted)}"
+                f"\n• {describe_cross_section(pred_date, scores)}"
+            )
             _safe_notify(notify, message)
             print(message)
             return 0
@@ -397,17 +457,19 @@ def run_pred_refresh(
 
         # Self-check: the exact gate the rebalancer will apply.
         pred_path = signal.locate_pred(workspace)
-        pred_date, _ = signal.load_latest_cross_section(pred_path)
+        pred_date, scores = signal.load_latest_cross_section(pred_path)
         signal.assert_fresh(pred_date, as_of, calendar_path)
         pruned = prune_refresh_runs(workspace, keep=keep_runs)
 
         minutes = (time.monotonic() - started) / 60
         message = (
-            f"pred refresh ({as_of}): regenerated promoted-strategy predictions — "
-            f"latest cross-section {pred_date}, {minutes:.0f} min"
+            f"pred refresh ({as_of}): regenerated promoted-strategy predictions "
+            f"for the 08:00 ET paper rebalance — {minutes:.0f} min"
+            f"\n• {describe_promoted(promoted)}"
+            f"\n• {describe_cross_section(pred_date, scores)}"
         )
         if pruned:
-            message += f"; pruned {pruned} old refresh run(s)"
+            message += f"\n• pruned {pruned} old refresh run(s)"
         _safe_notify(notify, message)
         print(message)
         return 0
