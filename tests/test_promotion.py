@@ -44,7 +44,9 @@ from tests.test_slack_app import CHANNEL, make_app
 
 # A workspace conf shaped like the real us_templates ones (jinja placeholders
 # survive in real workspaces; load_strategy_params renders them tolerantly).
+# The market line is what promotion derives the traded universe from.
 WORKSPACE_CONF = """\
+market: &market us_liquid
 port_analysis_config: &port_analysis_config
     strategy:
         class: TopkDropoutStrategy
@@ -58,10 +60,17 @@ port_analysis_config: &port_analysis_config
 PARAMS = StrategyParams(topk=50, n_drop=5)
 
 
-def promotable_artifacts(tmp_path: Path) -> RunArtifacts:
-    """A fixture workspace with metrics AND a parseable strategy conf."""
+def promotable_artifacts(tmp_path: Path, market: str = "us_liquid") -> RunArtifacts:
+    """A fixture workspace with metrics, a parseable strategy conf, AND the
+    store instruments file promotion reads the universe membership from."""
     artifacts = make_artifacts(tmp_path)
-    (Path(artifacts.workspace_path) / "conf.yaml").write_text(WORKSPACE_CONF)
+    conf = WORKSPACE_CONF.replace("market: &market us_liquid", f"market: &market {market}")
+    (Path(artifacts.workspace_path) / "conf.yaml").write_text(conf)
+    instruments = tmp_path / "instruments"
+    instruments.mkdir(exist_ok=True)
+    (instruments / f"{market}.txt").write_text(
+        "AAPL\t2015-01-02\t2026-08-04\nMSFT\t2015-01-02\t2026-08-04\n"
+    )
     return artifacts
 
 
@@ -80,12 +89,14 @@ def make_flow(
     snapshot: Any = None,
 ) -> PromotionFlow:
     """Flow over stub artifacts; snapshot defaults to a no-op (fixture
-    workspaces have no docker logs for the real US-048 snapshot to recover)."""
+    workspaces have no docker logs for the real US-048 snapshot to recover).
+    instruments_dir points at the fixture file promotable_artifacts wrote."""
     return PromotionFlow(
         store,
         recorder=recorder,
         locate=lambda _session: artifacts,
         snapshot=snapshot if snapshot is not None else lambda _workspace: None,
+        instruments_dir=Path(artifacts.workspace_path).parent / "instruments",
     )
 
 
@@ -267,6 +278,61 @@ def test_request_promotion_refuses_when_params_unreadable(
     flow.request_promotion(THREAD, say)
     assert "topk/n_drop" in say.calls[0]["text"]
     assert store.get_promoted_strategy() is None
+
+
+def test_request_promotion_refuses_when_market_unreadable(
+    store: StateStore, tmp_path: Path
+) -> None:
+    # A conf with params but NO market line: the traded universe is unknown,
+    # which is exactly the 2026-08-05 failure — refuse, don't guess.
+    artifacts = make_artifacts(tmp_path)
+    (Path(artifacts.workspace_path) / "conf.yaml").write_text(
+        WORKSPACE_CONF.replace("market: &market us_liquid\n", "")
+    )
+    flow = make_flow(store, artifacts)
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    assert "traded universe is unknown" in say.calls[0]["text"]
+    assert store.get_promoted_strategy() is None
+
+
+def test_promotion_universe_comes_from_conf_not_run_label(
+    tmp_path: Path,
+) -> None:
+    # US-023 gap incident: run labeled 'ai_deployers', workspace backtested
+    # us_liquid. The conf market wins, and both messages call the mismatch out.
+    store = StateStore(tmp_path / "state.sqlite")
+    store.create_run(THREAD, SESSION, universe="ai_deployers", universe_tickers=("ACN", "IBM"))
+    store.update_run_status(THREAD, "completed")
+    flow = make_flow(store, promotable_artifacts(tmp_path))
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    text = say.calls[0]["text"]
+    assert "labeled `ai_deployers`" in text
+    assert "`market: us_liquid`" in text
+
+    flow.confirm_promotion(THREAD, say)
+    assert "labeled `ai_deployers`" in say.calls[1]["text"]
+    promoted = store.get_promoted_strategy()
+    assert promoted is not None
+    assert promoted.config["universe"] == "us_liquid"
+    # Tickers come from the instruments file, NOT the run row's label tickers.
+    assert promoted.config["universe_tickers"] == ["AAPL", "MSFT"]
+
+
+def test_promotion_without_instruments_file_warns_and_pins_none(
+    store: StateStore, tmp_path: Path
+) -> None:
+    artifacts = promotable_artifacts(tmp_path)
+    (tmp_path / "instruments" / "us_liquid.txt").unlink()
+    flow = make_flow(store, artifacts)
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    assert "universe-divergence check will be skipped" in say.calls[0]["text"]
+    flow.confirm_promotion(THREAD, say)
+    promoted = store.get_promoted_strategy()
+    assert promoted is not None
+    assert promoted.config["universe_tickers"] is None
 
 
 # --- confirm flow ---------------------------------------------------------------

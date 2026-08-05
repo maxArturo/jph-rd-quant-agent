@@ -144,10 +144,11 @@
   refuses while a proposal is unconfirmed, then copies name + tickers onto
   the run row (`runs.universe_tickers`, JSON). Artifact layout mirrors
   us_liquid: `~/rdq-data/factor_source/<name>` + `~/rdq-data/templates/<name>`
-  — but rdq-research.service still points the run env at us_liquid, so
-  server-spawned runs don't consume them yet (docs/decisions.md US-023).
-  Keep `MARKET_LINE` in sync with research/us_templates conf yamls — the
-  render hard-fails if the anchor line drifts.
+  — consumed since 2026-08-05 via the upload/resume `universe` field
+  (research/server_ui.py wires the run env per-universe and 400s when the
+  artifacts are missing; rdagent_client sends the field on start_run AND
+  resume). Keep `MARKET_LINE` in sync with research/us_templates conf yamls —
+  the render hard-fails if the anchor line drifts.
 - Schema changes to an EXISTING table cannot ride `CREATE TABLE IF NOT
   EXISTS` (it skips existing DBs): add the column to `_SCHEMA` for fresh DBs
   AND a guarded `ALTER TABLE` in `migrate()` (check `PRAGMA table_info`),
@@ -240,12 +241,17 @@
   US-044), and app.py routes the three
   `run_promote`/`promote_confirm`/`promote_cancel` actions via the
   `PromotionHandler` protocol. Button values carry ONLY the thread_ts — the
-  candidate (workspace, universe, topk/n_drop from the workspace's own conf
-  via `execution.signal.load_strategy_params`, headline metrics) is
-  re-derived from SQLite + run artifacts on every click, so buttons survive
-  restarts with no pending-promotion state. Promotion refuses when the run
-  is running/failed or topk/n_drop can't be read (the rebalancer couldn't
-  reproduce the strategy); metrics merely degrade to n/a. Confirm pins
+  candidate (workspace, topk/n_drop AND universe from the workspace's own
+  conf via `execution.signal.load_strategy_params`/`load_market`, tickers
+  from the store instruments file, headline metrics) is re-derived from
+  SQLite + run artifacts on every click, so buttons survive restarts with no
+  pending-promotion state. The universe is NEVER taken from the run-row
+  label — the conf's market line bounds pred.pkl (2026-08-05 incident); a
+  disagreeing label is called out in every promotion message. Promotion
+  refuses when the run is running/failed or topk/n_drop/market can't be read
+  (the rebalancer couldn't reproduce the strategy); metrics merely degrade
+  to n/a, and a missing instruments file degrades universe_tickers to None
+  (the rebalancer's divergence check skips). Confirm pins
   workspace + config into the single `promoted_strategy` row (replacement is
   announced in-thread), writes a Decision Log row
   (`NotionRecorder.record_decision`), and moves the idea page's Status to

@@ -319,3 +319,199 @@ class TestResumeControl:
         resp = client.post("/control", json={"id": "x/y", "action": "explode"})
         assert resp.status_code == 400
         assert resp.get_json()["error"] == "Only 'stop' action is supported"
+
+
+# --- per-run universe env wiring (US-023 completion) --------------------------
+
+# Keys the extension patches around the task fork.
+UNIVERSE_ENV_KEYS = (
+    "RDQ_UNIVERSE",
+    "RDQ_UNIVERSE_TEMPLATES",
+    "FACTOR_CoSTEER_DATA_FOLDER",
+    "FACTOR_CoSTEER_DATA_FOLDER_DEBUG",
+)
+
+
+class EnvCapturingTask(FakeTask):
+    """FakeTask that snapshots the universe env exactly at fork time."""
+
+    def start(self) -> None:
+        super().start()
+        self.env_at_start = {key: os.environ.get(key) for key in UNIVERSE_ENV_KEYS}
+
+
+def materialize_universe(root: Path, name: str) -> None:
+    """The artifact layout orchestrator/universe.py's materialize() writes."""
+    for sub in ("data_folder", "data_folder_debug"):
+        (root / "factor_source" / name / sub).mkdir(parents=True, exist_ok=True)
+    for sub in ("factor_template", "model_template"):
+        (root / "templates" / name / sub).mkdir(parents=True, exist_ok=True)
+
+
+class TestUniverseRunEnv:
+    def test_default_and_empty_universe_apply_nothing(self) -> None:
+        from research.server_ui import universe_run_env
+
+        assert universe_run_env(None) == {}
+        assert universe_run_env("") == {}
+        assert universe_run_env("us_liquid") == {}
+
+    def test_invalid_name_refused(self) -> None:
+        from research.server_ui import UniverseEnvError, universe_run_env
+
+        for bad in ("../evil", "UPPER", "with space", "0start"):
+            try:
+                universe_run_env(bad)
+            except UniverseEnvError as exc:
+                assert "invalid universe name" in str(exc)
+            else:
+                raise AssertionError(f"{bad!r} was not refused")
+
+    def test_unmaterialized_universe_refused_with_missing_paths(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from research.server_ui import UniverseEnvError, universe_run_env
+
+        monkeypatch.setenv("RDQ_FACTOR_SOURCE_ROOT", str(tmp_path / "factor_source"))
+        monkeypatch.setenv("RDQ_TEMPLATES_ROOT", str(tmp_path / "templates"))
+        try:
+            universe_run_env("ai_deployers")
+        except UniverseEnvError as exc:
+            assert "not materialized" in str(exc)
+            assert "ai_deployers" in str(exc)
+        else:
+            raise AssertionError("unmaterialized universe was not refused")
+
+    def test_materialized_universe_yields_env(self, monkeypatch, tmp_path) -> None:
+        from research.server_ui import universe_run_env
+
+        materialize_universe(tmp_path, "ai_deployers")
+        monkeypatch.setenv("RDQ_FACTOR_SOURCE_ROOT", str(tmp_path / "factor_source"))
+        monkeypatch.setenv("RDQ_TEMPLATES_ROOT", str(tmp_path / "templates"))
+        env = universe_run_env("ai_deployers")
+        assert env == {
+            "RDQ_UNIVERSE": "ai_deployers",
+            "RDQ_UNIVERSE_TEMPLATES": str(tmp_path / "templates" / "ai_deployers"),
+            "FACTOR_CoSTEER_DATA_FOLDER": str(
+                tmp_path / "factor_source" / "ai_deployers" / "data_folder"
+            ),
+            "FACTOR_CoSTEER_DATA_FOLDER_DEBUG": str(
+                tmp_path / "factor_source" / "ai_deployers" / "data_folder_debug"
+            ),
+        }
+
+
+class TestUniverseUpload:
+    def _setup(self, monkeypatch, tmp_path):
+        import rdagent.log.server.app as server_app
+
+        from research.server_ui import install_universe_env
+
+        install_universe_env()
+        install_universe_env()  # idempotent — a double install must not re-wrap
+        traces = tmp_path / "traces"
+        traces.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(server_app, "log_folder_path", traces)
+        monkeypatch.setattr(server_app, "RDAgentTask", EnvCapturingTask)
+        monkeypatch.setattr(server_app, "rdagent_processes", {})
+        materialize_universe(tmp_path, "ai_deployers")
+        monkeypatch.setenv("RDQ_FACTOR_SOURCE_ROOT", str(tmp_path / "factor_source"))
+        monkeypatch.setenv("RDQ_TEMPLATES_ROOT", str(tmp_path / "templates"))
+        return server_app
+
+    def test_upload_with_custom_universe_forks_under_its_env(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        server_app = self._setup(monkeypatch, tmp_path)
+        resp = server_app.app.test_client().post(
+            "/upload",
+            data={"scenario": "Finance Whole Pipeline", "universe": "ai_deployers"},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        (task,) = server_app.rdagent_processes.values()
+        assert isinstance(task, EnvCapturingTask)
+        assert task.started is True
+        assert task.env_at_start["RDQ_UNIVERSE"] == "ai_deployers"
+        assert task.env_at_start["RDQ_UNIVERSE_TEMPLATES"] == str(
+            tmp_path / "templates" / "ai_deployers"
+        )
+        assert task.env_at_start["FACTOR_CoSTEER_DATA_FOLDER"] == str(
+            tmp_path / "factor_source" / "ai_deployers" / "data_folder"
+        )
+        # The overrides never leak past the request.
+        assert os.environ.get("RDQ_UNIVERSE") is None
+        assert os.environ.get("RDQ_UNIVERSE_TEMPLATES") is None
+
+    def test_upload_default_universe_keeps_service_env(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        server_app = self._setup(monkeypatch, tmp_path)
+        resp = server_app.app.test_client().post(
+            "/upload",
+            data={"scenario": "Finance Whole Pipeline", "universe": "us_liquid"},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        (task,) = server_app.rdagent_processes.values()
+        assert isinstance(task, EnvCapturingTask)
+        assert task.env_at_start["RDQ_UNIVERSE"] is None
+        assert task.env_at_start["RDQ_UNIVERSE_TEMPLATES"] is None
+
+    def test_upload_unmaterialized_universe_400s_without_starting(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        server_app = self._setup(monkeypatch, tmp_path)
+        resp = server_app.app.test_client().post(
+            "/upload",
+            data={"scenario": "Finance Whole Pipeline", "universe": "natgas_chain"},
+        )
+        assert resp.status_code == 400
+        assert "not materialized" in resp.get_json()["error"]
+        assert server_app.rdagent_processes == {}
+
+
+class TestUniverseResume:
+    TRACE_ID = "Finance Whole Pipeline/run1"
+
+    def _setup(self, monkeypatch, tmp_path):
+        import rdagent.log.server.app as server_app
+
+        from research.server_ui import install_resume_control, install_universe_env
+
+        install_resume_control()
+        install_universe_env()
+        traces = tmp_path / "traces"
+        trace_dir = traces / self.TRACE_ID
+        step = trace_dir / "__session__" / "0" / "0_propose"
+        step.parent.mkdir(parents=True)
+        step.write_bytes(b"pickled-session")
+        monkeypatch.setattr(server_app, "log_folder_path", traces)
+        monkeypatch.setattr(server_app, "RDAgentTask", EnvCapturingTask)
+        monkeypatch.setattr(server_app, "rdagent_processes", {})
+        materialize_universe(tmp_path, "ai_deployers")
+        monkeypatch.setenv("RDQ_FACTOR_SOURCE_ROOT", str(tmp_path / "factor_source"))
+        monkeypatch.setenv("RDQ_TEMPLATES_ROOT", str(tmp_path / "templates"))
+        return server_app, trace_dir
+
+    def test_resume_forks_under_the_universe_env(self, monkeypatch, tmp_path) -> None:
+        server_app, trace_dir = self._setup(monkeypatch, tmp_path)
+        resp = server_app.app.test_client().post(
+            "/control",
+            json={"id": self.TRACE_ID, "action": "resume", "universe": "ai_deployers"},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        task = server_app.rdagent_processes[str(trace_dir)]
+        assert isinstance(task, EnvCapturingTask)
+        assert task.env_at_start["RDQ_UNIVERSE"] == "ai_deployers"
+        assert os.environ.get("RDQ_UNIVERSE") is None  # restored
+
+    def test_resume_unmaterialized_universe_400s_without_starting(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        server_app, trace_dir = self._setup(monkeypatch, tmp_path)
+        resp = server_app.app.test_client().post(
+            "/control",
+            json={"id": self.TRACE_ID, "action": "resume", "universe": "flex_power"},
+        )
+        assert resp.status_code == 400
+        assert "not materialized" in resp.get_json()["error"]
+        assert server_app.rdagent_processes == {}

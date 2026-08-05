@@ -175,6 +175,11 @@ class RdAgentClient:
         if not directive:
             raise ValueError("directive must be a non-empty string")
         form: dict[str, str] = {"scenario": SCENARIO_FIN_QUANT}
+        # US-023: research/server_ui.py wires the run env (factor source +
+        # templates) to this universe, or 400s when it isn't materialized —
+        # the run never silently starts on the default env.
+        if universe.strip():
+            form["universe"] = universe.strip()
         if loop_n is not None:
             form["loops"] = str(loop_n)
         if all_duration_hours is not None:
@@ -218,6 +223,10 @@ class RdAgentClient:
         payload: dict[str, Any] = {"id": trace_id, "action": "resume"}
         if session_path is not None:
             payload["path"] = str(session_path)
+        if universe.strip():
+            # Same US-023 env wiring as start_run — the resumed process must
+            # fork under the run's universe env, not the service default.
+            payload["universe"] = universe.strip()
         try:
             self._request("POST", "/control", json=payload)
         except RdAgentServerError as exc:

@@ -72,3 +72,13 @@
   through the `rdagent.log.server.app` module at call time so tests can
   monkeypatch them. When re-registering a task for the same trace id, carry
   `messages` over WITHOUT `END` tags or the run reads as already finished.
+- Per-run universes (US-023, `install_universe_env()`): /upload's `universe`
+  form field and resume's `universe` key wire the run to a materialized
+  custom universe. The env (`FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)` +
+  `RDQ_UNIVERSE_TEMPLATES`) is patched into os.environ around the task fork
+  under `_spawn_env_lock` — RDAgentTask.start() forks, so ONLY the child
+  sees it; missing artifacts 400 (never a silent default-env fallback), and
+  `us_liquid`/empty applies nothing. `us_quant.py`'s `_template_root()`
+  reads RDQ_UNIVERSE_TEMPLATES at call time and raises on a set-but-broken
+  override; artifact roots are env-overridable (RDQ_FACTOR_SOURCE_ROOT /
+  RDQ_TEMPLATES_ROOT) for tests.

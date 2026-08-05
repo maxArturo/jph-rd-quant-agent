@@ -47,9 +47,18 @@
   catch-and-continue.
 - Workspace qlib confs keep their jinja placeholders (qrun renders at run
   time) — parse them by rendering with `jinja2.Undefined` first
-  (`load_strategy_params` is the template). topk/n_drop live at
+  (`_rendered_confs` in signal.py). topk/n_drop live at
   `port_analysis_config.strategy.kwargs`; all conf*.yaml in a workspace must
-  agree or the loader refuses.
+  agree or the loader refuses. `load_market` reads the top-level `market:`
+  key the same way (it is what bounds pred.pkl — promotion derives the
+  traded universe from it, 2026-08-05 incident) but SKIPS
+  conf_pred_refresh.yaml (`PRED_REFRESH_CONF_NAME`): the snapshot's market
+  may be operator-pinned to freeze the traded universe.
+- `universe_divergence_warnings` (rebalance.py): target holdings outside the
+  pinned `universe_tickers` become WARNING lines in the daily summary on
+  every path that posts one. Advisory ONLY — never turn it into an abort;
+  pred.pkl is the backtested ground truth, divergence means the promotion
+  recorded the wrong universe. Empty/absent tickers skip the check.
 - `execution/order_gate.py` is PURE — no HTTP, no state. The caller passes a
   fresh `Account`/`Position` snapshot plus today's order count and gets a
   `GateResult` back; US-034 should call `result.raise_for_rejections()` to

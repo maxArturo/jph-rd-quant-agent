@@ -58,6 +58,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from execution.account_log import AccountSnapshotLog
@@ -495,6 +496,32 @@ def _safe_notify(notify: Notify, text: str) -> None:
         print(f"WARNING: Slack notification failed: {exc}", file=sys.stderr)
 
 
+def universe_divergence_warnings(
+    config: Mapping[str, Any], target_weights: Mapping[str, float]
+) -> list[str]:
+    """WARNING lines when target holdings fall outside the pinned universe.
+
+    An empty/absent ``universe_tickers`` skips the check (older promotions,
+    or an unreadable instruments file at promote time). Purely advisory —
+    the caller must never abort on it: pred.pkl is the backtested ground
+    truth; a divergence means the promotion RECORDED the wrong universe.
+    """
+    tickers = config.get("universe_tickers")
+    if not tickers:
+        return []
+    allowed = {str(t).strip().upper() for t in tickers}
+    outside = sorted(s for s in target_weights if s.strip().upper() not in allowed)
+    if not outside:
+        return []
+    shown = ", ".join(outside[:15]) + (", …" if len(outside) > 15 else "")
+    return [
+        f"universe_divergence: {len(outside)}/{len(target_weights)} target holding(s)"
+        f" outside the promoted universe '{config.get('universe')}' ({shown}) —"
+        " predictions come from a different market than the promotion recorded;"
+        " re-promote to fix the pinned universe"
+    ]
+
+
 def run_rebalance(
     client: AlpacaClient,
     notify: Notify,
@@ -544,6 +571,13 @@ def run_rebalance(
             calendar_path=store_path.expanduser() / "calendars" / "day.txt",
         )
 
+        # 4b. Universe sanity: targets outside the promoted universe_tickers
+        # mean pred.pkl was generated from a different market than the
+        # promotion recorded (the 2026-08-05 ai_deployers incident). Warn,
+        # never abort — pred.pkl IS the backtested strategy; only the pinned
+        # label diverged.
+        universe_warnings = universe_divergence_warnings(promoted.config, book.weights)
+
         # 5. Diff: targets vs positions -> marketable-limit order list.
         prices = build_reference_prices(
             store_path, set(book.weights) | {p.symbol for p in positions}, positions
@@ -565,7 +599,7 @@ def run_rebalance(
             diff = dataclasses.replace(
                 diff, orders=kept_orders, skipped=[*diff.skipped, *deferred]
             )
-        deferred_warnings = [skip.message for skip in deferred]
+        deferred_warnings = [*universe_warnings, *(skip.message for skip in deferred)]
 
         # 6. Gate: any rejected order aborts the whole batch. The rejection
         # notice is the day's summary (equity + every violated limit).
@@ -584,7 +618,8 @@ def run_rebalance(
                 rejections=rejection_messages,
                 no_trade_note="order gate rejected the batch — nothing submitted",
                 breaker_state=breaker_state_line(breaker),
-                warnings=_record_snapshot(
+                warnings=universe_warnings
+                + _record_snapshot(
                     snapshots,
                     client,
                     as_of,
@@ -620,7 +655,8 @@ def run_rebalance(
                 rejections=[trip.message],
                 no_trade_note="circuit breaker tripped — nothing submitted",
                 breaker_state=breaker_state_line(breaker),
-                warnings=_record_snapshot(
+                warnings=universe_warnings
+                + _record_snapshot(
                     snapshots, client, as_of, account, positions, "breaker_tripped",
                     breaker, note=trip.message,
                 ),

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from execution import pred_refresh, signal
+from execution.rebalance import DEFAULT_STORE_PATH
 from orchestrator import summary
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, locate_artifacts
@@ -70,7 +71,16 @@ class PromotionError(RuntimeError):
 
 @dataclass(frozen=True)
 class PromotionCandidate:
-    """Everything the confirmation restates and the promotion pins."""
+    """Everything the confirmation restates and the promotion pins.
+
+    ``universe`` is derived from the workspace conf's ``market:`` line — the
+    ground truth that bounds pred.pkl — with the same rigor as topk/n_drop
+    (2026-08-05 incident: a run labeled 'ai_deployers' had backtested
+    us_liquid all along). ``universe_label`` keeps the run row's label so the
+    confirmation can call out a mismatch; ``universe_tickers`` come from the
+    store's instruments file for the derived market (None when unreadable —
+    the rebalancer's divergence check skips then).
+    """
 
     run: Run
     workspace: Path
@@ -78,11 +88,17 @@ class PromotionCandidate:
     params: signal.StrategyParams
     metrics: dict[str, float]
     sharpe: float | None
+    universe_label: str | None = None
+    universe_tickers: tuple[str, ...] | None = None
+
+    @property
+    def label_mismatch(self) -> bool:
+        return self.universe_label is not None and self.universe_label != self.universe
 
     @property
     def config(self) -> dict[str, Any]:
         """The strategy config pinned into promoted_strategy (what trades)."""
-        tickers = self.run.universe_tickers
+        tickers = self.universe_tickers
         return {
             "universe": self.universe,
             "universe_tickers": None if tickers is None else list(tickers),
@@ -91,6 +107,14 @@ class PromotionCandidate:
             "thread_ts": self.run.thread_ts,
             "session_path": self.run.session_path,
         }
+
+
+def _mismatch_warning(candidate: PromotionCandidate) -> str:
+    return (
+        f":warning: The run was labeled `{candidate.universe_label}`, but the workspace's"
+        f" backtest actually ran `market: {candidate.universe}` — the universe wiring gap"
+        f" (US-023). What trades is `{candidate.universe}`."
+    )
 
 
 def _section(text: str) -> dict[str, Any]:
@@ -127,15 +151,25 @@ def promotion_offer_blocks(thread_ts: str, summary_text: str) -> list[dict[str, 
 
 def confirmation_text(candidate: PromotionCandidate, previous: PromotedStrategy | None) -> str:
     """Restate exactly what a Confirm click will make the rebalancer trade."""
+    universe_line = f"• *Universe:* `{candidate.universe}`"
+    if candidate.universe_tickers is not None:
+        universe_line += f" ({len(candidate.universe_tickers)} tickers)"
     lines = [
         ":rocket: *Confirm promotion to paper trading*",
         "The nightly rebalancer will trade this strategy:",
-        f"• *Universe:* `{candidate.universe}`",
+        universe_line,
         f"• *Strategy:* TopkDropoutStrategy — topk={candidate.params.topk},"
         f" n_drop={candidate.params.n_drop}",
         f"• *Workspace:* `{candidate.workspace}`",
         summary.format_summary(candidate.metrics, candidate.sharpe),
     ]
+    if candidate.label_mismatch:
+        lines.insert(1, _mismatch_warning(candidate))
+    if candidate.universe_tickers is None:
+        lines.append(
+            f":warning: No instruments file found for `{candidate.universe}` — the"
+            " rebalancer's universe-divergence check will be skipped for this strategy."
+        )
     if previous is not None:
         lines.append(
             f":warning: This replaces the currently promoted strategy"
@@ -178,12 +212,20 @@ class PromotionFlow:
         locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
         load_params: Callable[[Path], signal.StrategyParams] = signal.load_strategy_params,
         snapshot: Callable[[Path], object] = pred_refresh.snapshot_pred_refresh,
+        load_market: Callable[[Path], str] = signal.load_market,
+        instruments_dir: Path | None = None,
     ) -> None:
         self._store = store
         self._recorder = recorder
         self._locate = locate
         self._load_params = load_params
         self._snapshot = snapshot
+        self._load_market = load_market
+        self._instruments_dir = (
+            instruments_dir
+            if instruments_dir is not None
+            else DEFAULT_STORE_PATH.expanduser() / "instruments"
+        )
 
     # -- button handlers ------------------------------------------------------
 
@@ -217,6 +259,8 @@ class PromotionFlow:
             f"• Workspace `{promoted.workspace_path}`",
             "The nightly rebalancer will trade this strategy from its next run.",
         ]
+        if candidate.label_mismatch:
+            lines.append(_mismatch_warning(candidate))
         if previous is not None:
             lines.append(
                 f":arrows_counterclockwise: Replaced the previously promoted strategy"
@@ -283,6 +327,17 @@ class PromotionFlow:
                 f" config ({exc}) — refusing to promote a strategy the rebalancer"
                 f" could not reproduce"
             ) from exc
+        # The universe gets the same rigor as topk/n_drop: the conf's market
+        # line bounds pred.pkl, so it is what actually trades — never the
+        # run-row label (2026-08-05 ai_deployers incident).
+        try:
+            market = self._load_market(Path(artifacts.workspace_path))
+        except signal.SignalError as exc:
+            raise PromotionError(
+                f"cannot determine the universe the workspace backtested"
+                f" (no readable market line: {exc}) — refusing to promote a"
+                f" strategy whose traded universe is unknown"
+            ) from exc
         # Metrics degrade to n/a rather than blocking: the operator already saw
         # (and is acting on) the completion summary built from the same files.
         metrics: dict[str, float] = {}
@@ -299,11 +354,32 @@ class PromotionFlow:
         return PromotionCandidate(
             run=run,
             workspace=Path(artifacts.workspace_path),
-            universe=run.universe or FALLBACK_UNIVERSE,
+            universe=market,
             params=params,
             metrics=metrics,
             sharpe=sharpe,
+            universe_label=run.universe,
+            universe_tickers=self._universe_tickers(market),
         )
+
+    def _universe_tickers(self, market: str) -> tuple[str, ...] | None:
+        """Symbols in the store's instruments file for *market*, or None.
+
+        Read at promote time so the pinned list is the membership the operator
+        confirmed; unreadable file degrades to None (the confirmation warns,
+        and the rebalancer's divergence check skips).
+        """
+        path = self._instruments_dir / f"{market}.txt"
+        try:
+            symbols = {
+                line.split("\t")[0].strip().upper()
+                for line in path.read_text().splitlines()
+                if line.strip()
+            }
+        except OSError as exc:
+            logger.warning("cannot read instruments file %s: %s", path, exc)
+            return None
+        return tuple(sorted(symbols)) if symbols else None
 
     def _decision_title(self, candidate: PromotionCandidate) -> str:
         directive = self._store.get_directive(candidate.run.thread_ts)
@@ -320,6 +396,12 @@ class PromotionFlow:
             f" n_drop={candidate.params.n_drop}",
             f"Thread TS: {candidate.run.thread_ts}",
         ]
+        if candidate.label_mismatch:
+            lines.insert(
+                2,
+                f"Universe label on the run row was '{candidate.universe_label}'"
+                " (workspace conf market wins)",
+            )
         for label, keys, _style in summary.METRIC_SPECS:
             value = next((candidate.metrics[k] for k in keys if k in candidate.metrics), None)
             if value is not None:

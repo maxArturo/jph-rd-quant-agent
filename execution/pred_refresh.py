@@ -55,7 +55,9 @@ from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
 from execution.rebalance import DEFAULT_STORE_PATH, MARKET_TZ, Notify, _safe_notify
 from orchestrator.state import DEFAULT_DB_PATH, PromotedStrategy
 
-SNAPSHOT_CONF_NAME = "conf_pred_refresh.yaml"
+# Single source of truth lives in signal.py: load_market must skip this conf
+# (its market may be operator-pinned to freeze the traded universe).
+SNAPSHOT_CONF_NAME = signal.PRED_REFRESH_CONF_NAME
 SNAPSHOT_ENV_NAME = "pred_refresh.env"
 
 DEFAULT_IMAGE = "local_qlib:latest"
