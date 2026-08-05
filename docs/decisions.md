@@ -817,3 +817,46 @@ First live run 2026-07-20 (Monday, supervised via `systemctl --user start`):
 see the run log + Slack notice. Milestone to watch: 5 consecutive trading
 days data refresh → pred refresh → rebalance all green with zero manual
 steps.
+
+## 2026-08-05 — mislabeled-universe incident: US-023 wiring completed, promotion derives the universe from the conf
+
+**Incident.** The 2026-07-24 promotion (workspace 84fb86bd) recorded universe
+"ai_deployers", but the workspace's confs ran `market: us_liquid` — the US-023
+deferral meant server-spawned runs never consumed a custom universe's
+templates, and promotion pinned the run-row *label* while deriving topk/n_drop
+from the conf. The paper book traded the us_liquid 30 mega-caps for 12 days
+while every record said ai_deployers. Found when regenerating us_liquid
+(30 → 581 names, S&P 500 backfill) would have silently changed the live
+strategy; the promoted refresh conf was pinned to a frozen
+`us_liquid_promoted_30` instruments snapshot the same day.
+
+**Three fixes:**
+
+1. **Promotion provenance** (orchestrator/promotion.py): the candidate's
+   universe comes from `execution.signal.load_market` (the conf `market:`
+   line — same rigor as topk/n_drop; unreadable market refuses the
+   promotion), its tickers from the store instruments file at promote time,
+   and a run-row label that disagrees is called out in the confirmation, the
+   promoted notice, and the Decision Log. `load_market` skips
+   conf_pred_refresh.yaml (an operator may pin its market to freeze the
+   traded universe — see above).
+2. **Rebalancer divergence check** (execution/rebalance.py
+   `universe_divergence_warnings`): target holdings outside the pinned
+   `universe_tickers` add WARNING lines to the daily summary. Advisory only,
+   never an abort — pred.pkl is the backtested ground truth; divergence means
+   the promotion recorded the wrong universe.
+3. **US-023 completed** (research/server_ui.py `install_universe_env`):
+   `/upload` takes a `universe` form field and resume a `universe` key;
+   a non-default universe must be materialized (factor source + rendered
+   templates) or the request 400s — never a silent fallback to the default
+   env. The per-universe env (`FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)` +
+   `RDQ_UNIVERSE_TEMPLATES`, consumed at call time by research/us_quant.py's
+   template repoint) is patched around the task fork under a lock, so
+   concurrent spawns never cross-contaminate. Roots are env-overridable
+   (`RDQ_FACTOR_SOURCE_ROOT`, `RDQ_TEMPLATES_ROOT`). `us_liquid` (or empty)
+   applies no overrides — it stays the built-in broad reference universe the
+   service env already points at.
+
+The rdagent_client sends the universe on start_run and resume verbatim;
+conversation.py already passed it. Runs started before this change resume
+under the service default env, exactly as they started.

@@ -192,9 +192,22 @@ def test_start_run_uploads_scenario_and_passthrough(stub: StubServerUi) -> None:
         "Find momentum factors", "us_liquid", loop_n=2, all_duration_hours=4
     )
     assert handle.trace_id == "Finance Whole Pipeline/stub-run"
+    # universe rides the upload form (US-023): research/server_ui.py wires the
+    # run env to it (or 400s when the universe isn't materialized).
     assert stub.uploads == [
-        {"scenario": "Finance Whole Pipeline", "loops": "2", "all_duration": "4"}
+        {
+            "scenario": "Finance Whole Pipeline",
+            "universe": "us_liquid",
+            "loops": "2",
+            "all_duration": "4",
+        }
     ]
+
+
+def test_start_run_sends_custom_universe_on_the_form(stub: StubServerUi) -> None:
+    client = make_client(stub)
+    client.start_run("Find momentum factors", "ai_deployers")
+    assert stub.uploads[-1]["universe"] == "ai_deployers"
 
 
 def test_start_run_seeds_directive_then_base_features(stub: StubServerUi) -> None:
@@ -333,6 +346,19 @@ def test_resume_with_directive_reseeds_init_interactions(resume_stub: StubServer
     assert "Find momentum factors" in seeded[2]["user_instruction"]
     assert "us_liquid" in seeded[2]["user_instruction"]
     assert seeded[3] == FEATURES
+
+
+def test_resume_sends_universe_in_the_control_payload(
+    resume_stub: StubServerUi,
+) -> None:
+    client = make_client(resume_stub)
+    handle = start(resume_stub, client)
+    client.resume(handle.trace_id, universe="ai_deployers")
+    assert resume_stub.controls[-1] == {
+        "id": handle.trace_id,
+        "action": "resume",
+        "universe": "ai_deployers",
+    }
 
 
 def test_resume_failure_does_not_seed(resume_stub: StubServerUi) -> None:

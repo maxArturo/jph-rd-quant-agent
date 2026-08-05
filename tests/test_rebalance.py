@@ -29,6 +29,7 @@ from execution.rebalance import (
     poll_fills,
     run_rebalance,
     submitted_market_date,
+    universe_divergence_warnings,
 )
 from orchestrator.notion_client import NotionClient
 from orchestrator.state import StateStore
@@ -750,6 +751,56 @@ def test_build_reference_prices_prefers_store_over_snapshot(tmp_path: Path) -> N
     ]
     prices = build_reference_prices(tmp_path, ["AAPL"], held)
     assert prices == {"AAPL": pytest.approx(200.0)}
+
+
+def test_universe_divergence_warnings_pure() -> None:
+    weights = {"AAPL": 0.5, "MSFT": 0.5}
+    # No pinned tickers (older promotions / unreadable instruments file at
+    # promote time): the check skips entirely.
+    assert universe_divergence_warnings({"universe": "u"}, weights) == []
+    assert universe_divergence_warnings({"universe_tickers": None}, weights) == []
+    # Every target inside the pinned universe: silent.
+    ok = {"universe": "u", "universe_tickers": ["AAPL", "MSFT", "NVDA"]}
+    assert universe_divergence_warnings(ok, weights) == []
+    # A target outside warns, naming the symbols and the pinned universe.
+    (warning,) = universe_divergence_warnings(
+        {"universe": "ai_deployers", "universe_tickers": ["AAPL"]}, weights
+    )
+    assert warning.startswith("universe_divergence: 1/2")
+    assert "MSFT" in warning and "ai_deployers" in warning
+
+
+def test_run_with_divergent_universe_warns_but_trades(env: SimpleNamespace) -> None:
+    # Pinned tickers say AAPL-only but pred.pkl selects AAPL+MSFT (the
+    # 2026-08-05 mislabeled-promotion incident): the run trades normally and
+    # the daily summary carries the WARNING line — advisory, never an abort.
+    StateStore(env.db_path).set_promoted_strategy(
+        str(env.workspace),
+        {"universe": "ai_deployers", "universe_tickers": ["AAPL"], "topk": 2, "n_drop": 1},
+    )
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+    summary = notes[-1]
+    assert "orders placed: 2" in summary
+    assert "WARNING: universe_divergence: 1/2" in summary
+    assert "MSFT" in summary
+
+
+def test_run_within_universe_has_no_divergence_warning(env: SimpleNamespace) -> None:
+    StateStore(env.db_path).set_promoted_strategy(
+        str(env.workspace),
+        {
+            "universe": "us_liquid",
+            "universe_tickers": ["AAPL", "MSFT", "NVDA"],
+            "topk": 2,
+            "n_drop": 1,
+        },
+    )
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run(env, broker, notes) == 0
+    assert "universe_divergence" not in notes[-1]
 
 
 def test_strategy_params_from_promoted_config() -> None:

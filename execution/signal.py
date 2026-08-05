@@ -62,13 +62,18 @@ class TargetBook:
     pred_path: Path
 
 
-def load_strategy_params(workspace: Path, config_name: str | None = None) -> StrategyParams:
-    """Read topk/n_drop from the workspace's qlib conf yaml(s).
+# The pred-refresh snapshot conf (execution/pred_refresh.py SNAPSHOT_CONF_NAME).
+# load_market skips it: it is a derived artifact whose market may be pinned by
+# an operator to freeze the traded universe (2026-08-05), so it must not veto
+# the market the run's own confs agree on.
+PRED_REFRESH_CONF_NAME = "conf_pred_refresh.yaml"
+
+
+def _rendered_confs(workspace: Path, config_name: str | None) -> list[tuple[str, Any]]:
+    """(name, parsed-yaml) for the workspace's conf file(s).
 
     Workspace confs keep their jinja placeholders (qrun renders them at run
-    time), so render with tolerant undefineds before yaml-parsing. With no
-    explicit config_name every conf*.yaml is scanned; they must agree —
-    disagreement means we cannot know which strategy the backtest ran.
+    time), so render with tolerant undefineds before yaml-parsing.
     """
     import yaml
     from jinja2 import Environment, Undefined
@@ -84,26 +89,61 @@ def load_strategy_params(workspace: Path, config_name: str | None = None) -> Str
             raise SignalError(f"no conf*.yaml found in workspace {workspace}")
 
     env = Environment(undefined=Undefined, autoescape=False)
-    found: dict[str, tuple[int, int]] = {}
+    rendered: list[tuple[str, Any]] = []
     for conf in conf_files:
         try:
-            rendered = env.from_string(conf.read_text()).render()
-            data = yaml.safe_load(rendered)
+            data = yaml.safe_load(env.from_string(conf.read_text()).render())
         except Exception as exc:  # jinja/yaml errors both mean "unreadable conf"
             raise SignalError(f"cannot parse {conf}: {exc}") from exc
+        rendered.append((conf.name, data))
+    return rendered
+
+
+def load_strategy_params(workspace: Path, config_name: str | None = None) -> StrategyParams:
+    """Read topk/n_drop from the workspace's qlib conf yaml(s).
+
+    With no explicit config_name every conf*.yaml is scanned; they must
+    agree — disagreement means we cannot know which strategy the backtest ran.
+    """
+    found: dict[str, tuple[int, int]] = {}
+    for name, data in _rendered_confs(workspace, config_name):
         params = _find_topk_dropout_kwargs(data)
         if params is not None:
-            found[conf.name] = params
+            found[name] = params
 
     if not found:
-        raise SignalError(
-            f"no TopkDropoutStrategy config found in {[c.name for c in conf_files]} "
-            f"under {workspace}"
-        )
+        raise SignalError(f"no TopkDropoutStrategy config found in any conf under {workspace}")
     if len(set(found.values())) > 1:
         raise SignalError(f"conflicting TopkDropoutStrategy params across configs: {found}")
     topk, n_drop = next(iter(found.values()))
     return StrategyParams(topk=topk, n_drop=n_drop)
+
+
+def load_market(workspace: Path, config_name: str | None = None) -> str:
+    """Read the qlib market (instruments universe) the workspace backtests on.
+
+    The conf's ``market:`` line is what actually bounds pred.pkl's
+    cross-section, so it — not any run-row label — is the universe a promotion
+    must record (the 2026-08-05 incident: a run labeled 'ai_deployers' had
+    backtested ``market: us_liquid`` all along). All confs must agree, like
+    load_strategy_params; the pred-refresh snapshot conf is skipped (see
+    PRED_REFRESH_CONF_NAME).
+    """
+    found: dict[str, str] = {}
+    for name, data in _rendered_confs(workspace, config_name):
+        if config_name is None and name == PRED_REFRESH_CONF_NAME:
+            continue
+        market = data.get("market") if isinstance(data, dict) else None
+        if market is None:
+            continue
+        if not isinstance(market, str) or not market.strip():
+            raise SignalError(f"non-string market in {name}: {market!r}")
+        found[name] = market.strip()
+    if not found:
+        raise SignalError(f"no market key in any conf under {workspace}")
+    if len(set(found.values())) > 1:
+        raise SignalError(f"conflicting markets across configs: {found}")
+    return next(iter(found.values()))
 
 
 def _find_topk_dropout_kwargs(node: Any) -> tuple[int, int] | None:

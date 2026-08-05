@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from execution.signal import (
+    PRED_REFRESH_CONF_NAME,
     SignalError,
     StrategyParams,
     assert_fresh,
@@ -19,6 +20,7 @@ from execution.signal import (
     extract_targets,
     last_trading_day,
     load_latest_cross_section,
+    load_market,
     load_strategy_params,
     locate_pred,
     main,
@@ -64,16 +66,20 @@ def write_calendar(path: Path, days: list[str]) -> Path:
     return path
 
 
-def write_conf(workspace: Path, name: str, topk: int, n_drop: int) -> Path:
+def write_conf(
+    workspace: Path, name: str, topk: int, n_drop: int, market: str = "us_liquid"
+) -> Path:
     """A minimal workspace conf with the jinja placeholders real confs keep."""
     workspace.mkdir(parents=True, exist_ok=True)
     text = f"""\
 qlib_init:
     provider_uri: "~/.qlib/qlib_data/us_data"
     region: us
+market: &market {market}
 data_handler_config: &data_handler_config
     start_time: {{{{ train_start | default("2008-01-01", true) }}}}
     end_time: {{{{ test_end | default("null", true) }}}}
+    instruments: *market
 port_analysis_config: &port_analysis_config
     strategy:
         class: TopkDropoutStrategy
@@ -282,6 +288,47 @@ def test_load_strategy_params_explicit_config_name(tmp_path: Path) -> None:
     write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5)
     write_conf(tmp_path, "conf_b.yaml", topk=30, n_drop=3)
     assert load_strategy_params(tmp_path, "conf_b.yaml") == StrategyParams(topk=30, n_drop=3)
+
+
+# --- load_market (US-023/2026-08-05: the conf's market IS the traded universe) --
+
+
+def test_load_market_reads_the_conf_market(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_baseline.yaml", topk=50, n_drop=5, market="ai_deployers")
+    assert load_market(tmp_path) == "ai_deployers"
+
+
+def test_load_market_from_real_us_templates() -> None:
+    assert load_market(US_TEMPLATES / "factor_template") == "us_liquid"
+
+
+def test_load_market_conflicting_confs_rejected(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5, market="us_liquid")
+    write_conf(tmp_path, "conf_b.yaml", topk=50, n_drop=5, market="ai_deployers")
+    with pytest.raises(SignalError, match="conflicting markets"):
+        load_market(tmp_path)
+
+
+def test_load_market_missing_market_rejected(tmp_path: Path) -> None:
+    conf = write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5)
+    text = conf.read_text().replace("market: &market us_liquid\n", "")
+    conf.write_text(text.replace("    instruments: *market\n", ""))
+    with pytest.raises(SignalError, match="no market key"):
+        load_market(tmp_path)
+
+
+def test_load_market_skips_pred_refresh_snapshot(tmp_path: Path) -> None:
+    # The refresh snapshot's market may be operator-pinned (frozen universe);
+    # it must not veto the market the run's own confs agree on.
+    write_conf(tmp_path, "conf_baseline.yaml", topk=50, n_drop=5, market="us_liquid")
+    write_conf(tmp_path, PRED_REFRESH_CONF_NAME, topk=50, n_drop=5, market="us_liquid_frozen")
+    assert load_market(tmp_path) == "us_liquid"
+
+
+def test_load_market_explicit_config_name_reads_that_conf(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5, market="us_liquid")
+    write_conf(tmp_path, PRED_REFRESH_CONF_NAME, topk=50, n_drop=5, market="us_liquid_frozen")
+    assert load_market(tmp_path, PRED_REFRESH_CONF_NAME) == "us_liquid_frozen"
 
 
 # ------------------------------------------------------- pred loading

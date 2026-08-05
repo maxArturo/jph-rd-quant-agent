@@ -171,3 +171,44 @@ class TestRepointHelper:
 
         plain = SimpleNamespace(based_experiments=[object()])
         assert repoint_us_templates(plain) is plain
+
+    def test_env_override_repoints_to_universe_templates(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """RDQ_UNIVERSE_TEMPLATES (US-023) swaps in a universe's rendered copy —
+        read at call time, so the forked run's env drives every injection."""
+        import shutil
+
+        from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
+
+        from research.us_quant import TEMPLATES_ENV_VAR, US_TEMPLATES, repoint_us_templates
+
+        custom = tmp_path / "templates" / "myuni"
+        for folder in REPO_ROOT_TEMPLATES:
+            shutil.copytree(US_TEMPLATES / folder, custom / folder)
+        for conf in (custom / "model_template").glob("conf_*.yaml"):
+            conf.write_text(
+                conf.read_text().replace(
+                    "market: &market us_liquid", "market: &market myuni"
+                )
+            )
+        monkeypatch.setenv(TEMPLATES_ENV_VAR, str(custom))
+
+        exp = repoint_us_templates(QlibModelExperiment(sub_tasks=[]))
+        assert exp.experiment_workspace is not None
+        conf = exp.experiment_workspace.file_dict["conf_baseline_factors_model.yaml"]
+        assert "market: &market myuni" in conf
+        assert "us_liquid" not in conf
+
+    def test_env_override_with_missing_folders_raises(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A set-but-broken override must fail loudly, never fall back to the
+        # default templates (a run on the wrong universe is the worse outcome).
+        from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
+
+        from research.us_quant import TEMPLATES_ENV_VAR, repoint_us_templates
+
+        monkeypatch.setenv(TEMPLATES_ENV_VAR, str(tmp_path / "nope"))
+        with pytest.raises(FileNotFoundError, match="re-confirm the universe"):
+            repoint_us_templates(QlibModelExperiment(sub_tasks=[]))

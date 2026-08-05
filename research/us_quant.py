@@ -19,6 +19,7 @@ workspace ``file_dict`` and on disk). ops/run_us_quant.sh wires these env vars.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -42,6 +43,33 @@ US_TEMPLATES = Path(__file__).resolve().parent / "us_templates"
 US_FACTOR_TEMPLATE = US_TEMPLATES / "factor_template"
 US_MODEL_TEMPLATE = US_TEMPLATES / "model_template"
 
+# Per-run custom universe override (US-023): research/server_ui.py sets this
+# to the universe's rendered template copy (~/rdq-data/templates/<name>)
+# before forking the run, so every experiment backtests `market: <name>`
+# instead of the us_liquid default.
+TEMPLATES_ENV_VAR = "RDQ_UNIVERSE_TEMPLATES"
+
+
+def _template_root() -> Path:
+    """The template folder for this run: env override or the us_liquid default.
+
+    Read at call time (not import) — the fork inherits the env, and tests
+    monkeypatch it. A set-but-broken override raises instead of silently
+    falling back: a run on the wrong universe is worse than a dead run
+    (2026-08-05 incident).
+    """
+    override = os.environ.get(TEMPLATES_ENV_VAR, "").strip()
+    if not override:
+        return US_TEMPLATES
+    root = Path(override).expanduser()
+    missing = [sub for sub in ("factor_template", "model_template") if not (root / sub).is_dir()]
+    if missing:
+        raise FileNotFoundError(
+            f"{TEMPLATES_ENV_VAR}={root} lacks {', '.join(missing)} — re-confirm the"
+            " universe so orchestrator/universe.py re-renders its template copy"
+        )
+    return root
+
 # NOTE: components' FactorExperiment/ModelExperiment are bare aliases of
 # Experiment (no distinct type), so template choice must match the concrete
 # Qlib classes. quant_experiment.py defines its own same-named pair — cover both.
@@ -59,9 +87,9 @@ ExpT = TypeVar("ExpT")
 
 def _template_for(exp: object) -> Path | None:
     if isinstance(exp, _FACTOR_EXPERIMENT_CLASSES):
-        return US_FACTOR_TEMPLATE
+        return _template_root() / "factor_template"
     if isinstance(exp, _MODEL_EXPERIMENT_CLASSES):
-        return US_MODEL_TEMPLATE
+        return _template_root() / "model_template"
     return None
 
 
