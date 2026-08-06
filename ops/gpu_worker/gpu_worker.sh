@@ -14,6 +14,8 @@
 #   gpu_worker.sh tunnel                # (re)start reverse tunnel + write proxy env
 #   gpu_worker.sh check                 # remote run_us_quant.sh --check (RDQ_LAUNCHER=direct)
 #   gpu_worker.sh run [--loop_n N] [--all_duration DUR]   # launch in remote tmux
+#   gpu_worker.sh snapshot              # bake worker into rdq-gpu-base-* image (fast boots)
+#   gpu_worker.sh ssh <cmd...>          # arbitrary remote command (worker SSH opts)
 #   gpu_worker.sh status                # droplet / tunnel / run / GPU utilization
 #   gpu_worker.sh fetch                 # rsync results back under the state dir
 #   gpu_worker.sh destroy [--force]     # delete the droplet (BILLING STOPS HERE)
@@ -39,7 +41,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 RDQ_GPU_SIZE="${RDQ_GPU_SIZE:-gpu-4000adax1-20gb}"
 RDQ_GPU_REGION="${RDQ_GPU_REGION:-tor1}"
-RDQ_GPU_IMAGE="${RDQ_GPU_IMAGE:-gpu-h100x1-base}"
+# Empty = auto: newest rdq-gpu-base-* snapshot if one exists (fast boot),
+# else DO's AI/ML-ready base image. Set explicitly to force either.
+RDQ_GPU_IMAGE="${RDQ_GPU_IMAGE:-}"
+DEFAULT_GPU_IMAGE="gpu-h100x1-base"
 RDQ_GPU_NAME="${RDQ_GPU_NAME:-rdq-gpu-worker}"
 STATE_DIR="${RDQ_GPU_STATE_DIR:-${HOME}/rdq-runs/gpu_worker}"
 SSH_KEY="${RDQ_GPU_SSH_KEY:-${HOME}/.ssh/rdq_gpu_worker}"
@@ -55,7 +60,7 @@ RUN_LOG="/root/rdq-runs/gpu-run.log"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 usage() {
-  sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -173,13 +178,23 @@ cmd_provision() {
 
   require_size_in_region
 
+  local image="${RDQ_GPU_IMAGE}"
+  if [[ -z "${image}" ]]; then
+    image="$(latest_snapshot_id)"
+    if [[ -n "${image}" ]]; then
+      note "booting from base snapshot image ${image} (bootstrap will be a quick delta sync)"
+    else
+      image="${DEFAULT_GPU_IMAGE}"
+    fi
+  fi
+
   local fp
   fp="$(register_ssh_key)"
 
-  note "creating ${RDQ_GPU_SIZE} in ${RDQ_GPU_REGION} (image ${RDQ_GPU_IMAGE}) — billing starts now"
+  note "creating ${RDQ_GPU_SIZE} in ${RDQ_GPU_REGION} (image ${image}) — billing starts now"
   local droplet_id
   droplet_id="$(doctl compute droplet create "${RDQ_GPU_NAME}" \
-    --size "${RDQ_GPU_SIZE}" --region "${RDQ_GPU_REGION}" --image "${RDQ_GPU_IMAGE}" \
+    --size "${RDQ_GPU_SIZE}" --region "${RDQ_GPU_REGION}" --image "${image}" \
     --ssh-keys "${fp}" --tag-name rdq-gpu-worker --wait \
     --format ID --no-header)"
   [[ -n "${droplet_id}" ]] || fail "droplet create returned no ID"
@@ -367,6 +382,48 @@ EOF
   note "follow with:  $(basename "$0") status   |   ssh root@${DROPLET_IP} tail -f ${RUN_LOG}"
 }
 
+SNAPSHOT_PREFIX="rdq-gpu-base"
+
+latest_snapshot_id() {
+  # Newest private image named ${SNAPSHOT_PREFIX}-* (name sorts by date suffix).
+  doctl compute image list --format ID,Name --no-header 2>/dev/null \
+    | awk -v p="${SNAPSHOT_PREFIX}-" 'index($2, p) == 1 { print $1, $2 }' \
+    | sort -k2 | tail -1 | awk '{print $1}'
+}
+
+cmd_snapshot() {
+  # Bake the bootstrapped worker into a DO image so future provisions skip
+  # the 16.5GB docker-image ship + venv build (~20 min -> ~3 min boot).
+  # Regional: usable for provisions in the SAME region the worker runs in.
+  load_state
+  ensure_doctl
+  local name
+  name="${SNAPSHOT_PREFIX}-$(date -u +%Y%m%d-%H%M)"
+  note "powering off ${DROPLET_ID} for a consistent snapshot"
+  doctl compute droplet-action power-off "${DROPLET_ID}" --wait >/dev/null
+  note "taking snapshot ${name} (several minutes)"
+  doctl compute droplet-action snapshot "${DROPLET_ID}" --snapshot-name "${name}" --wait >/dev/null
+  note "powering back on"
+  doctl compute droplet-action power-on "${DROPLET_ID}" --wait >/dev/null
+  for _ in $(seq 1 60); do
+    remote true 2>/dev/null && break
+    sleep 5
+  done
+  remote true 2>/dev/null || fail "worker did not come back after snapshot (droplet still exists)"
+  # Keep only the newest base image — older ones just accrue storage cost.
+  local keep old_ids
+  keep="$(latest_snapshot_id)"
+  old_ids="$(doctl compute image list --format ID,Name --no-header \
+    | awk -v p="${SNAPSHOT_PREFIX}-" -v keep="${keep}" \
+        'index($2, p) == 1 && $1 != keep { print $1 }')"
+  local image_id
+  for image_id in ${old_ids}; do
+    note "pruning old base image ${image_id}"
+    doctl compute image delete -f "${image_id}" || true
+  done
+  note "snapshot ${name} ready — future provisions in this region boot from it"
+}
+
 cmd_ssh() {
   # Arbitrary remote command with the worker's SSH options (used by
   # ops/gpu_pipeline.py so the SSH config lives in exactly one place).
@@ -437,6 +494,7 @@ case "${SUBCOMMAND}" in
   tunnel)    cmd_tunnel ;;
   check)     cmd_check ;;
   run)       cmd_run "$@" ;;
+  snapshot)  cmd_snapshot ;;
   ssh)       cmd_ssh "$@" ;;
   status)    cmd_status ;;
   fetch)     cmd_fetch ;;
