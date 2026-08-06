@@ -247,9 +247,11 @@ run_mode() {
   export WORKSPACE_PATH="${WORKSPACE_PATH:-${RUN_ROOT}/workspace}"
   mkdir -p "${LOG_TRACE_PATH}" "${WORKSPACE_PATH}"
 
-  local args=(fin_quant --loop_n "${loop_n}")
+  # rdagent's CLI (typer) exposes dash-form options only (--loop-n); the
+  # underscore forms are this wrapper's interface, translated here.
+  local args=(fin_quant --loop-n "${loop_n}")
   if [[ -n "${all_duration}" ]]; then
-    args+=(--all_duration "${all_duration}")
+    args+=(--all-duration "${all_duration}")
   fi
 
   echo "LOG_TRACE_PATH=${LOG_TRACE_PATH}"
