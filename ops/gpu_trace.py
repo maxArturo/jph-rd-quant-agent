@@ -72,7 +72,8 @@ def remap_path(raw: str, remap: tuple[str, str] | None) -> str:
     return raw
 
 
-def _workspace_metrics(workspace: str | None) -> dict[str, float] | None:
+def workspace_metrics(workspace: str | None) -> dict[str, float] | None:
+    """Labelled (IC/ARR/MDD/...) metrics from a workspace's qlib_res.csv."""
     if not workspace:
         return None
     csv = Path(workspace) / "qlib_res.csv"
@@ -119,7 +120,7 @@ def loop_reports(trace_dir: Path, remap: tuple[str, str] | None = None) -> list[
         workspace = getattr(getattr(runner, "experiment_workspace", None), "workspace_path", None)
         if workspace is not None:
             report.workspace = remap_path(str(workspace), remap)
-            report.metrics = _workspace_metrics(report.workspace)
+            report.metrics = workspace_metrics(report.workspace)
         reports.append(report)
     return reports
 

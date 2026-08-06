@@ -39,8 +39,8 @@ from pathlib import Path
 from execution.pred_refresh import snapshot_pred_refresh
 from execution.rebalance import DEFAULT_STORE_PATH
 from execution.signal import SignalError, load_market, load_strategy_params
+from ops.gpu_trace import workspace_metrics
 from orchestrator.state import DEFAULT_DB_PATH, StateStore
-from orchestrator.summary import load_metrics
 
 PRED_REFRESH_CONF = "conf_pred_refresh.yaml"
 
@@ -78,10 +78,7 @@ def validate_workspace(workspace: Path) -> dict:
         params = load_strategy_params(workspace)
     except SignalError as exc:
         raise PromoteFetchedError(f"workspace conf is unusable: {exc}") from exc
-    try:
-        metrics = load_metrics(workspace / "qlib_res.csv")
-    except Exception:  # noqa: BLE001 — metrics are display-only
-        metrics = {}
+    metrics = workspace_metrics(str(workspace)) or {}
     return {"market": market, "topk": params.topk, "n_drop": params.n_drop, "metrics": metrics}
 
 
