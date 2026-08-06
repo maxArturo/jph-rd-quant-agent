@@ -62,8 +62,13 @@ SNAPSHOT_ENV_NAME = "pred_refresh.env"
 
 DEFAULT_IMAGE = "local_qlib:latest"
 DEFAULT_QLIB_DIR = Path("~/.qlib")
-# 06:45 start + 50 min still ends comfortably before the 08:00 rebalance.
-DEFAULT_TIMEOUT_MINUTES = 50.0
+# 06:45 start + 70 min ends at 07:55, just before the 08:00 rebalance — a
+# late refresh degrades to the rebalancer's stale-abort, never a collision.
+# Raised 50->70 on 2026-08-06: the broad-universe promoted workspace
+# (e05ad9b4, GeneralPTNN over 581 names) retrains in ~52 min on this box
+# (measured from its original training log; early stop after epoch 8), which
+# the old budget cut too close.
+DEFAULT_TIMEOUT_MINUTES = 70.0
 DEFAULT_KEEP_REFRESH_RUNS = 5
 
 # qrun logs the jinja context it rendered with; this is the recovery anchor.
