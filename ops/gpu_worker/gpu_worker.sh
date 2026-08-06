@@ -73,6 +73,7 @@ ssh_opts() {
   echo "-o IdentitiesOnly=yes"
   echo "-o BatchMode=yes"
   echo "-o StrictHostKeyChecking=accept-new"
+  echo "-o ConnectTimeout=15"
   echo "-o UserKnownHostsFile=${STATE_DIR}/known_hosts"
   echo "-o ServerAliveInterval=30"
   echo "-o ServerAliveCountMax=4"
@@ -366,6 +367,14 @@ EOF
   note "follow with:  $(basename "$0") status   |   ssh root@${DROPLET_IP} tail -f ${RUN_LOG}"
 }
 
+cmd_ssh() {
+  # Arbitrary remote command with the worker's SSH options (used by
+  # ops/gpu_pipeline.py so the SSH config lives in exactly one place).
+  load_state
+  [[ $# -ge 1 ]] || fail "ssh needs a command"
+  remote "$@"
+}
+
 cmd_status() {
   load_state
   echo "droplet:  ${DROPLET_ID} @ ${DROPLET_IP} (${SIZE:-?} in ${REGION:-?}, created ${CREATED_AT:-?})"
@@ -428,6 +437,7 @@ case "${SUBCOMMAND}" in
   tunnel)    cmd_tunnel ;;
   check)     cmd_check ;;
   run)       cmd_run "$@" ;;
+  ssh)       cmd_ssh "$@" ;;
   status)    cmd_status ;;
   fetch)     cmd_fetch ;;
   destroy)   cmd_destroy "$@" ;;

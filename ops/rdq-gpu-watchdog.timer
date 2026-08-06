@@ -1,0 +1,13 @@
+# Hourly trigger for the orphaned-GPU-worker watchdog (billing guard).
+# Persistent=false: a missed tick is harmless — the next hourly tick makes
+# the same stateless decision.
+
+[Unit]
+Description=Hourly trigger for the RD-Agent(Q) GPU worker watchdog
+
+[Timer]
+OnCalendar=hourly
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -27,12 +27,14 @@ TIMERS = [
     "rdq-pred-refresh.timer",
     "rdq-rebalance.timer",
     "rdq-sweep.timer",
+    "rdq-gpu-watchdog.timer",
 ]
 ONESHOTS = [
     "rdq-data-refresh.service",
     "rdq-pred-refresh.service",
     "rdq-rebalance.service",
     "rdq-sweep.service",
+    "rdq-gpu-watchdog.service",
 ]
 
 HEALTHY_SS = (

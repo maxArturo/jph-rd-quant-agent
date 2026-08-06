@@ -57,7 +57,33 @@ availability and fails with the live table; check first with
 RDQ_GPU_SIZE=gpu-6000adax1-48gb RDQ_GPU_REGION=tor1 ops/gpu_worker/gpu_worker.sh provision
 ```
 
-## Lifecycle
+## The one-command pipeline (preferred)
+
+```sh
+.venv/bin/python -m ops.gpu_pipeline --loop_n 10
+```
+
+Runs the WHOLE lifecycle: provision (falling through `RDQ_GPU_SIZE_PLAN`
+until a size has stock) → bootstrap → tunnel → check → run → **per-loop Slack
+digests** (hypothesis, SOTA verdict, IC/ARR/MDD, posted as a thread in
+#quant-research) → fetch → final summary naming the promotion candidate and
+the exact promote command → **destroy**. Teardown also happens on pipeline
+failure and on the `--max-hours` abort (default 24h); `--keep-worker` opts
+out. `--no-slack` sends every digest to stderr instead. The tunnel is
+self-healing: each poll restarts `rdq-gpu-tunnel` if it dropped.
+
+Stop a run early (results up to that loop are still fetched + reported):
+
+```sh
+ops/gpu_worker/gpu_worker.sh ssh tmux kill-session -t rdq-run
+```
+
+Billing guard: `rdq-gpu-watchdog.timer` (hourly, installed via
+`ops/install_services.sh`) warns to Slack when a worker sits idle with no
+run, and fetch+destroys any worker older than 24h — a crashed pipeline
+cannot leak a droplet for more than a day.
+
+## Manual lifecycle (what the pipeline drives)
 
 ```sh
 ops/gpu_worker/gpu_worker.sh provision      # create droplet (~2 min; billing starts)
@@ -66,6 +92,7 @@ ops/gpu_worker/gpu_worker.sh tunnel         # reverse tunnel + proxy env; probes
 ops/gpu_worker/gpu_worker.sh check          # remote run_us_quant.sh --check (must end "OK: environment ready")
 ops/gpu_worker/gpu_worker.sh run --loop_n 10
 ops/gpu_worker/gpu_worker.sh status         # droplet / tunnel / tmux / GPU util / log tail
+ops/gpu_worker/gpu_worker.sh ssh <cmd>      # arbitrary remote command (worker SSH opts)
 ops/gpu_worker/gpu_worker.sh fetch          # rsync traces + workspaces back
 ops/gpu_worker/gpu_worker.sh destroy        # DELETE the droplet (stops billing)
 ```
@@ -95,11 +122,29 @@ Judge a run by the usual completion criterion (non-NaN IC in qlib_res.csv,
 sane ARR/MDD, US tickers in pred.pkl — see run_us_quant.sh header).
 
 **Promotion caveat:** these runs live outside the orchestrator/server_ui flow,
-so Slack-thread promotion does not see them. To productionize a winner, either
-re-run the winning hypothesis through the normal Slack-driven flow on the
-control box, or manually copy the workspace into the promoted layout (the
-promotion snapshot expects the workspace dir + conf — see
-execution/promoted.py before attempting).
+so Slack-thread promotion does not see them (no `runs` row, and the trace's
+runner-result pickles carry the WORKER's absolute workspace paths). Promote a
+fetched workspace with the dedicated command instead — it writes the same
+records as a thread promotion (pred-refresh snapshot into the workspace +
+the `promoted_strategy` row with the conf-derived universe):
+
+```sh
+.venv/bin/python -m ops.promote_fetched --workspace ~/rdq-runs/gpu_worker/results/us_quant/workspace/<hash>          # dry-run
+.venv/bin/python -m ops.promote_fetched --workspace ... --yes                                                        # write
+.venv/bin/python -m execution.pred_refresh --no-slack                                                                # verify
+```
+
+It refuses on unusable confs/missing artifacts, shows the currently promoted
+strategy before replacing it, and reminds you that (a) an operator-pinned
+market in the OLD snapshot (e.g. a frozen `*_promoted_*` universe) must be
+re-applied to the new one, and (b) the Notion Decision Log entry is manual
+(no thread exists for the run). Run it from the deployed checkout
+(~/rd-agent-q) so it targets the real orchestrator/state.sqlite.
+
+**Trace visibility & retention:** fetched runs don't appear in the :19900
+trace viewer, and `ops/sweep.py` neither protects nor prunes
+`~/rdq-runs/gpu_worker/results/**` (it is outside the sweep's roots) — prune
+old fetched runs by hand when disk matters.
 
 ## Security notes
 

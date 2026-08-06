@@ -37,6 +37,25 @@
   `destroy` is part of finishing a run; `status` shows what's still alive.
   Runbook: ops/gpu_worker/README.md (promotion happens outside this flow —
   see its "Promotion caveat").
+- `python -m ops.gpu_pipeline` is the one-command wrapper (provision→run→
+  per-loop Slack digests→fetch→destroy; teardown also on failure/--max-hours).
+  It reads loop progress with `ops.gpu_trace` (offline FileStorage parsing,
+  sweep.py-style: hypothesis/feedback/runner-result pkls per Loop_<n>) run ON
+  the worker over `gpu_worker.sh ssh`; fetched copies need the --remap flag
+  because runner-result pkls store the worker's ABSOLUTE workspace paths.
+  Slack posting mirrors app.py: WebClient with `proxy = None`, chat_postMessage
+  with thread_ts (root post first). These runs never touch server_ui state —
+  thread replies can't stop them (`gpu_worker.sh ssh tmux kill-session -t
+  rdq-run` does).
+- `python -m ops.promote_fetched --workspace <dir> [--yes]` promotes a fetched
+  GPU workspace: same records as orchestrator/promotion.py confirm_promotion
+  (snapshot_pred_refresh + promoted_strategy row, conf-derived market per
+  US-023) minus the Notion writes (thread-keyed; manual reminder printed).
+  Never creates state.sqlite; dry-run by default.
+- `rdq-gpu-watchdog.{service,timer}` (hourly oneshot, in install_services
+  UNITS + health.sh lists): warns on idle workers, fetch+destroys workers
+  older than --max-hours 24. Stateless per tick; deletes stale worker.env
+  when the droplet is already gone.
 
 ## Python in ops/
 

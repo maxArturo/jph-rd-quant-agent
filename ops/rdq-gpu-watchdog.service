@@ -1,0 +1,18 @@
+# RD-Agent(Q) orphaned-GPU-worker watchdog — systemd user unit.
+#
+# A crashed gpu_pipeline must not leak a $1.57+/hr droplet: this oneshot
+# checks the worker state hourly (rdq-gpu-watchdog.timer), warns to Slack
+# when a worker sits idle, and fetch+destroys any worker older than 24h.
+# No onecli wrapper: it talks to DO (doctl) and Slack (repo .env token)
+# only — no proxied providers.
+#
+# Install:  ops/install_services.sh
+# Logs:     journalctl --user -u rdq-gpu-watchdog.service -n 50
+
+[Unit]
+Description=RD-Agent(Q) orphaned GPU worker watchdog (fetch+destroy leaked burst droplets)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=%h/rd-agent-q/.venv/bin/python -m ops.gpu_watchdog --max-hours 24

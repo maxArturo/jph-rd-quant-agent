@@ -20,6 +20,8 @@ UNITS=(
   rdq-rebalance.timer
   rdq-sweep.service
   rdq-sweep.timer
+  rdq-gpu-watchdog.service
+  rdq-gpu-watchdog.timer
 )
 
 mkdir -p "$UNIT_DIR"
