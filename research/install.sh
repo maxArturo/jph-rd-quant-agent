@@ -40,6 +40,13 @@ echo "Installing rdagent @ ${SHA} into ${VENV} ..."
 echo "Pinning pydantic-ai-slim to a 1.x release compatible with the rdagent pin ..."
 "${VENV}/bin/pip" install --quiet "pydantic-ai-slim[mcp,openai,prefect]==1.107.0"
 
+# typer >= 0.27 renders underscore params as dash options only (--loop_n
+# stops parsing); every wrapper here passes rdagent --loop_n. Pin the last
+# underscore-compatible release so fresh venvs (e.g. the GPU worker,
+# ops/gpu_worker/) behave like this box's venv. 2026-08-06.
+echo "Pinning typer to keep underscore CLI options (--loop_n) parsing ..."
+"${VENV}/bin/pip" install --quiet "typer==0.26.8"
+
 echo "Verifying import ..."
 "${VENV}/bin/python" -c "import rdagent; print('rdagent import OK, version:', getattr(rdagent, '__version__', 'unknown'))"
 # The CLI pulls in the full app graph (incl. pydantic_ai) — a stronger check.
