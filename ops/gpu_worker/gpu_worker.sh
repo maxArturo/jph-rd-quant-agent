@@ -29,8 +29,8 @@
 #   RDQ_GPU_SSH_KEY   ssh private key path     (default ~/.ssh/rdq_gpu_worker; created)
 #
 # Requires: doctl authenticated (doctl auth init, or DIGITALOCEAN_ACCESS_TOKEN).
-# Minimum token scope: droplet create/read/delete — the SSH key is injected
-# via cloud-init user-data, so no account/ssh_key scope is needed.
+# Minimum token scopes: droplet create/read/delete + ssh_key create/read (the
+# AI/ML image disables root passwords, so the API demands a registered key).
 # The droplet bills until `destroy` — always destroy when the run is fetched.
 set -euo pipefail
 shopt -s inherit_errexit  # errexit must survive $(...) (bash default: it doesn't)
@@ -107,6 +107,21 @@ ensure_ssh_key() {
   chmod 600 "${SSH_KEY}"
 }
 
+register_ssh_key() {
+  # stdout is the fingerprint (captured by the caller) — notes go to stderr.
+  # An account-registered key is unavoidable: the AI/ML image disables root
+  # passwords and the droplets API rejects create without --ssh-keys (422),
+  # user-data injection notwithstanding.
+  local fp
+  fp="$(ssh-keygen -E md5 -lf "${SSH_KEY}.pub" | awk '{print $2}' | sed 's/^MD5://')"
+  if ! doctl compute ssh-key list --format FingerPrint --no-header | grep -qF "${fp}"; then
+    note "registering worker SSH key with DigitalOcean" >&2
+    doctl compute ssh-key import "${RDQ_GPU_NAME}" --public-key-file "${SSH_KEY}.pub" >/dev/null \
+      || fail "could not register the SSH key — token needs the ssh_key create/read scopes"
+  fi
+  echo "${fp}"
+}
+
 require_size_in_region() {
   # Pre-flight the 422: GPU stock comes and goes; fail with the live table.
   local regions
@@ -157,17 +172,14 @@ cmd_provision() {
 
   require_size_in_region
 
-  # Key goes in via cloud-init (needs only droplet scope, no account SSH key).
-  local user_data
-  user_data="#cloud-config
-ssh_authorized_keys:
-  - $(cat "${SSH_KEY}.pub")"
+  local fp
+  fp="$(register_ssh_key)"
 
   note "creating ${RDQ_GPU_SIZE} in ${RDQ_GPU_REGION} (image ${RDQ_GPU_IMAGE}) — billing starts now"
   local droplet_id
   droplet_id="$(doctl compute droplet create "${RDQ_GPU_NAME}" \
     --size "${RDQ_GPU_SIZE}" --region "${RDQ_GPU_REGION}" --image "${RDQ_GPU_IMAGE}" \
-    --user-data "${user_data}" --tag-name rdq-gpu-worker --wait \
+    --ssh-keys "${fp}" --tag-name rdq-gpu-worker --wait \
     --format ID --no-header)"
   [[ -n "${droplet_id}" ]] || fail "droplet create returned no ID"
 

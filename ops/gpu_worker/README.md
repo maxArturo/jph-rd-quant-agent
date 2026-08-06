@@ -28,9 +28,10 @@ Why the stack is GPU-ready with zero code changes:
 
 - `doctl` on the control box, authenticated with a DO API token:
   `doctl auth init` (or `export DIGITALOCEAN_ACCESS_TOKEN=...`). Minimum
-  custom scope: **droplet create/read/delete** — the worker's SSH key is
-  injected via cloud-init user-data, so no account/ssh_key scope is needed
-  (custom-scoped tokens 403 on `/v2/account`; the script never calls it).
+  custom scopes: **droplet create/read/delete** and **ssh_key create/read**
+  (the AI/ML image disables root passwords, so droplet create 422s without a
+  registered account SSH key — cloud-init injection does not satisfy it).
+  Custom-scoped tokens 403 on `/v2/account`; the script never calls it.
 - `local_qlib:latest` present locally (it is), `research/.env` present,
   us_data store + factor source built (all true on this box).
 
