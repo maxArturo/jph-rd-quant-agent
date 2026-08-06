@@ -90,8 +90,10 @@ rsync_remote() {
 ensure_doctl() {
   command -v doctl >/dev/null 2>&1 \
     || fail "doctl not installed — snap install doctl, or download from https://github.com/digitalocean/doctl/releases into ~/.local/bin"
-  doctl account get >/dev/null 2>&1 \
-    || fail "doctl not authenticated — run 'doctl auth init' with a DO API token (write scope), or export DIGITALOCEAN_ACCESS_TOKEN"
+  # Scope-friendly auth probe: custom-scoped tokens (droplet + ssh_key only)
+  # 403 on /v2/account, so probe the droplet scope we actually need.
+  doctl compute droplet list --format ID >/dev/null 2>&1 \
+    || fail "doctl not authenticated — run 'doctl auth init' with a DO API token (droplet + ssh_key write scopes), or export DIGITALOCEAN_ACCESS_TOKEN"
 }
 
 ensure_ssh_key() {
@@ -349,7 +351,7 @@ EOF
 cmd_status() {
   load_state
   echo "droplet:  ${DROPLET_ID} @ ${DROPLET_IP} (${SIZE:-?} in ${REGION:-?}, created ${CREATED_AT:-?})"
-  if command -v doctl >/dev/null 2>&1 && doctl account get >/dev/null 2>&1; then
+  if command -v doctl >/dev/null 2>&1 && doctl compute droplet list --format ID >/dev/null 2>&1; then
     echo "DO state: $(doctl compute droplet get "${DROPLET_ID}" --format Status --no-header 2>/dev/null || echo 'NOT FOUND (already destroyed?)')"
   fi
   if tunnel_active; then echo "tunnel:   active (${TUNNEL_UNIT})"; else echo "tunnel:   DOWN"; fi
