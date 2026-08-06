@@ -150,16 +150,22 @@ class SlackThread:
         print(f"[slack] (upload {filename}, {len(png)} bytes)", file=sys.stderr)
         if self._client is None or self._channel is None:
             return
-        try:
-            self._client.files_upload_v2(
-                channel=self._channel,
-                thread_ts=self._thread_ts,
-                filename=filename,
-                title=title,
-                file=png,
-            )
-        except Exception as exc:  # noqa: BLE001 — the chart is supplementary
-            print(f"slack upload failed ({exc})", file=sys.stderr)
+        # files_upload_v2 is multi-request and 504s transiently (seen on the
+        # first live run, 2026-08-06) — retry before degrading to text-only.
+        for attempt in range(3):
+            try:
+                self._client.files_upload_v2(
+                    channel=self._channel,
+                    thread_ts=self._thread_ts,
+                    filename=filename,
+                    title=title,
+                    file=png,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 — the chart is supplementary
+                print(f"slack upload failed (attempt {attempt + 1}/3: {exc})", file=sys.stderr)
+                time.sleep(10 * (attempt + 1))
+        self.post(f":warning: could not upload {title} after 3 attempts — see pipeline logs")
 
 
 def worker_sh(
