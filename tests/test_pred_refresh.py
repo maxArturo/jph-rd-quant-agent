@@ -513,6 +513,14 @@ def test_docker_command_mounts_qlib_dir(tmp_path: Path) -> None:
     assert "img:tag" in command
 
 
+def test_docker_command_raises_shm_above_dataloader_needs(tmp_path: Path) -> None:
+    """64MB default shm bus-errors GRU DataLoader workers on broad universes
+    (the 2026-08-06 e05ad9b4 first-refresh failure)."""
+    command = docker_command(tmp_path, {})
+    shm_index = command.index("--shm-size")
+    assert command[shm_index + 1] == "2g"
+
+
 def test_env_snapshot_refuses_unstorable_keys(tmp_path: Path) -> None:
     workspace = make_workspace(tmp_path)
     log = workspace / "logs" / "docker_execution_20260714_151810.log"

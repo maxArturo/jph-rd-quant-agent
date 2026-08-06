@@ -269,6 +269,11 @@ def docker_command(
     if name is not None:
         command += ["--name", name]
     command += [
+        # Docker's 64MB shm default bus-errors the GRU DataLoader workers on
+        # broad-universe workspaces (2026-08-06 e05ad9b4 refresh failure) —
+        # match the 2g the research containers run with (QLIB_DOCKER_SHM_SIZE
+        # in the rdq-research resource drop-in).
+        "--shm-size", "2g",
         "-v", f"{workspace}:/workspace/qlib_workspace",
         "-v", f"{qlib_dir.expanduser()}:/root/.qlib",
         "-w", "/workspace/qlib_workspace",
