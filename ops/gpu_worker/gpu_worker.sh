@@ -240,6 +240,8 @@ cmd_bootstrap() {
   remote "docker run --rm --gpus all local_qlib:latest python -c 'import torch; assert torch.cuda.is_available(), \"no CUDA device\"; print(\"GPU:\", torch.cuda.get_device_name(0))'"
 
   note "syncing repo, qlib store, factor source, CA bundle"
+  # rsync only creates the final path component — make the parents first.
+  remote "mkdir -p /root/.qlib/qlib_data /root/rdq-data/factor_source /root/.onecli"
   rsync_remote --delete \
     --exclude '.git' --exclude '.venv' --exclude 'git_ignore_folder' \
     --exclude 'pickle_cache' --exclude '/log' --exclude '__pycache__' \
@@ -247,7 +249,6 @@ cmd_bootstrap() {
     "${REPO_ROOT}/" "root@${DROPLET_IP}:${REMOTE_REPO}/"
   rsync_remote "${HOME}/.qlib/qlib_data/us_data/" "root@${DROPLET_IP}:/root/.qlib/qlib_data/us_data/"
   rsync_remote "${HOME}/rdq-data/factor_source/us_liquid/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/us_liquid/"
-  remote "mkdir -p /root/.onecli"
   rsync_remote "${HOME}/.onecli/ca-bundle.pem" "root@${DROPLET_IP}:/root/.onecli/ca-bundle.pem"
 
   note "building the worker venv (make venv + pinned rdagent — first time is slow)"
