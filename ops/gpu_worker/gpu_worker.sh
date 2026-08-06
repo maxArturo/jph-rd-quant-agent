@@ -250,6 +250,8 @@ cmd_bootstrap() {
   rsync_remote "${HOME}/.qlib/qlib_data/us_data/" "root@${DROPLET_IP}:/root/.qlib/qlib_data/us_data/"
   rsync_remote "${HOME}/rdq-data/factor_source/us_liquid/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/us_liquid/"
   rsync_remote "${HOME}/.onecli/ca-bundle.pem" "root@${DROPLET_IP}:/root/.onecli/ca-bundle.pem"
+  # research/.env may be a symlink (worktree checkouts) — ship the content.
+  rsync_remote --copy-links "${REPO_ROOT}/research/.env" "root@${DROPLET_IP}:${REMOTE_REPO}/research/.env"
 
   note "building the worker venv (make venv + pinned rdagent — first time is slow)"
   remote "cd ${REMOTE_REPO} && make venv >/dev/null && research/install.sh"
