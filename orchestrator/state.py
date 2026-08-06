@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS runs (
     universe     TEXT,
     universe_tickers TEXT,
     supervised   INTEGER NOT NULL DEFAULT 0,
+    backend      TEXT NOT NULL DEFAULT 'server_ui',
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -116,6 +117,11 @@ class Run:
     # Supervised runs gate each hypothesis on operator buttons (the pre-US-045
     # flow); unsupervised runs auto-approve and stop on their own budget.
     supervised: bool = False
+    # 'server_ui' = local trace polled by HypothesisPoller; 'gpu' = remote
+    # burst-droplet run driven by ops/gpu_pipeline (the poller must skip it,
+    # and session_path holds the pipeline status file until fetch rewrites it
+    # to the fetched trace dir).
+    backend: str = "server_ui"
 
 
 @dataclass(frozen=True)
@@ -168,6 +174,7 @@ def _run_from_row(row: sqlite3.Row) -> Run:
         updated_at=row["updated_at"],
         universe_tickers=None if tickers is None else tuple(json.loads(tickers)),
         supervised=bool(row["supervised"]),
+        backend=row["backend"],
     )
 
 
@@ -232,6 +239,12 @@ class StateStore:
                 conn.execute(
                     "ALTER TABLE runs ADD COLUMN supervised INTEGER NOT NULL DEFAULT 0"
                 )
+            # GPU burst-worker backend (2026-08-06): pre-existing runs are all
+            # server_ui traces.
+            if "backend" not in columns:
+                conn.execute(
+                    "ALTER TABLE runs ADD COLUMN backend TEXT NOT NULL DEFAULT 'server_ui'"
+                )
 
     # -- directives ---------------------------------------------------------
 
@@ -279,6 +292,7 @@ class StateStore:
         status: str = "running",
         universe_tickers: Sequence[str] | None = None,
         supervised: bool = False,
+        backend: str = "server_ui",
     ) -> Run:
         now = _utcnow()
         tickers = None if universe_tickers is None else tuple(universe_tickers)
@@ -291,13 +305,14 @@ class StateStore:
             updated_at=now,
             universe_tickers=tickers,
             supervised=supervised,
+            backend=backend,
         )
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO runs (thread_ts, session_path, status, universe,"
-                    " universe_tickers, supervised, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " universe_tickers, supervised, backend, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         thread_ts,
                         session_path,
@@ -305,6 +320,7 @@ class StateStore:
                         universe,
                         None if tickers is None else json.dumps(list(tickers)),
                         int(supervised),
+                        backend,
                         now,
                         now,
                     ),
@@ -337,6 +353,20 @@ class StateStore:
             cur = conn.execute(
                 "UPDATE runs SET status = ?, updated_at = ? WHERE thread_ts = ?",
                 (status, _utcnow(), thread_ts),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"no run for thread {thread_ts}")
+        run = self.get_run(thread_ts)
+        assert run is not None
+        return run
+
+    def update_run_session_path(self, thread_ts: str, session_path: str) -> Run:
+        """Repoint a run at its (fetched) trace dir — the GPU pipeline calls
+        this after `fetch` so promotion can locate artifacts locally."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE runs SET session_path = ?, updated_at = ? WHERE thread_ts = ?",
+                (session_path, _utcnow(), thread_ts),
             )
             if cur.rowcount == 0:
                 raise KeyError(f"no run for thread {thread_ts}")

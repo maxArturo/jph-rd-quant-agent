@@ -241,7 +241,11 @@ def main() -> None:
         recorder=recorder,
         max_hypotheses=load_max_hypotheses(),
     )
-    promotions = PromotionFlow(store, recorder=recorder)
+    # locate understands both backends: fetched GPU traces (remapped pickled
+    # paths, last-SOTA candidate) and classic server_ui traces.
+    from orchestrator.gpu_backend import GpuBackend, locate_run_artifacts
+
+    promotions = PromotionFlow(store, recorder=recorder, locate=locate_run_artifacts)
     conversation = ConversationCore(
         store=store,
         router=ModelRouter(),
@@ -250,6 +254,7 @@ def main() -> None:
         # Spoken decisions ride the same handlers as the buttons (US-044).
         interactions=poller,
         promotions=promotions,
+        gpu=GpuBackend(),
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),

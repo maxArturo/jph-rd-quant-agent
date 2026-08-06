@@ -156,6 +156,27 @@ def poller(store: StateStore, rd: StubRdAgent, slack: FakeSlack) -> HypothesisPo
     return HypothesisPoller(store, rd, slack, CHANNEL)
 
 
+def test_poll_once_skips_gpu_backend_runs(tmp_path: Path, slack: FakeSlack) -> None:
+    """GPU runs are driven by ops/gpu_pipeline — the poller must never touch
+    them (their session_path is not a server_ui trace; trace_id_of raises)."""
+    store = StateStore(tmp_path / "state.sqlite")
+    store.create_run(THREAD, "/home/x/rdq-runs/gpu_worker/pipeline_status.json", backend="gpu")
+    touched: list[str] = []
+
+    class TrackingRd(StubRdAgent):
+        def trace_id_of(self, session_path):  # noqa: ANN001
+            touched.append(str(session_path))
+            raise RuntimeError("must not be reached for gpu runs")
+
+    poller = HypothesisPoller(store, TrackingRd(), slack, CHANNEL)
+
+    assert poller.poll_once() == 0
+    assert touched == []
+    # the run row is untouched
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "running"
+
+
 def posted_hypothesis_row(store: StateStore):
     rows = store.list_pending_interactions(THREAD, status="pending")
     assert len(rows) == 1

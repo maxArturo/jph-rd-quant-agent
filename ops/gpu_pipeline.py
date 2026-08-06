@@ -62,6 +62,34 @@ class PipelineOptions:
     reuse_worker: bool = False
     no_slack: bool = False
     size_plan: list[tuple[str, str]] = field(default_factory=list)
+    # Orchestrator integration (all optional — manual CLI runs skip them):
+    thread_ts: str | None = None  # post digests into this Slack thread + finalize its run row
+    universe: str | None = None  # confirmed custom universe (artifacts must be materialized)
+    instruction: str | None = None  # research directive, seeded into the loop's plan
+    status_file: Path | None = None  # live JSON the bot's check_research_status reads
+    snapshot: bool = False  # bake an rdq-gpu-base image after check (fast future boots)
+    no_notion: bool = False  # skip the plain-language Notion write-up
+
+
+class StatusFile:
+    """Best-effort live status JSON — the check_research_status tool's source."""
+
+    def __init__(self, path: Path | None, thread_ts: str | None) -> None:
+        self._path = path
+        self._data: dict = {"thread_ts": thread_ts, "stage": "starting", "exit": None}
+        self.update()
+
+    def update(self, **fields) -> None:
+        self._data.update(fields)
+        if self._path is None:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._data))
+            tmp.replace(self._path)
+        except OSError as exc:  # noqa: PERF203 — status is advisory, never fatal
+            print(f"status file write failed ({exc})", file=sys.stderr)
 
 
 def parse_size_plan(raw: str) -> list[tuple[str, str]]:
@@ -78,13 +106,17 @@ def parse_size_plan(raw: str) -> list[tuple[str, str]]:
 
 
 class SlackThread:
-    """Posts a root message then threaded replies; stderr fallback throughout."""
+    """Posts a root message then threaded replies; stderr fallback throughout.
 
-    def __init__(self, enabled: bool) -> None:
+    With ``thread_ts`` given, everything goes into that existing thread (the
+    orchestrator conversation that started the run) instead of a new one.
+    """
+
+    def __init__(self, enabled: bool, thread_ts: str | None = None) -> None:
         self._enabled = enabled
         self._client = None
         self._channel: str | None = None
-        self._thread_ts: str | None = None
+        self._thread_ts: str | None = thread_ts
         if enabled:
             try:
                 from slack_sdk import WebClient
@@ -113,6 +145,21 @@ class SlackThread:
                 self._thread_ts = response["ts"]
         except Exception as exc:  # noqa: BLE001
             print(f"slack post failed ({exc})", file=sys.stderr)
+
+    def upload(self, png: bytes, *, filename: str, title: str) -> None:
+        print(f"[slack] (upload {filename}, {len(png)} bytes)", file=sys.stderr)
+        if self._client is None or self._channel is None:
+            return
+        try:
+            self._client.files_upload_v2(
+                channel=self._channel,
+                thread_ts=self._thread_ts,
+                filename=filename,
+                title=title,
+                file=png,
+            )
+        except Exception as exc:  # noqa: BLE001 — the chart is supplementary
+            print(f"slack upload failed ({exc})", file=sys.stderr)
 
 
 def worker_sh(
@@ -221,34 +268,142 @@ def format_final_summary(
     return "\n".join(lines)
 
 
+def post_comparison_chart(slack: SlackThread, candidate_workspace: str) -> None:
+    """Candidate vs currently-promoted equity curves into the thread."""
+    from orchestrator.summary import SummaryError, render_comparison_curve
+
+    candidate_ret = Path(candidate_workspace) / "ret.pkl"
+    if not candidate_ret.is_file():
+        slack.post(":warning: candidate workspace has no ret.pkl — skipping the comparison chart")
+        return
+    promoted_ret = None
+    promoted_label = "promoted"
+    try:
+        from execution.promoted import load_promoted_strategy
+
+        promoted = load_promoted_strategy()
+        path = Path(promoted.workspace_path) / "ret.pkl"
+        if path.is_file():
+            promoted_ret = path
+            promoted_label = f"promoted ({Path(promoted.workspace_path).name[:8]}, live paper)"
+    except Exception:  # noqa: BLE001 — nothing promoted yet is a normal state
+        pass
+    try:
+        png = render_comparison_curve(
+            candidate_ret,
+            promoted_ret,
+            candidate_label=f"candidate ({Path(candidate_workspace).name[:8]})",
+            promoted_label=promoted_label,
+        )
+    except SummaryError as exc:
+        slack.post(f":warning: comparison chart failed: {exc}")
+        return
+    slack.upload(png, filename="candidate_vs_promoted.png", title="Candidate vs promoted")
+
+
+def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict) -> str | None:
+    """Run ops.notion_summary under the orchestrator identity; returns the URL."""
+    import datetime
+
+    loops = final_status.get("loops") or []
+    context = {
+        "run_date": datetime.date.today().isoformat(),
+        "universe": options.universe or "us_liquid",
+        "directive": options.instruction,
+        "loops_total": len([loop for loop in loops if loop.get("decision") is not None]),
+        "sota_count": len([loop for loop in loops if loop.get("decision")]),
+        "candidate": {
+            "loop": candidate.get("loop"),
+            "hypothesis": candidate.get("hypothesis"),
+            "feedback_reason": candidate.get("feedback_reason"),
+            "metrics": candidate.get("metrics") or {},
+        },
+    }
+    context_path = Path.home() / "rdq-runs" / "gpu_worker" / "notion_context.json"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(json.dumps(context))
+    result = subprocess.run(
+        [
+            "onecli", "run", "--agent", "rdq-orchestrator", "--",
+            str(REPO_ROOT / ".venv" / "bin" / "python"),
+            "-m", "ops.notion_summary", "--context", str(context_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    lines = [line for line in result.stdout.strip().splitlines() if line.startswith("http")]
+    if result.returncode == 0 and lines:
+        return lines[-1]
+    tail = (result.stderr or result.stdout).strip().splitlines()[-1:]
+    print(f"notion write-up failed: {' '.join(tail)}", file=sys.stderr)
+    return None
+
+
+def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | None) -> None:
+    """Point the orchestrator's run row at the fetched trace and close it out."""
+    try:
+        from orchestrator.state import DEFAULT_DB_PATH, StateStore
+
+        if not Path(DEFAULT_DB_PATH).is_file():
+            print("no orchestrator state.sqlite — run row not finalized", file=sys.stderr)
+            return
+        store = StateStore(DEFAULT_DB_PATH)
+        if store.get_run(thread_ts) is None:
+            return
+        if trace_dir is not None:
+            store.update_run_session_path(thread_ts, str(trace_dir))
+        status = "completed" if exit_code == 0 else ("stopped" if exit_code is None else "failed")
+        store.update_run_status(thread_ts, status)
+    except Exception as exc:  # noqa: BLE001 — never lose teardown over bookkeeping
+        print(f"run row finalization failed ({exc})", file=sys.stderr)
+
+
 def run_pipeline(options: PipelineOptions) -> int:
-    slack = SlackThread(enabled=not options.no_slack)
+    slack = SlackThread(enabled=not options.no_slack, thread_ts=options.thread_ts)
+    status_file = StatusFile(options.status_file, options.thread_ts)
     size, region = "(reused)", "(reused)"
     started = time.monotonic()
+    trace_dir = None
+    exit_code: int | None = None
     try:
         if options.reuse_worker:
             slack.post(":recycle: reusing the existing GPU worker")
         else:
+            status_file.update(stage="provisioning")
             size, region = provision_with_fallback(options.size_plan, slack)
             slack.post(
                 f":rocket: GPU worker up: {size} in {region} "
                 f"(~${PRICE_PER_HOUR.get(size, 0):.2f}/hr) — bootstrapping"
             )
+            status_file.update(stage="bootstrapping", worker=f"{size} in {region}")
             worker_sh("bootstrap")
+        status_file.update(stage="tunnel")
         worker_sh("tunnel")
         worker_sh("check")
+        if options.snapshot:
+            slack.post(":camera: baking the worker into a base snapshot (future boots ~3 min)")
+            status_file.update(stage="snapshot")
+            worker_sh("snapshot")
         run_args = ["run", "--loop_n", str(options.loop_n)]
         if options.all_duration:
             run_args += ["--all_duration", options.all_duration]
+        if options.universe:
+            run_args += ["--universe", options.universe]
+        if options.instruction:
+            run_args += ["--instruction", options.instruction]
         worker_sh(*run_args)
+        status_file.update(stage="running")
         slack.post(
-            f":microscope: research loop launched — budget {options.loop_n} hypotheses; "
+            f":microscope: research loop launched — budget {options.loop_n} hypotheses"
+            f"{', universe ' + options.universe if options.universe else ''}"
+            f"{', directive-seeded' if options.instruction else ''}; "
             "per-loop digests will follow in this thread"
         )
 
         posted: set[int] = set()
         status: dict = {}
-        exit_code: int | None = None
         while True:
             time.sleep(options.poll_seconds)
             elapsed_hours = (time.monotonic() - started) / 3600
@@ -273,9 +428,19 @@ def run_pipeline(options: PipelineOptions) -> int:
                     slack.post(format_loop_digest(loop))
                     posted.add(index)
             exit_code = status.get("exit")
+            status_file.update(stage="running", loops=status.get("loops"), exit=exit_code)
             if exit_code is not None:
                 break
+            # Killed run (stop_run / crash): the tmux session dies without
+            # writing the exit trailer — finalize as 'stopped'.
+            session = worker_sh("ssh", "tmux has-session -t rdq-run 2>/dev/null", check=False)
+            if session.returncode != 0:
+                slack.post(
+                    ":octagonal_sign: research session ended without an exit marker — finalizing"
+                )
+                break
 
+        status_file.update(stage="fetching")
         worker_sh("fetch")
         results_root = Path.home() / "rdq-runs" / "gpu_worker" / "results"
         from ops.gpu_trace import latest_trace_dir, loop_reports, promotion_candidate
@@ -290,11 +455,33 @@ def run_pipeline(options: PipelineOptions) -> int:
         }
         elapsed_hours = (time.monotonic() - started) / 3600
         slack.post(format_final_summary(final_status, exit_code, elapsed_hours, size))
+        status_file.update(
+            stage="finished",
+            loops=final_status["loops"],
+            exit=exit_code,
+            candidate_workspace=candidate.workspace if candidate else None,
+        )
+        if candidate is not None and candidate.workspace:
+            post_comparison_chart(slack, candidate.workspace)
+            if not options.no_notion:
+                url = notion_writeup(options, final_status, candidate.to_dict())
+                if url:
+                    slack.post(
+                        f":memo: Plain-language write-up (result + investing approach): {url}"
+                    )
+                else:
+                    slack.post(":warning: Notion write-up failed — see pipeline logs")
         return 0 if exit_code == 0 else 1
     except Exception as exc:  # noqa: BLE001 — report, tear down, re-raise as exit code
         slack.post(f":x: GPU pipeline failed: {exc}")
+        status_file.update(stage="failed", error=str(exc))
+        # A pipeline failure closes the run row as 'failed' regardless of how
+        # far the research itself got (finalize maps non-zero/non-None -> failed).
+        exit_code = 1
         return 1
     finally:
+        if options.thread_ts:
+            finalize_run_row(options.thread_ts, trace_dir, exit_code)
         if options.keep_worker:
             slack.post(":warning: --keep-worker set — droplet still BILLING; destroy manually")
         else:
@@ -316,6 +503,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all_duration", default=None, help="rdagent wall-clock budget, e.g. 12h")
     parser.add_argument("--poll", type=int, default=120, dest="poll_seconds")
     parser.add_argument("--max-hours", type=float, default=24.0)
+    parser.add_argument("--thread-ts", default=None, help="orchestrator thread to post into")
+    parser.add_argument("--universe", default=None, help="confirmed custom universe name")
+    parser.add_argument(
+        "--instruction", default=None, help="research directive (seeded into the loop)"
+    )
+    parser.add_argument("--status-file", type=Path, default=None, help="live status JSON path")
+    parser.add_argument("--snapshot", action="store_true", help="bake a base image after check")
+    parser.add_argument("--no-notion", action="store_true", help="skip the Notion write-up")
     parser.add_argument("--keep-worker", action="store_true")
     parser.add_argument("--reuse-worker", action="store_true", help="skip provision/bootstrap")
     parser.add_argument("--no-slack", action="store_true")
@@ -334,6 +529,12 @@ def main(argv: list[str] | None = None) -> int:
         reuse_worker=args.reuse_worker,
         no_slack=args.no_slack,
         size_plan=parse_size_plan(args.size_plan),
+        thread_ts=args.thread_ts,
+        universe=args.universe,
+        instruction=args.instruction,
+        status_file=args.status_file,
+        snapshot=args.snapshot,
+        no_notion=args.no_notion,
     )
     return run_pipeline(options)
 

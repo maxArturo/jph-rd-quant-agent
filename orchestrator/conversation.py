@@ -49,6 +49,29 @@ REFUSAL_REPLY = "I can't help with that request."
 DEFAULT_UNIVERSE = "us_liquid"
 
 
+class GpuRunner(Protocol):
+    """What the GPU-backend run tools need from orchestrator.gpu_backend."""
+
+    status_file: Path
+
+    def launch(
+        self,
+        thread_ts: str,
+        *,
+        loop_n: int = 10,
+        universe: str | None = None,
+        instruction: str | None = None,
+    ) -> str: ...
+
+    def stop_unit(self, unit: str) -> None: ...
+
+    def unit_active(self, thread_ts: str) -> bool: ...
+
+    def cancel(self) -> str: ...
+
+    def read_status(self) -> dict | None: ...
+
+
 class ResearchLauncher(Protocol):
     """What the run-lifecycle tools need from RdAgentClient (stub-friendly)."""
 
@@ -142,19 +165,32 @@ class PromotionManager(Protocol):
 
 
 START_RESEARCH_SCHEMA: dict[str, Any] = {
-    # The run is driven by the thread's saved directive; the only knob is the
-    # steering mode (US-045: autonomous is the default).
+    # The run is driven by the thread's saved directive. Runs execute on a
+    # disposable GPU droplet (2026-08-06 decision) and are always autonomous.
     "type": "object",
     "properties": {
         "supervised": {
             "type": "boolean",
             "description": (
-                "Pass true ONLY when the operator explicitly asks to approve"
-                " each hypothesis themselves. Default (false): the run"
-                " auto-approves its hypotheses and stops on its own budget."
+                "DEPRECATED: GPU-backend runs are autonomous only. Passing"
+                " true makes the tool refuse with an explanation — never set"
+                " it unless the operator insists on per-hypothesis approval."
+            ),
+        },
+        "loop_n": {
+            "type": "integer",
+            "description": (
+                "Hypothesis budget for the run (default 10). Only change it"
+                " when the operator names a number."
             ),
         },
     },
+}
+
+CHECK_RESEARCH_STATUS_SCHEMA: dict[str, Any] = {
+    # No inputs: reports the thread's run status (stage, loops, SOTA count).
+    "type": "object",
+    "properties": {},
 }
 
 STOP_RUN_SCHEMA: dict[str, Any] = {
@@ -532,6 +568,7 @@ class ConversationCore:
         broker: BrokerReader | None = None,
         interactions: HypothesisSteering | None = None,
         promotions: PromotionManager | None = None,
+        gpu: GpuRunner | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -557,6 +594,12 @@ class ConversationCore:
         self._store = store
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
+        # DELIBERATELY no real default: GpuBackend.launch starts billable
+        # cloud infrastructure via systemd-run, so callers must opt in
+        # explicitly (app.py wires the real one; tests pass stubs). A leaked
+        # default provisioned a real droplet from the test suite on
+        # 2026-08-06 — None now makes start_research refuse instead.
+        self._gpu: GpuRunner | None = gpu
         self._universes: UniverseManager = universes
         self._breaker: TradingBreaker = breaker
         self._broker: BrokerReader = broker
@@ -586,6 +629,7 @@ class ConversationCore:
             self._confirm_universe_tool(thread_ts, say),
             self._halt_trading_tool(thread_ts, say),
             self._resume_trading_tool(thread_ts, say),
+            self._check_research_status_tool(thread_ts),
             self._check_account_tool(),
             self._check_orders_tool(),
             self._check_pnl_tool(),
@@ -661,7 +705,20 @@ class ConversationCore:
 
     def _start_research_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
-            supervised = bool(args.get("supervised", False))
+            if bool(args.get("supervised", False)):
+                raise ValueError(
+                    "runs now execute on a disposable GPU worker and are"
+                    " autonomous only — per-hypothesis approval is not available"
+                    " there. Offer to start an autonomous run instead."
+                )
+            if self._gpu is None:
+                raise ValueError(
+                    "the GPU research backend is not wired in this deployment —"
+                    " research runs cannot be started"
+                )
+            loop_n = int(args.get("loop_n") or 10)
+            if not 1 <= loop_n <= 50:
+                raise ValueError("loop_n must be between 1 and 50")
             directive = self._store.get_directive(thread_ts)
             if directive is None:
                 raise ValueError(
@@ -683,51 +740,88 @@ class ConversationCore:
                     )
                 universe = record.name
                 tickers = list(record.tickers)
-            handle = self._rdagent.start_run(directive_instruction(directive), universe)
-            session_path = str(self._rdagent.trace_dir(handle.trace_id))
+            unit = self._gpu.launch(
+                thread_ts,
+                loop_n=loop_n,
+                universe=universe,
+                instruction=directive_instruction(directive),
+            )
+            # session_path holds the pipeline status file until the pipeline
+            # rewrites it to the fetched trace dir at completion (promotion
+            # locates artifacts through it).
+            session_path = str(self._gpu.status_file)
             try:
                 run = self._store.create_run(
                     thread_ts,
                     session_path,
                     universe=universe,
                     universe_tickers=tickers,
-                    supervised=supervised,
+                    supervised=False,
+                    backend="gpu",
                 )
             except DuplicateRunError as exc:
-                # Lost a start race — don't leave the just-launched run orphaned.
-                self._rdagent.stop(handle.trace_id)
+                # Lost a start race — don't leave the just-launched pipeline up.
+                self._gpu.stop_unit(unit)
                 raise ValueError(duplicate_run_message(exc.existing)) from exc
             say(text=format_run_started(run), thread_ts=thread_ts)
             if self._recorder is not None:
                 self._recorder.record_idea_status(thread_ts, "researching", universe=universe)
-            logger.info("started research run %s for thread %s", handle.trace_id, thread_ts)
-            if supervised:
-                return (
-                    f"Research run started SUPERVISED (trace {handle.trace_id}) and"
-                    " recorded for this thread; the start notice was posted. Confirm"
-                    " briefly to the operator — hypotheses will arrive in this thread"
-                    " for their approval."
-                )
+            logger.info("started GPU research pipeline %s for thread %s", unit, thread_ts)
             return (
-                f"Research run started (trace {handle.trace_id}) and recorded for"
-                " this thread; the start notice was posted. Confirm briefly to the"
-                " operator — the run is autonomous: hypotheses are auto-approved and"
-                " narrated in this thread, and the run stops by itself after its"
-                " hypothesis budget, posting the best result for promotion."
+                f"GPU research pipeline launched (unit {unit}, budget {loop_n}"
+                " hypotheses) and recorded for this thread; the start notice was"
+                " posted. Confirm briefly to the operator: a GPU droplet is being"
+                " provisioned (~$1.57/hr, destroyed automatically when done), the"
+                " run is autonomous, per-loop digests will arrive in this thread,"
+                " and the final summary names the promotion candidate. Progress"
+                " questions -> check_research_status; cancelling -> stop_run."
             )
 
         return ToolSpec(
             name="start_research",
             description=(
-                "Start an RD-Agent research run for this thread's SAVED directive."
-                " Requires save_directive to have been called first; only one run"
-                " may exist per thread. Call it only when the operator explicitly"
-                " asks to start the research. By default the run is autonomous"
-                " (hypotheses auto-approved, self-stopping); pass supervised=true"
-                " only when the operator explicitly wants to approve each"
-                " hypothesis themselves."
+                "Start a research run for this thread's SAVED directive on a"
+                " disposable GPU worker droplet. Requires save_directive first;"
+                " only one run may exist per thread. Call it only when the"
+                " operator explicitly asks to start the research. Runs are"
+                " autonomous (hypotheses auto-approved, self-stopping after the"
+                " loop_n budget, worker destroyed afterwards)."
             ),
             input_schema=START_RESEARCH_SCHEMA,
+            handler=handler,
+        )
+
+    def _check_research_status_tool(self, thread_ts: str) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args
+            run = self._store.get_run(thread_ts)
+            if run is None:
+                raise ValueError("this thread has no research run — start_research launches one")
+            if run.backend != "gpu" or self._gpu is None:
+                return f"run status: {run.status} ({run.backend} run, {run.session_path})"
+            from orchestrator.gpu_backend import format_gpu_status
+
+            status = self._gpu.read_status()
+            if status is not None and status.get("thread_ts") not in (None, thread_ts):
+                return (
+                    f"run status: {run.status}. The live pipeline status belongs to"
+                    " another thread's run (one GPU worker at a time) — this run is"
+                    " queued behind it or already finished."
+                )
+            active = self._gpu.unit_active(thread_ts)
+            return f"run status: {run.status} (GPU backend)\n" + format_gpu_status(
+                status, unit_active=active
+            )
+
+        return ToolSpec(
+            name="check_research_status",
+            description=(
+                "Report this thread's research run progress: pipeline stage, loops"
+                " finished, SOTA count, latest metrics, promotion candidate. Call"
+                " it whenever the operator asks how the run/loops are going. Read-"
+                "only; relay the details conversationally."
+            ),
+            input_schema=CHECK_RESEARCH_STATUS_SCHEMA,
             handler=handler,
         )
 
@@ -741,6 +835,19 @@ class ConversationCore:
                 raise ValueError(
                     f"the run in this thread is not running (status: {run.status})"
                     " — nothing to stop"
+                )
+            if run.backend == "gpu":
+                if self._gpu is None:
+                    raise ValueError("the GPU research backend is not wired — cannot cancel")
+                message = self._gpu.cancel()
+                say(text=f":octagonal_sign: {message}", thread_ts=thread_ts)
+                logger.info("cancelled GPU research run for thread %s", thread_ts)
+                return (
+                    "Cancel signal sent to the GPU worker. The pipeline will fetch"
+                    " the loops finished so far, post the final summary (any SOTA"
+                    " candidate stays promotable), mark the run stopped, and"
+                    " destroy the droplet. GPU runs cannot be resumed — a new"
+                    " start_research begins fresh. Confirm briefly to the operator."
                 )
             self._rdagent.stop(self._rdagent.trace_id_of(run.session_path))
             cancelled = self._cancel_open_interactions(thread_ts)
@@ -779,6 +886,13 @@ class ConversationCore:
                 raise ValueError(
                     f"the run in this thread is already running (session:"
                     f" {run.session_path}) — nothing to resume"
+                )
+            if run.backend == "gpu":
+                raise ValueError(
+                    "GPU-backend runs cannot be resumed (the worker was destroyed"
+                    " with the run's live state) — offer to start a fresh run with"
+                    " start_research; fetched results from the previous run remain"
+                    " available for promotion"
                 )
             directive = self._store.get_directive(thread_ts)
             if directive is None:

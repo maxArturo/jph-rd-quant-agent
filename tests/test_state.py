@@ -101,6 +101,23 @@ def test_update_run_status_missing_thread_raises(store: StateStore) -> None:
         store.update_run_status("999.000", "stopped")
 
 
+def test_run_backend_defaults_to_server_ui_and_persists_gpu(store: StateStore) -> None:
+    store.create_run("1.1", session_path="/logs/a")
+    store.create_run("2.2", session_path="/status.json", backend="gpu")
+    legacy = store.get_run("1.1")
+    gpu = store.get_run("2.2")
+    assert legacy is not None and legacy.backend == "server_ui"
+    assert gpu is not None and gpu.backend == "gpu"
+
+
+def test_update_run_session_path_repoints_fetched_trace(store: StateStore) -> None:
+    store.create_run("3.3", session_path="/status.json", backend="gpu")
+    updated = store.update_run_session_path("3.3", "/results/us_quant/log/2026-08-06")
+    assert updated.session_path == "/results/us_quant/log/2026-08-06"
+    with pytest.raises(KeyError):
+        store.update_run_session_path("999.000", "/x")
+
+
 def test_list_runs_filters_by_status(store: StateStore) -> None:
     store.create_run("1.1", session_path="/logs/a")
     store.create_run("2.2", session_path="/logs/b")

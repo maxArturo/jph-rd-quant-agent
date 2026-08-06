@@ -50,17 +50,45 @@ still alive.
 
 GPU **stock comes and goes per region** (2026-08-06: the 4000 Ada and L40S
 were sold out everywhere; the 6000 Ada was tor1-only). `provision` pre-flights
-availability and fails with the live table; check first with
+availability and fails with the live table; the pipeline additionally walks
+`RDQ_GPU_SIZE_PLAN` (size:region fallbacks) until one has stock. Check with
 `gpu_worker.sh sizes` and override, e.g.:
 
 ```sh
 RDQ_GPU_SIZE=gpu-6000adax1-48gb RDQ_GPU_REGION=tor1 ops/gpu_worker/gpu_worker.sh provision
 ```
 
-## The one-command pipeline (preferred)
+**Base snapshots (fast boots):** run the pipeline once with `--snapshot` (or
+`gpu_worker.sh snapshot` on a bootstrapped worker) to bake an
+`rdq-gpu-base-<ts>` image — provision auto-boots the newest one, cutting the
+~20 min image-ship bootstrap to a ~3 min delta sync. Snapshots are regional
+(usable where they were taken), cost ~$0.06/GiB/mo, and only the newest is
+kept. Re-snapshot after `local_qlib:latest` or venv-dependency changes.
+
+## Slack-first flow (the normal path)
+
+All research runs execute on GPU workers (2026-08-06 decision) — this box is
+the control plane. In #quant-research: refine the idea (save_directive),
+optionally build a universe (set_universe → confirm_universe), then "start
+the research". The bot launches the pipeline as a transient user unit
+(`rdq-gpu-run-<thread>`), and everything lands back in the SAME thread:
+per-loop digests, the final summary with the promotion candidate, a
+**candidate-vs-promoted equity chart**, and a link to a **plain-language
+Notion write-up**. Mid-run: ask "how's the run going?"
+(check_research_status) or "cancel the run" (stop_run — partial results stay
+promotable). Promotion is the usual two-yes thread flow; the fetched GPU
+trace is located via orchestrator/gpu_backend.locate_run_artifacts (last
+SOTA loop wins, not the last loop).
+
+Notes: GPU runs are autonomous only (no supervised mode), cannot be resumed,
+and the run's directive IS seeded into the loop (research/quant_runner.py) —
+what you agree on in the thread steers the hypotheses.
+
+## The one-command pipeline (manual/CLI path)
 
 ```sh
-.venv/bin/python -m ops.gpu_pipeline --loop_n 10
+.venv/bin/python -m ops.gpu_pipeline --loop_n 10 \
+    [--universe <name>] [--instruction "..."] [--snapshot] [--no-notion]
 ```
 
 Runs the WHOLE lifecycle: provision (falling through `RDQ_GPU_SIZE_PLAN`

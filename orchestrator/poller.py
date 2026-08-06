@@ -390,6 +390,11 @@ class HypothesisPoller:
         """Process every active run once; returns how many hypotheses were posted."""
         posted = 0
         for run in self._store.list_runs(status="running"):
+            if run.backend != "server_ui":
+                # GPU runs are driven end-to-end by ops/gpu_pipeline (digests,
+                # completion, status flip); their session_path is not a
+                # server_ui trace and trace_id_of would raise on it.
+                continue
             try:
                 posted += self._poll_run(run)
             except Exception:  # noqa: BLE001 - one broken run must not starve the others

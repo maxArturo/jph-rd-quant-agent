@@ -187,3 +187,43 @@ def test_render_rejects_non_portfolio_pickles(tmp_path: Path) -> None:
     corrupt.write_bytes(b"garbage")
     with pytest.raises(SummaryError, match="cannot read ret.pkl"):
         render_equity_curve(corrupt)
+
+
+# --- render_comparison_curve (GPU pipeline: candidate vs promoted) -------------
+
+
+def test_comparison_curve_renders_both_series(tmp_path: Path) -> None:
+    from orchestrator.summary import render_comparison_curve
+
+    candidate = write_ret_pkl(tmp_path / "cand.pkl")
+    promoted = write_ret_pkl(tmp_path / "prom.pkl")
+    png = render_comparison_curve(candidate, promoted)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(png) > 10_000
+
+
+def test_comparison_curve_degrades_without_promoted(tmp_path: Path) -> None:
+    from orchestrator.summary import render_comparison_curve
+
+    candidate = write_ret_pkl(tmp_path / "cand.pkl")
+    png = render_comparison_curve(candidate, None)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_comparison_curve_degrades_on_unreadable_promoted(tmp_path: Path) -> None:
+    from orchestrator.summary import render_comparison_curve
+
+    candidate = write_ret_pkl(tmp_path / "cand.pkl")
+    broken = tmp_path / "broken.pkl"
+    broken.write_bytes(b"garbage")
+    png = render_comparison_curve(candidate, broken)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_comparison_curve_requires_readable_candidate(tmp_path: Path) -> None:
+    from orchestrator.summary import render_comparison_curve
+
+    broken = tmp_path / "broken.pkl"
+    broken.write_bytes(b"garbage")
+    with pytest.raises(SummaryError, match="cannot read ret.pkl"):
+        render_comparison_curve(broken, None)

@@ -249,9 +249,18 @@ run_mode() {
 
   # rdagent's CLI (typer) exposes dash-form options only (--loop-n); the
   # underscore forms are this wrapper's interface, translated here.
-  local args=(fin_quant --loop-n "${loop_n}")
+  # RDQ_USER_INSTRUCTION switches to the research.quant_runner wrapper — the
+  # only CLI path that seeds the directive into the loop's plan (the rdagent
+  # binary has no instruction flag; see research/quant_runner.py).
+  local launch=("${RDAGENT}" fin_quant --loop-n "${loop_n}")
+  local label="rdagent fin_quant --loop-n ${loop_n}"
+  if [[ -n "${RDQ_USER_INSTRUCTION:-}" ]]; then
+    launch=("${PYTHON}" -m research.quant_runner --loop-n "${loop_n}"
+            --user-instruction "${RDQ_USER_INSTRUCTION}")
+    label="python -m research.quant_runner --loop-n ${loop_n} (directive-seeded)"
+  fi
   if [[ -n "${all_duration}" ]]; then
-    args+=(--all-duration "${all_duration}")
+    launch+=(--all-duration "${all_duration}")
   fi
 
   echo "LOG_TRACE_PATH=${LOG_TRACE_PATH}"
@@ -259,11 +268,11 @@ run_mode() {
   if [[ "${LAUNCHER}" == "direct" ]]; then
     check_direct_proxy_env
     # HTTPS_PROXY carries the proxy auth token — only print host:port.
-    echo "Launching: rdagent ${args[*]} (RDQ_LAUNCHER=direct, proxy ${HTTPS_PROXY##*@})"
-    exec "${RDAGENT}" "${args[@]}"
+    echo "Launching: ${label} (RDQ_LAUNCHER=direct, proxy ${HTTPS_PROXY##*@})"
+    exec "${launch[@]}"
   fi
-  echo "Launching: onecli run --agent rdq-research -- rdagent ${args[*]}"
-  exec onecli run --agent rdq-research -- "${RDAGENT}" "${args[@]}"
+  echo "Launching: onecli run --agent rdq-research -- ${label}"
+  exec onecli run --agent rdq-research -- "${launch[@]}"
 }
 
 MODE="run"

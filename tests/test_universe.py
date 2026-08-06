@@ -37,6 +37,7 @@ from tests.test_build_store import FakeFmp
 from tests.test_conversation import (
     THREAD,
     RecordingSay,
+    StubGpu,
     StubLauncher,
     start_research_script,
 )
@@ -317,6 +318,7 @@ def make_core(
     client: FakeClient,
     service: StubUniverseService,
     launcher: StubLauncher | None = None,
+    gpu: StubGpu | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
@@ -324,6 +326,7 @@ def make_core(
         router=ModelRouter(client=client),
         rdagent=launcher if launcher is not None else StubLauncher(),
         universes=service,
+        gpu=gpu if gpu is not None else StubGpu(),
     )
     return core, store
 
@@ -483,21 +486,27 @@ def test_start_research_uses_confirmed_universe_and_stores_tickers(
 ) -> None:
     service = StubUniverseService()
     client = FakeClient(judgment_messages=start_research_script())
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, service, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, service, gpu=gpu)
     store.create_directive(THREAD, objective="Momentum within AI semis")
     store.propose_thread_universe(THREAD, "ai_semis", ["NVDA", "AMD"])
     store.confirm_thread_universe(THREAD)
 
     core.handle_message(THREAD, "start the research", RecordingSay())
 
-    assert launcher.started == [
-        {"directive": "Momentum within AI semis", "universe": "ai_semis"}
+    assert gpu.launched == [
+        {
+            "thread_ts": THREAD,
+            "loop_n": 10,
+            "universe": "ai_semis",
+            "instruction": "Momentum within AI semis",
+        }
     ]
     run = store.get_run(THREAD)
     assert run is not None
     assert run.universe == "ai_semis"
     assert run.universe_tickers == ("NVDA", "AMD")
+    assert run.backend == "gpu"
 
 
 def test_start_research_rejected_while_universe_unconfirmed(tmp_path: Path) -> None:

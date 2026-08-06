@@ -36,6 +36,7 @@ from orchestrator.rdagent_client import (
 from orchestrator.state import Directive, StateStore
 from tests.test_conversation import (
     RecordingSay,
+    StubGpu,
     StubLauncher,
     lifecycle_script,
     save_directive_script,
@@ -361,6 +362,7 @@ def make_core(
         router=ModelRouter(client=client),
         rdagent=StubLauncher(),
         recorder=recorder,
+        gpu=StubGpu(),
     )
     return core, store, session
 

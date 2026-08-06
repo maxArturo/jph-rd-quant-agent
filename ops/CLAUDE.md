@@ -39,6 +39,20 @@
   see its "Promotion caveat").
 - `python -m ops.gpu_pipeline` is the one-command wrapper (provision→run→
   per-loop Slack digests→fetch→destroy; teardown also on failure/--max-hours).
+  Slack-started runs launch it as a transient unit `rdq-gpu-run-<thread>`
+  (orchestrator/gpu_backend.GpuBackend.launch via systemd-run — clean env, so
+  the bot's onecli proxy never leaks into doctl/ssh). It posts into the
+  START THREAD (--thread-ts), writes live status JSON (--status-file, read by
+  the bot's check_research_status tool), seeds the directive
+  (--instruction → research/quant_runner.py — plain `rdagent fin_quant`
+  ignores directives entirely), wires custom universes (--universe; worker
+  hard-refuses missing artifacts), uploads the candidate-vs-promoted chart
+  (orchestrator/summary.render_comparison_curve), runs ops/notion_summary
+  under `onecli run --agent rdq-orchestrator` and posts the page URL, and
+  finalizes the run row (session_path → fetched trace dir, status).
+  SAFETY: ConversationCore takes gpu=None by default and REFUSES to start
+  runs — only app.py wires the real GpuBackend. Never give it a live default:
+  the test suite once auto-launched a real droplet through one (2026-08-06).
   It reads loop progress with `ops.gpu_trace` (offline FileStorage parsing,
   sweep.py-style: hypothesis/feedback/runner-result pkls per Loop_<n>) run ON
   the worker over `gpu_worker.sh ssh`; fetched copies need the --remap flag

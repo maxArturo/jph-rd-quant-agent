@@ -134,6 +134,96 @@ def format_summary(
     return "\n".join(lines)
 
 
+def _net_cumulative(ret_pkl: str | Path):
+    """ret.pkl -> cumulative net-of-cost return Series (qlib sums, not compounds)."""
+    import pandas as pd
+
+    try:
+        frame = pd.read_pickle(Path(ret_pkl))
+    except Exception as exc:  # noqa: BLE001 - one actionable error type for callers
+        raise SummaryError(f"cannot read ret.pkl {ret_pkl}: {exc}") from exc
+    if not isinstance(frame, pd.DataFrame) or "return" not in frame.columns:
+        raise SummaryError(f"ret.pkl {ret_pkl} is not a portfolio DataFrame with a 'return' column")
+    net = frame["return"].astype(float)
+    if "cost" in frame.columns:
+        net = net - frame["cost"].astype(float)
+    return net.cumsum()
+
+
+# Categorical pair for the comparison chart (dataviz-validated 2026-08-06:
+# lightness band, chroma, CVD ΔE 24.7, normal ΔE 33.6, contrast ≥3:1 on
+# #fcfcfb). Candidate = blue (slot 1), promoted = orange (slot 2); identity
+# is also carried by direct series labels in the legend, never color alone.
+COMPARISON_COLORS = {"candidate": "#2a78d6", "promoted": "#eb6834"}
+_CHART_SURFACE = "#fcfcfb"
+_INK_MUTED = "#6b6b66"
+
+
+def render_comparison_curve(
+    candidate_ret_pkl: str | Path,
+    promoted_ret_pkl: str | Path | None,
+    *,
+    candidate_label: str = "candidate",
+    promoted_label: str = "promoted",
+    title: str = "Candidate vs promoted — cumulative return",
+) -> bytes:
+    """PNG comparing the candidate run's equity curve with the promoted one.
+
+    With no promoted workspace (or an unreadable ret.pkl there) the chart
+    degrades to the candidate curve alone, relabeled accordingly — honest
+    reporting over an empty axis.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    candidate = _net_cumulative(candidate_ret_pkl)
+    promoted = None
+    if promoted_ret_pkl is not None:
+        try:
+            promoted = _net_cumulative(promoted_ret_pkl)
+        except SummaryError:
+            promoted = None
+
+    fig, ax = plt.subplots(figsize=(9, 4.5), layout="constrained")
+    fig.patch.set_facecolor(_CHART_SURFACE)
+    ax.set_facecolor(_CHART_SURFACE)
+    try:
+        ax.plot(
+            candidate.index,
+            candidate.values,
+            label=candidate_label,
+            color=COMPARISON_COLORS["candidate"],
+            linewidth=2.0,
+        )
+        if promoted is not None:
+            ax.plot(
+                promoted.index,
+                promoted.values,
+                label=promoted_label,
+                color=COMPARISON_COLORS["promoted"],
+                linewidth=2.0,
+            )
+        else:
+            title = f"{title} (no promoted strategy to compare)"
+        ax.axhline(0.0, color=_INK_MUTED, linewidth=0.8, alpha=0.5)
+        ax.set_title(title)
+        ax.set_ylabel("cumulative return (net of cost)")
+        ax.legend(loc="best", frameon=False)
+        ax.grid(True, alpha=0.2)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=120)
+    finally:
+        plt.close(fig)
+    png = buffer.getvalue()
+    if not png:
+        raise SummaryError("rendered an empty comparison PNG")
+    return png
+
+
 def render_equity_curve(ret_pkl: str | Path, *, title: str = "Equity curve") -> bytes:
     """Render ret.pkl to a PNG equity-curve chart; returns the PNG bytes.
 

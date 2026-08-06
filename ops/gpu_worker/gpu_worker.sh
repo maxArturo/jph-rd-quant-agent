@@ -264,7 +264,12 @@ cmd_bootstrap() {
     --exclude '.pytest_cache' --exclude '.ruff_cache' \
     "${REPO_ROOT}/" "root@${DROPLET_IP}:${REMOTE_REPO}/"
   rsync_remote "${HOME}/.qlib/qlib_data/us_data/" "root@${DROPLET_IP}:/root/.qlib/qlib_data/us_data/"
-  rsync_remote "${HOME}/rdq-data/factor_source/us_liquid/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/us_liquid/"
+  # ALL universes ship (factor sources + rendered per-universe templates), so
+  # runs against operator-created universes need no extra sync step.
+  rsync_remote "${HOME}/rdq-data/factor_source/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/"
+  if [[ -d "${HOME}/rdq-data/templates" ]]; then
+    rsync_remote "${HOME}/rdq-data/templates/" "root@${DROPLET_IP}:/root/rdq-data/templates/"
+  fi
   rsync_remote "${HOME}/.onecli/ca-bundle.pem" "root@${DROPLET_IP}:/root/.onecli/ca-bundle.pem"
   # research/.env may be a symlink (worktree checkouts) — ship the content.
   rsync_remote --copy-links "${REPO_ROOT}/research/.env" "root@${DROPLET_IP}:${REMOTE_REPO}/research/.env"
@@ -343,7 +348,7 @@ cmd_check() {
 }
 
 cmd_run() {
-  local loop_n="1" all_duration=""
+  local loop_n="1" all_duration="" instruction="" universe=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --loop_n)
@@ -352,23 +357,54 @@ cmd_run() {
       --all_duration)
         [[ $# -ge 2 ]] || fail "--all_duration needs a value"
         all_duration="$2"; shift 2 ;;
+      --instruction)
+        [[ $# -ge 2 ]] || fail "--instruction needs a value"
+        instruction="$2"; shift 2 ;;
+      --universe)
+        [[ $# -ge 2 ]] || fail "--universe needs a value"
+        universe="$2"; shift 2 ;;
       *) fail "unknown run argument: $1" ;;
     esac
   done
 
   load_state
+
+  # Custom universe: hard-refuse when its artifacts are missing on the worker
+  # (a silent us_liquid fallback is exactly the 2026-08-05 mislabeling bug the
+  # server_ui path 400s on). us_liquid/empty means the pinned defaults.
+  local universe_exports=""
+  if [[ -n "${universe}" && "${universe}" != "us_liquid" ]]; then
+    remote "test -d /root/rdq-data/factor_source/${universe}/data_folder \
+      && test -d /root/rdq-data/templates/${universe} \
+      && test -f /root/.qlib/qlib_data/us_data/instruments/${universe}.txt" \
+      || fail "universe '${universe}' artifacts missing on the worker — re-run bootstrap after materializing it"
+    universe_exports="export RDQ_UNIVERSE='${universe}'
+export RDQ_FACTOR_SOURCE='/root/rdq-data/factor_source/${universe}'
+export RDQ_UNIVERSE_TEMPLATES='/root/rdq-data/templates/${universe}'"
+  fi
   tunnel_active || fail "tunnel unit ${TUNNEL_UNIT} not active — run '$(basename "$0") tunnel' first"
   if remote "tmux has-session -t ${RUN_SESSION} 2>/dev/null"; then
     fail "a run is already active in tmux session '${RUN_SESSION}' (see 'status'; attach with: ssh root@${DROPLET_IP} tmux attach -t ${RUN_SESSION})"
   fi
 
-  note "writing launch script (loop_n=${loop_n}${all_duration:+, all_duration=${all_duration}})"
+  # The directive can hold any operator text (quotes, newlines) — ship it
+  # base64'd so the generated script never re-parses it.
+  local instr_line=""
+  if [[ -n "${instruction}" ]]; then
+    local instr_b64
+    instr_b64="$(printf '%s' "${instruction}" | base64 -w0)"
+    instr_line="export RDQ_USER_INSTRUCTION=\"\$(printf '%s' '${instr_b64}' | base64 -d)\""
+  fi
+
+  note "writing launch script (loop_n=${loop_n}${all_duration:+, all_duration=${all_duration}}${universe:+, universe=${universe}}${instruction:+, directive-seeded})"
   remote "umask 077 && cat > /root/rdq-launch.sh && chmod +x /root/rdq-launch.sh" <<EOF
 #!/usr/bin/env bash
 # Written by gpu_worker.sh run — executed inside tmux on the worker.
 set -uo pipefail
 set -a; . ${PROXY_ENV_FILE}; set +a
 export RDQ_LAUNCHER=direct
+${universe_exports}
+${instr_line}
 mkdir -p /root/rdq-runs
 {
   echo "=== run start \$(date -u +%FT%TZ) loop_n=${loop_n}${all_duration:+ all_duration=${all_duration}} ==="
