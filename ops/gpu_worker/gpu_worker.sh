@@ -29,8 +29,11 @@
 #   RDQ_GPU_SSH_KEY   ssh private key path     (default ~/.ssh/rdq_gpu_worker; created)
 #
 # Requires: doctl authenticated (doctl auth init, or DIGITALOCEAN_ACCESS_TOKEN).
+# Minimum token scope: droplet create/read/delete — the SSH key is injected
+# via cloud-init user-data, so no account/ssh_key scope is needed.
 # The droplet bills until `destroy` — always destroy when the run is fetched.
 set -euo pipefail
+shopt -s inherit_errexit  # errexit must survive $(...) (bash default: it doesn't)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -104,18 +107,13 @@ ensure_ssh_key() {
   chmod 600 "${SSH_KEY}"
 }
 
-key_fingerprint() {
-  ssh-keygen -E md5 -lf "${SSH_KEY}.pub" | awk '{print $2}' | sed 's/^MD5://'
-}
-
-register_ssh_key() {
-  local fp
-  fp="$(key_fingerprint)"
-  if ! doctl compute ssh-key list --format FingerPrint --no-header | grep -qF "${fp}"; then
-    note "importing SSH key into DigitalOcean" >&2  # stdout is the fingerprint
-    doctl compute ssh-key import "${RDQ_GPU_NAME}" --public-key-file "${SSH_KEY}.pub" >/dev/null
-  fi
-  echo "${fp}"
+require_size_in_region() {
+  # Pre-flight the 422: GPU stock comes and goes; fail with the live table.
+  local regions
+  regions="$(doctl compute size list -o json \
+    | jq -r --arg s "${RDQ_GPU_SIZE}" '.[] | select(.slug == $s) | (.regions // []) | join(",")')"
+  [[ ",${regions}," == *",${RDQ_GPU_REGION},"* ]] \
+    || fail "size ${RDQ_GPU_SIZE} not currently available in ${RDQ_GPU_REGION} (available: ${regions:-nowhere}) — override RDQ_GPU_SIZE/RDQ_GPU_REGION; see '$(basename "$0") sizes'"
 }
 
 load_state() {
@@ -133,13 +131,13 @@ tunnel_active() {
 
 cmd_sizes() {
   ensure_doctl
-  echo "--- GPU droplet sizes ---"
-  doctl compute size list --format Slug,Memory,VCPUs,PriceHourly | { head -1; grep '^gpu-'; }
+  echo "--- GPU droplet sizes (slug / regions with stock NOW / \$-hr) ---"
+  doctl compute size list -o json \
+    | jq -r '.[] | select(.slug | startswith("gpu-"))
+        | [.slug, ((.regions // []) | join(",") | if . == "" then "SOLD OUT" else . end), "\(.price_hourly)/hr"]
+        | @tsv'
   echo
-  echo "--- GPU-capable regions (per size, check 'doctl compute size list' Regions) ---"
-  doctl compute region list --format Slug,Name,Available | { head -1; grep -E 'nyc2|tor1|atl1|ric1|ams3'; }
-  echo
-  echo "--- AI/ML-ready images ---"
+  echo "--- AI/ML-ready images (single-GPU sizes all use gpu-h100x1-base) ---"
   doctl compute image list --public --format Slug,Name --no-header | grep -i 'gpu' || true
 }
 
@@ -157,14 +155,19 @@ cmd_provision() {
     note "stale state file (droplet gone) — overwriting"
   fi
 
-  local fp
-  fp="$(register_ssh_key)"
+  require_size_in_region
+
+  # Key goes in via cloud-init (needs only droplet scope, no account SSH key).
+  local user_data
+  user_data="#cloud-config
+ssh_authorized_keys:
+  - $(cat "${SSH_KEY}.pub")"
 
   note "creating ${RDQ_GPU_SIZE} in ${RDQ_GPU_REGION} (image ${RDQ_GPU_IMAGE}) — billing starts now"
   local droplet_id
   droplet_id="$(doctl compute droplet create "${RDQ_GPU_NAME}" \
     --size "${RDQ_GPU_SIZE}" --region "${RDQ_GPU_REGION}" --image "${RDQ_GPU_IMAGE}" \
-    --ssh-keys "${fp}" --tag-name rdq-gpu-worker --wait \
+    --user-data "${user_data}" --tag-name rdq-gpu-worker --wait \
     --format ID --no-header)"
   [[ -n "${droplet_id}" ]] || fail "droplet create returned no ID"
 

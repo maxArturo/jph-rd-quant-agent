@@ -26,8 +26,11 @@ Why the stack is GPU-ready with zero code changes:
 
 ## Prerequisites (one-time)
 
-- `doctl` on the control box, authenticated with a **write-scope** DO API
-  token: `doctl auth init` (or `export DIGITALOCEAN_ACCESS_TOKEN=...`).
+- `doctl` on the control box, authenticated with a DO API token:
+  `doctl auth init` (or `export DIGITALOCEAN_ACCESS_TOKEN=...`). Minimum
+  custom scope: **droplet create/read/delete** — the worker's SSH key is
+  injected via cloud-init user-data, so no account/ssh_key scope is needed
+  (custom-scoped tokens 403 on `/v2/account`; the script never calls it).
 - `local_qlib:latest` present locally (it is), `research/.env` present,
   us_data store + factor source built (all true on this box).
 
@@ -42,8 +45,16 @@ Why the stack is GPU-ready with zero code changes:
 
 Billing is per-second and runs **until `destroy`** — destroying the droplet is
 part of finishing a run, not cleanup you can defer. `status` shows what is
-still alive. Regions with GPUs: nyc2, tor1 (default), atl1, ric1, ams3 —
-confirm current availability with `gpu_worker.sh sizes`.
+still alive.
+
+GPU **stock comes and goes per region** (2026-08-06: the 4000 Ada and L40S
+were sold out everywhere; the 6000 Ada was tor1-only). `provision` pre-flights
+availability and fails with the live table; check first with
+`gpu_worker.sh sizes` and override, e.g.:
+
+```sh
+RDQ_GPU_SIZE=gpu-6000adax1-48gb RDQ_GPU_REGION=tor1 ops/gpu_worker/gpu_worker.sh provision
+```
 
 ## Lifecycle
 
