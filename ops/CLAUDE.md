@@ -20,6 +20,24 @@
   scripts, `set -uo pipefail` (no `-e`) for check-style scripts that collect
   failures.
 
+## GPU burst worker (ops/gpu_worker/)
+
+- `gpu_worker.sh` drives the whole lifecycle FROM this box (provision →
+  bootstrap → tunnel → check → run → fetch → destroy) against a disposable
+  DO GPU droplet. The worker holds no credentials: LLM traffic rides an
+  `ssh -R` reverse tunnel (transient user unit `rdq-gpu-tunnel`) to the local
+  OneCLI proxy (:10255), with the per-agent proxy token + MITM CA copied only
+  to the worker (`/root/rdq-proxy.env`, mode 600). Never write the token to
+  the control-box state dir or echo it — print only host:port.
+- `RDQ_LAUNCHER=direct` in ops/run_us_quant.sh is the worker-side launch path
+  (no onecli there): it requires HTTPS_PROXY + REQUESTS_CA_BUNDLE pre-exported
+  and TCP-probes the proxy before exec. Keep its contract in sync with what
+  `gpu_worker.sh tunnel` writes into /root/rdq-proxy.env.
+- The droplet BILLS UNTIL DESTROYED (default RTX 4000 Ada ~$0.76/hr) —
+  `destroy` is part of finishing a run; `status` shows what's still alive.
+  Runbook: ops/gpu_worker/README.md (promotion happens outside this flow —
+  see its "Promotion caveat").
+
 ## Python in ops/
 
 - `ops/` is a real package (`ops/__init__.py`, listed in pyproject

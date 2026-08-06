@@ -26,6 +26,12 @@
 #     hardcoded workspace template folders; see research/us_quant.py).
 #   - LOG_TRACE_PATH (timestamped) / WORKSPACE_PATH under ~/rdq-runs/us_quant/
 #     (override root with RDQ_RUN_ROOT, or either var directly).
+#   - Launcher: RDQ_LAUNCHER=onecli (default) wraps the run in
+#     `onecli run --agent rdq-research --` for proxy credential injection.
+#     RDQ_LAUNCHER=direct execs rdagent with the CURRENT environment — the
+#     GPU-worker path (ops/gpu_worker/, no onecli on the worker): the caller
+#     must already export HTTPS_PROXY (the OneCLI proxy, reached over the
+#     worker's SSH tunnel) and REQUESTS_CA_BUNDLE (the proxy's MITM CA).
 #
 # Universe: us_liquid — pinned inside the template YAMLs (market: us_liquid,
 # benchmark: SPY). Per-run custom universes are US-023's job. The us_data store
@@ -54,9 +60,10 @@ RUN_ROOT="${RDQ_RUN_ROOT:-${HOME}/rdq-runs/us_quant}"
 STORE="${RDQ_QLIB_STORE:-${HOME}/.qlib/qlib_data/us_data}"
 FACTOR_SOURCE="${RDQ_FACTOR_SOURCE:-${HOME}/rdq-data/factor_source/us_liquid}"
 UNIVERSE="us_liquid"
+LAUNCHER="${RDQ_LAUNCHER:-onecli}"
 
 usage() {
-  sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -123,9 +130,31 @@ require_dir() {
   [[ -d "$1" ]] || fail "$2: missing directory $1"
 }
 
+check_direct_proxy_env() {
+  # RDQ_LAUNCHER=direct contract: the OneCLI proxy env that `onecli run`
+  # would inject must already be exported (ops/gpu_worker/gpu_worker.sh
+  # `tunnel` writes it to /root/rdq-proxy.env on the worker).
+  [[ -n "${HTTPS_PROXY:-}" ]] \
+    || fail "RDQ_LAUNCHER=direct requires HTTPS_PROXY (source the proxy env written by ops/gpu_worker/gpu_worker.sh tunnel)"
+  [[ -n "${REQUESTS_CA_BUNDLE:-}" && -f "${REQUESTS_CA_BUNDLE:-}" ]] \
+    || fail "RDQ_LAUNCHER=direct requires REQUESTS_CA_BUNDLE pointing at the OneCLI proxy CA bundle (got '${REQUESTS_CA_BUNDLE:-unset}')"
+  # TCP-probe the proxy so a dead tunnel fails here, not mid-run. The URL
+  # carries the proxy auth token — never echo it; strip scheme/creds/path.
+  local hostport="${HTTPS_PROXY#*://}"
+  hostport="${hostport##*@}"
+  hostport="${hostport%%/*}"
+  timeout 5 bash -c "exec 3<>/dev/tcp/${hostport%%:*}/${hostport##*:}" 2>/dev/null \
+    || fail "OneCLI proxy not reachable at ${hostport} (is the gpu_worker tunnel up?)"
+}
+
 check_mode() {
   wire_env
   check_dates
+
+  if [[ "${LAUNCHER}" == "direct" ]]; then
+    check_direct_proxy_env
+    echo "PASS: direct launcher — proxy env present, OneCLI proxy reachable"
+  fi
 
   [[ -x "${RDAGENT}" ]] || fail "rdagent not installed at ${RDAGENT} (run research/install.sh)"
   [[ -x "${PYTHON}" ]] || fail "venv python missing at ${PYTHON}"
@@ -182,14 +211,16 @@ PY
   docker info >/dev/null 2>&1 || fail "docker is not usable without sudo (add user to the docker group)"
   echo "PASS: docker reachable sudo-less"
 
-  command -v onecli >/dev/null 2>&1 || fail "onecli CLI not found on PATH"
-  curl -fsS "${ONECLI_URL}/api/health" >/dev/null 2>&1 \
-    || curl -fsS "${ONECLI_URL}/" >/dev/null 2>&1 \
-    || fail "OneCLI gateway not reachable at ${ONECLI_URL}"
-  onecli agents list 2>/dev/null | jq -e \
-    '.data[] | select(.identifier == "rdq-research")' >/dev/null \
-    || fail "identity rdq-research not registered (run ops/setup_onecli.sh)"
-  echo "PASS: onecli gateway up, rdq-research registered"
+  if [[ "${LAUNCHER}" == "onecli" ]]; then
+    command -v onecli >/dev/null 2>&1 || fail "onecli CLI not found on PATH"
+    curl -fsS "${ONECLI_URL}/api/health" >/dev/null 2>&1 \
+      || curl -fsS "${ONECLI_URL}/" >/dev/null 2>&1 \
+      || fail "OneCLI gateway not reachable at ${ONECLI_URL}"
+    onecli agents list 2>/dev/null | jq -e \
+      '.data[] | select(.identifier == "rdq-research")' >/dev/null \
+      || fail "identity rdq-research not registered (run ops/setup_onecli.sh)"
+    echo "PASS: onecli gateway up, rdq-research registered"
+  fi
 
   echo "OK: environment ready for a US fin_quant run (rerun without --check to launch)"
 }
@@ -223,6 +254,12 @@ run_mode() {
 
   echo "LOG_TRACE_PATH=${LOG_TRACE_PATH}"
   echo "WORKSPACE_PATH=${WORKSPACE_PATH}"
+  if [[ "${LAUNCHER}" == "direct" ]]; then
+    check_direct_proxy_env
+    # HTTPS_PROXY carries the proxy auth token — only print host:port.
+    echo "Launching: rdagent ${args[*]} (RDQ_LAUNCHER=direct, proxy ${HTTPS_PROXY##*@})"
+    exec "${RDAGENT}" "${args[@]}"
+  fi
   echo "Launching: onecli run --agent rdq-research -- rdagent ${args[*]}"
   exec onecli run --agent rdq-research -- "${RDAGENT}" "${args[@]}"
 }
@@ -246,6 +283,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "${LAUNCHER}" in
+  onecli|direct) ;;
+  *) fail "RDQ_LAUNCHER must be 'onecli' or 'direct' (got '${LAUNCHER}')" ;;
+esac
 
 if [[ "${MODE}" == "check" ]]; then
   check_mode

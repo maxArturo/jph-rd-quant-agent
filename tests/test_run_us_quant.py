@@ -138,3 +138,68 @@ class TestCheckMode:
         result = run_script("--check", env=env)
         assert result.returncode != 0
         assert "not strictly ordered" in result.stderr
+
+
+class TestDirectLauncher:
+    """RDQ_LAUNCHER=direct — the GPU-worker path (ops/gpu_worker/), which runs
+    without onecli and instead requires the OneCLI proxy env pre-exported."""
+
+    def test_invalid_launcher_rejected(self) -> None:
+        result = run_script("--check", env={"RDQ_LAUNCHER": "bogus"})
+        assert result.returncode != 0
+        assert "RDQ_LAUNCHER" in result.stderr
+
+    def test_direct_check_requires_https_proxy(self) -> None:
+        result = run_script(
+            "--check", env={"RDQ_LAUNCHER": "direct", "HTTPS_PROXY": ""}
+        )
+        assert result.returncode != 0
+        assert "HTTPS_PROXY" in result.stderr
+
+    def test_direct_check_requires_ca_bundle(self) -> None:
+        result = run_script(
+            "--check",
+            env={
+                "RDQ_LAUNCHER": "direct",
+                "HTTPS_PROXY": "http://x:token@127.0.0.1:9",
+                "REQUESTS_CA_BUNDLE": "",
+            },
+        )
+        assert result.returncode != 0
+        assert "REQUESTS_CA_BUNDLE" in result.stderr
+
+    def test_direct_check_probes_proxy_reachability(self, tmp_path: Path) -> None:
+        """A dead tunnel must fail the check, without leaking the token
+        (the URL userinfo must not appear in output)."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("fixture")
+        result = run_script(
+            "--check",
+            env={
+                "RDQ_LAUNCHER": "direct",
+                "HTTPS_PROXY": "http://x:secrettoken@127.0.0.1:9",  # closed port
+                "REQUESTS_CA_BUNDLE": str(ca),
+            },
+        )
+        assert result.returncode != 0
+        assert "not reachable" in result.stderr
+        assert "secrettoken" not in result.stdout + result.stderr
+
+    @pytest.mark.skipif(
+        not (REPO_ROOT / "research" / ".env").exists(),
+        reason="research/.env not present on this checkout",
+    )
+    def test_direct_run_fails_fast_without_proxy_env(self, tmp_path: Path) -> None:
+        """Run mode must die on the proxy-env check BEFORE exec'ing rdagent."""
+        result = run_script(
+            "--loop_n",
+            "1",
+            env={
+                "RDQ_LAUNCHER": "direct",
+                "HTTPS_PROXY": "",
+                "RDQ_RUN_ROOT": str(tmp_path),
+            },
+        )
+        assert result.returncode != 0
+        assert "HTTPS_PROXY" in result.stderr
+        assert "Launching" not in result.stdout
