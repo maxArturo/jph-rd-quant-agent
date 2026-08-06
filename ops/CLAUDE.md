@@ -106,6 +106,15 @@
   everywhere. Scripts calling systemctl/ss/tailscale by bare name are testable
   end-to-end with PATH-shimmed stub binaries (tests/test_health.py pattern) —
   both exit paths get real coverage without touching box state.
+- Burst compute (runbook §7): `ops/resize_research.sh` (run OFF-box from a
+  doctl host) resizes the droplet up/down around broad research runs —
+  CPU/RAM-only, **never** `--resize-disk` (permanent; blocks resizing back
+  down; a test greps the script for it). `ops/research_caps.sh` (on-box) owns
+  the generated `rdq-research.service.d/resources.conf` drop-in and re-sizes
+  thread/memory caps to detected hardware — rerun it after ANY resize instead
+  of hand-editing caps; it refuses to restart over a live run (local_qlib
+  container / fin_quant process) without `--force`. Both are stub-binary
+  testable (tests/test_research_caps.py, tests/test_resize_research.py).
 - `ops/sweep.py` (US-041) derives SOTA **offline from the trace logs**: the
   FileStorage layout is `<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl`, and a
   loop's `feedback` pkl (`.decision` attr) pairs with its `runner result` pkl

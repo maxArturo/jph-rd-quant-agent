@@ -262,3 +262,47 @@ tunneled through the OneCLI proxy, which drops long-lived connections.
 deafness recurs, verify that override is still in place before hunting
 elsewhere. Messages sent while the bot was deaf are **not replayed** —
 resend them.
+
+## 7. Burst compute: resize for broad research runs
+
+The base droplet (s-4vcpu-8gb, 4 **shared** vCPU / 8G, $48/mo) cannot train
+581-name us_liquid models inside the 3600s qrun budget — the 2026-08-05 broad
+run burned most of its hypothesis budget on training timeouts (~5–6 min/epoch
+on 3 threads). For broad runs, resize UP to dedicated CPU first, back DOWN
+after. DO bills per-second and a CPU/RAM-only resize is reversible, so a 24h
+run on c-16 (16 dedicated vCPU / 32G, $0.50/hr) adds ~$12.
+
+**Run from your laptop** (any doctl-authenticated host on the tailnet —
+NEVER from the box itself; the resize powers it off):
+
+```sh
+ops/resize_research.sh status   # size, state, $/hr, active-run check
+ops/resize_research.sh up       # -> c-16; or: up c-32 ($1/hr)
+# ... launch the broad run, wait for it to finish ...
+ops/resize_research.sh down     # -> s-4vcpu-8gb
+```
+
+`up`/`down` do: active-run guard (a resize kills a live run; `--force`
+overrides) → graceful shutdown → CPU/RAM-only resize → power-on → re-derive
+the rdq-research resource caps for the new hardware via
+`ops/research_caps.sh` over ssh (which restarts rdq-research). Everything
+else (orchestrator, monitoring, timers) comes back on its own — user units
+are enabled and linger is on.
+
+Hard rules:
+
+- **Never pass `--resize-disk`** (not via the script, not by hand in the DO
+  console). A disk resize is PERMANENT and blocks ever resizing back down to
+  the cheap base size. The script never does; both tests and this rule exist
+  because the console makes the permanent flavor the prominent button.
+- Target plans need a base disk >= the current 160G (the script checks):
+  c-16/c-32 qualify, c-8 and most g- slugs do NOT.
+- Don't resize during a run — approve/stop it first (see §2), or `--force`
+  if the run is expendable.
+
+`ops/research_caps.sh` owns
+`~/.config/systemd/user/rdq-research.service.d/resources.conf` (generated,
+don't hand-edit): threads = cores-2, container mem = mem-4G, floors at the
+measured 4-core/8G values. Run it by hand (no args) after any manual resize;
+`--print` previews without touching systemd. The qrun wall-clock stays at
+3600s — on burst hardware the budget is generous instead of binding.
