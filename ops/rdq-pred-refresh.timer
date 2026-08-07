@@ -1,9 +1,14 @@
-# Weekday 06:45 America/New_York trigger for rdq-pred-refresh.service (US-048).
+# Weekday 04:45 America/New_York trigger for rdq-pred-refresh.service
+# (US-048/049).
 #
-# Slotted between rdq-data-refresh.timer (06:30 ET — advancing the store is
-# exactly what stales the promoted pred.pkl) and rdq-rebalance.timer
-# (08:00 ET): a ~13 min GRU re-fit finishes with an hour to spare, and the
-# service's own timeout keeps a runaway train from colliding with the
+# Slotted after rdq-data-refresh.timer (04:30 ET — advancing the store is
+# exactly what stales the promoted pred.pkl) and hours before
+# rdq-rebalance.timer (08:00 ET). Moved 06:45 -> 04:45 on 2026-08-07: the
+# old slot left 75 minutes for the qrun re-fit, whose early-stop-dependent
+# duration overran the budget that morning and delivered predictions five
+# minutes after the rebalance's stale-abort. The refresh is now an
+# exact-weights re-predict (~10-15 min, deterministic), so this slot is pure
+# slack: a failure leaves the operator three hours to intervene before the
 # rebalance. Explicit timezone so US DST never drifts the run relative to
 # the market session.
 #
@@ -13,10 +18,10 @@
 # manual docker procedure.
 
 [Unit]
-Description=Weekday 06:45 America/New_York trigger for the promoted-strategy prediction refresh
+Description=Weekday 04:45 America/New_York trigger for the promoted-strategy prediction refresh
 
 [Timer]
-OnCalendar=Mon..Fri 06:45 America/New_York
+OnCalendar=Mon..Fri 04:45 America/New_York
 Persistent=true
 AccuracySec=1min
 

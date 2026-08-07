@@ -47,6 +47,9 @@ def make_workspace(tmp_path: Path) -> Path:
     pred = workspace / "mlruns" / "1" / "run1" / "artifacts" / "pred.pkl"
     pred.parent.mkdir(parents=True)
     pred.write_bytes(b"\x00")
+    # The backtested run's shape: US-049 snapshots its params.pkl.
+    (pred.parent / "params.pkl").write_bytes(b"gpu-weights")
+    (pred.parent / "portfolio_analysis").mkdir()
     logs = workspace / "logs"
     logs.mkdir()
     (logs / "docker_execution_20260806_150000.log").write_text(f"x\n{CONTEXT_LINE}\n")
@@ -150,6 +153,7 @@ class TestMain:
         assert rc == 0
         assert (workspace / "conf_pred_refresh.yaml").is_file()
         assert (workspace / "pred_refresh.env").is_file()
+        assert (workspace / "pred_refresh_params.pkl").read_bytes() == b"gpu-weights"
         promoted = StateStore(db).get_promoted_strategy()
         assert promoted is not None
         assert promoted.workspace_path == str(workspace)

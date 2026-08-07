@@ -9,7 +9,8 @@ workspace paths — a run executed on a GPU worker has neither (no thread row;
 pickles say /root/...). This command produces the SAME records the normal
 flow writes (orchestrator/promotion.py confirm_promotion):
 
-1. conf_pred_refresh.yaml + pred_refresh.env inside the workspace
+1. conf_pred_refresh.yaml + pred_refresh.env + pred_refresh_params.pkl (the
+   backtested run's weights, US-049) inside the workspace
    (execution.pred_refresh.snapshot_pred_refresh).
 2. The promoted_strategy row in orchestrator/state.sqlite with the
    conf-derived universe (US-023: market comes from the workspace conf,
@@ -147,8 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         print("dry-run (no --yes): nothing written")
         return 0
 
-    conf_path, env_path = snapshot_pred_refresh(workspace)
-    print(f"snapshot written: {conf_path.name}, {env_path.name}")
+    conf_path, env_path, params_path = snapshot_pred_refresh(workspace)
+    print(f"snapshot written: {conf_path.name}, {env_path.name}, {params_path.name}")
     promoted = store.set_promoted_strategy(
         str(workspace),
         {

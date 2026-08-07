@@ -172,8 +172,10 @@ journalctl --user -u rdq-sweep.service -n 50         # last retention sweep
 
 ### "predictions stale" rebalance abort
 
-The 06:45 ET `rdq-pred-refresh.service` regenerates the promoted workspace's
-predictions every trading morning (docker qrun, ~13 min; full qrun output in
+The 04:45 ET `rdq-pred-refresh.service` re-predicts the promoted workspace's
+predictions every trading morning from the promoted run's exact weights
+(docker run of the workspace copy of `execution/pred_refresh_predict.py`,
+~10-15 min, US-049 — no re-fit; container output in
 `<workspace>/logs/pred_refresh_<date>.log`). If a rebalance still aborts
 stale, check that unit's journal first, kill any stuck
 `rdq-pred-refresh-<date>` container (`docker ps`), then rerun supervised and
@@ -185,8 +187,10 @@ systemctl --user start rdq-rebalance.service            # recover the trading da
 ```
 
 If the failure says the snapshot is missing (`conf_pred_refresh.yaml` /
-`pred_refresh.env`), re-promote the strategy from its Slack thread — the
-promotion flow writes the snapshot.
+`pred_refresh.env` / `pred_refresh_params.pkl`), re-promote the strategy
+from its Slack thread — the promotion flow writes the snapshot — or run
+`execution.pred_refresh.snapshot_pred_refresh` by hand (it needs the
+workspace's backtested mlflow run: params.pkl + portfolio_analysis/).
 
 The orchestrator is quiet by design for plain conversation: it logs tool
 actions (`saved directive`, `started research run`, `trading halted`, ...)

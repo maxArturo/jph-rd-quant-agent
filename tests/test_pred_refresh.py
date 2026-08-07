@@ -1,15 +1,17 @@
-"""US-048: automated daily prediction refresh for the promoted strategy.
+"""US-048/049: automated daily prediction refresh for the promoted strategy.
 
 Covers the promote-time snapshot (source-conf choice, record reduction to
-SignalRecord-only with jinja preserved, context recovery from docker logs)
-and the morning refresh pipeline (docker invocation shape, test_end override,
-freshness self-check against a tmp-dir store, clean skips, failure exits,
-and refresh-run pruning). The docker runner is injected — no containers run.
+SignalRecord-only with jinja preserved, context recovery from docker logs,
+promoted-weights copy) and the morning refresh pipeline (docker invocation
+shape, test_end override, predict-script copy, freshness self-check against
+a tmp-dir store, clean skips, failure exits, and refresh-run pruning). The
+docker runner is injected — no containers run.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,13 +19,18 @@ import pytest
 import yaml
 from jinja2 import Environment, Undefined
 
+from execution import pred_refresh_predict
 from execution.pred_refresh import (
+    PREDICT_SCRIPT_NAME,
+    SNAPSHOT_CONF_NAME,
+    SNAPSHOT_PARAMS_NAME,
     PredRefreshError,
     choose_source_conf,
     describe_cross_section,
     describe_promoted,
     docker_command,
     load_env_file,
+    locate_promoted_params,
     prune_refresh_runs,
     recover_context,
     reduce_records,
@@ -96,6 +103,27 @@ CONTEXT_LINE = (
 TRAIN_LINE = "GeneralPTNN parameters setting: {'num_features': 20, 'lr': 0.0005}"
 
 
+def backtested_run(
+    workspace: Path,
+    run: str = "research0",
+    params: bytes = b"promoted-weights",
+    params_mtime: float | None = None,
+) -> Path:
+    """A promoted-shaped mlflow run: pred + params + PortAnaRecord output.
+
+    The pred.pkl carries an old date and mtime so it never wins the
+    newest-mtime freshness race against refresh runs the tests write later.
+    """
+    write_pred(workspace, {"2026-07-10": {"AAPL": 0.1}}, run=run, mtime=1.0)
+    artifacts = workspace / "mlruns" / "1" / run / "artifacts"
+    params_path = artifacts / "params.pkl"
+    params_path.write_bytes(params)
+    if params_mtime is not None:
+        os.utime(params_path, (params_mtime, params_mtime))
+    (artifacts / "portfolio_analysis").mkdir(exist_ok=True)
+    return params_path
+
+
 def make_workspace(tmp_path: Path, sota: bool = False) -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -107,6 +135,7 @@ def make_workspace(tmp_path: Path, sota: bool = False) -> Path:
     (logs / "docker_execution_20260714_151810.log").write_text(
         f"boilerplate\n{CONTEXT_LINE}\nmore lines\n{TRAIN_LINE}\n"
     )
+    backtested_run(workspace)
     return workspace
 
 
@@ -120,7 +149,7 @@ def rendered(conf_text: str) -> dict:
 
 def test_snapshot_reduces_records_to_signal_only(tmp_path: Path) -> None:
     workspace = make_workspace(tmp_path)
-    conf_path, _ = snapshot_pred_refresh(workspace)
+    conf_path, _, _ = snapshot_pred_refresh(workspace)
     data = rendered(conf_path.read_text())
     records = data["task"]["record"]
     assert [r["class"] for r in records] == ["SignalRecord"]
@@ -132,7 +161,7 @@ def test_snapshot_reduces_records_to_signal_only(tmp_path: Path) -> None:
 
 def test_snapshot_keeps_jinja_placeholders(tmp_path: Path) -> None:
     workspace = make_workspace(tmp_path)
-    conf_path, _ = snapshot_pred_refresh(workspace)
+    conf_path, _, _ = snapshot_pred_refresh(workspace)
     text = conf_path.read_text()
     assert '{{ test_end | default("null", true) }}' in text
     assert "{{ n_epochs }}" in text
@@ -187,13 +216,14 @@ def make_factor_workspace(tmp_path: Path, parquet: bool = True) -> Path:
     (logs / "docker_execution_20260714_151810.log").write_text(
         f"boilerplate\n{CONTEXT_LINE}\nmore lines\n{TRAIN_LINE}\n"
     )
+    backtested_run(workspace)
     return workspace
 
 
 def test_snapshot_supports_factor_workspace_conf_names(tmp_path: Path) -> None:
     workspace = make_factor_workspace(tmp_path)
     assert choose_source_conf(workspace).name == "conf_combined_factors_sota_model.yaml"
-    conf_path, env_path = snapshot_pred_refresh(workspace)
+    conf_path, env_path, _ = snapshot_pred_refresh(workspace)
     assert conf_path.is_file() and env_path.is_file()
     records = rendered(conf_path.read_text())["task"]["record"]
     assert [r["class"] for r in records] == ["SignalRecord"]
@@ -211,7 +241,7 @@ def test_factor_workspace_falls_back_to_baseline_when_parquet_cleaned(
 
 def test_snapshot_env_recovers_context_and_container_env(tmp_path: Path) -> None:
     workspace = make_workspace(tmp_path)
-    _, env_path = snapshot_pred_refresh(workspace)
+    _, env_path, _ = snapshot_pred_refresh(workspace)
     env = load_env_file(env_path)
     assert env["test_end"] == "2026-07-10"
     assert env["n_epochs"] == "100"
@@ -314,8 +344,12 @@ def test_refresh_happy_path_posts_success(tmp_path: Path) -> None:
     assert "workspace " in notice and "promoted 20" in notice
     assert "2 names scored" in notice
     assert "top 2: AAPL +1.000, MSFT +0.500" in notice
-    # qrun output went to a real log file inside the workspace.
+    # Container output went to a real log file inside the workspace.
     assert (workspace / "logs" / "pred_refresh_20260717.log").is_file()
+    # The in-container script was copied in fresh (deploys propagate).
+    assert (workspace / PREDICT_SCRIPT_NAME).read_text() == (
+        Path(pred_refresh_predict.__file__).read_text()
+    )
 
     (command,) = commands
     joined = " ".join(command)
@@ -329,9 +363,11 @@ def test_refresh_happy_path_posts_success(tmp_path: Path) -> None:
     assert "test_end=2026-07-16" not in joined
     assert "-e n_epochs=100" in joined
     assert "-e MLFLOW_ALLOW_FILE_STORE=true" in joined
-    # qrun + in-container chmod (new mlruns files are root-owned).
+    # Exact-weights re-predict (US-049, never qrun: a re-fit's duration is
+    # stochastic) + in-container chmod (new mlruns files are root-owned).
     assert command[-3:-1] == ["sh", "-c"]
-    assert "qrun conf_pred_refresh.yaml" in command[-1]
+    assert f"python {PREDICT_SCRIPT_NAME}" in command[-1]
+    assert "qrun" not in command[-1]
     assert "chmod -R 777 /workspace/qlib_workspace/mlruns" in command[-1]
 
 
@@ -411,7 +447,7 @@ def test_refresh_fails_on_docker_nonzero_exit(tmp_path: Path) -> None:
         runner=lambda command, log_path, timeout: 137,
     )
     assert rc == 1
-    assert "docker qrun exited 137" in notices[0]
+    assert "docker re-predict exited 137" in notices[0]
 
 
 def test_refresh_crash_notifies_then_raises(tmp_path: Path) -> None:
@@ -471,14 +507,77 @@ def test_describe_cross_section_ranks_and_caps_top_names() -> None:
     assert "IBM" not in line
 
 
+# --- snapshot: promoted weights (US-049) -----------------------------------------
+
+
+def test_snapshot_copies_promoted_params(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)
+    _, _, params_path = snapshot_pred_refresh(workspace)
+    assert params_path == workspace / SNAPSHOT_PARAMS_NAME
+    assert params_path.read_bytes() == b"promoted-weights"
+
+
+def test_locate_promoted_params_ignores_refresh_runs(tmp_path: Path) -> None:
+    """Refresh runs also save a params.pkl (qrun-era re-fits, US-049 copies) —
+    a re-promotion of an already-refreshed workspace must still pin the
+    BACKTESTED weights, never a newer stochastic re-fit's."""
+    workspace = make_workspace(tmp_path)
+    newer_refresh = signal_only_run(workspace, "refresh9", mtime=9e9)
+    os.utime(newer_refresh / "artifacts" / "params.pkl", (9e9, 9e9))
+    assert locate_promoted_params(workspace).read_bytes() == b"promoted-weights"
+
+
+def test_locate_promoted_params_prefers_newest_backtested_run(tmp_path: Path) -> None:
+    workspace = make_workspace(tmp_path)  # research0 params at mtime=now
+    backtested_run(workspace, run="research1", params=b"older-weights", params_mtime=10.0)
+    assert locate_promoted_params(workspace).read_bytes() == b"promoted-weights"
+
+
+def test_locate_promoted_params_without_backtested_run_raises(tmp_path: Path) -> None:
+    workspace = tmp_path / "bare"
+    signal_only_run(workspace, "refresh1", mtime=1000.0)
+    with pytest.raises(PredRefreshError, match="no backtested run"):
+        locate_promoted_params(workspace)
+
+
+def test_refresh_fails_when_params_snapshot_missing(tmp_path: Path) -> None:
+    """A pre-US-049 snapshot (conf + env only) must fail with the remedy —
+    the operator re-promotes or re-runs snapshot_pred_refresh by hand."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    (workspace / SNAPSHOT_PARAMS_NAME).unlink()
+    notices: list[str] = []
+    rc = run_pred_refresh(
+        notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=fresh_writer(workspace),
+    )
+    assert rc == 1
+    assert "snapshot missing" in notices[0]
+    assert SNAPSHOT_PARAMS_NAME in notices[0]
+
+
+def test_predict_script_constants_match_pred_refresh() -> None:
+    """pred_refresh_predict.py may not import this repo (it runs inside the
+    container), so it duplicates the snapshot file names — keep them equal."""
+    assert pred_refresh_predict.CONF_NAME == SNAPSHOT_CONF_NAME
+    assert pred_refresh_predict.PARAMS_NAME == SNAPSHOT_PARAMS_NAME
+
+
 # --- pruning --------------------------------------------------------------------
 
 
 def signal_only_run(workspace: Path, run: str, mtime: float) -> Path:
+    """A qrun-era refresh run: SignalRecord artifacts + qrun bookkeeping FILES
+    (config/dataset/task — which made pruning a silent no-op until US-049)."""
     write_pred(workspace, {FRESH_DAY: {"AAPL": 1.0}}, run=run, mtime=mtime)
     artifacts = workspace / "mlruns" / "1" / run / "artifacts"
     (artifacts / "label.pkl").write_bytes(b"x")
     (artifacts / "params.pkl").write_bytes(b"x")
+    (artifacts / "config").write_bytes(b"x")
+    (artifacts / "dataset").write_bytes(b"x")
+    (artifacts / "task").write_bytes(b"x")
     return workspace / "mlruns" / "1" / run
 
 

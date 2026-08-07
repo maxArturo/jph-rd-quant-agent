@@ -1,40 +1,46 @@
-"""Automated daily prediction refresh for the promoted strategy (US-048).
+"""Automated daily prediction refresh for the promoted strategy (US-048/049).
 
 Two halves, both promoted-workspace-local:
 
 * **Snapshot (promote time).** ``snapshot_pred_refresh(workspace)`` writes the
-  two files a refresh needs so there is no log archaeology later:
+  three files a refresh needs so there is no log archaeology later:
   ``conf_pred_refresh.yaml`` — the conf the SOTA run actually used (the sota
   variant when its combined-factors parquet still exists, else the baseline)
-  with ``record:`` reduced to SignalRecord ONLY — and ``pred_refresh.env`` —
+  with ``record:`` reduced to SignalRecord ONLY —, ``pred_refresh.env`` —
   the rendered jinja context recovered from the workspace's
   docker_execution logs (plus ``num_features`` from the training log, and the
-  container env QTDockerEnv always sets). Called by the promotion flow
-  (orchestrator/promotion.py); a failure there warns the operator instead of
-  blocking the promotion.
+  container env QTDockerEnv always sets) — and ``pred_refresh_params.pkl`` —
+  a copy of the promoted (backtested) run's trained model. Called by the
+  promotion flow (orchestrator/promotion.py); a failure there warns the
+  operator instead of blocking the promotion.
 
-* **Refresh (every trading morning).** ``run_pred_refresh()`` re-runs the
-  snapshot conf in the local_qlib docker image with ``test_end=<today NY>``
-  (same mounts as QTDockerEnv), self-checks that the newest pred.pkl now
-  passes the rebalancer's freshness gate, prunes old refresh runs, and posts
-  the outcome to Slack. Exit codes: 0 = refreshed / already fresh / nothing
-  promoted (clean skip); 1 = failed (the rebalancer's stale-pred abort is the
-  backstop). Wired to rdq-pred-refresh.timer between the 06:30 data refresh
-  and the 08:00 rebalance.
+* **Refresh (every trading morning).** ``run_pred_refresh()`` re-predicts
+  from the snapshotted weights: it copies ``pred_refresh_predict.py`` into
+  the workspace and runs it in the local_qlib docker image with
+  ``test_end=<today NY>`` (same mounts as QTDockerEnv), self-checks that the
+  newest pred.pkl now passes the rebalancer's freshness gate, prunes old
+  refresh runs, and posts the outcome to Slack. Exit codes: 0 = refreshed /
+  already fresh / nothing promoted (clean skip); 1 = failed (the rebalancer's
+  stale-pred abort is the backstop). Wired to rdq-pred-refresh.timer between
+  the 04:30 data refresh and the 08:00 rebalance.
 
 Deliberate semantics (task doc "design decisions"):
 
-* The refresh RE-FITS the model (~13 min GRU on CPU) — the traded model is a
-  fresh stochastic re-fit, not the exact promoted weights. Exact-weights
-  re-predict from params.pkl is an explicit non-goal/follow-up.
+* The refresh re-predicts from EXACTLY the promoted run's weights (US-049,
+  replacing the US-048 qrun re-fit): a re-fit's early-stop epoch is
+  stochastic — the promoted model trained in ~52 min, the 2026-08-07 refresh
+  blew a 70-min budget still mid-fit — so its duration is unboundable
+  pre-open, and it trades a model nobody backtested. Inference is
+  deterministic (~10-15 min, dominated by the dataset build) and trades the
+  backtested weights.
 * SignalRecord-only sidesteps qlib's end-of-calendar IndexError (the backtest
   indexes calendar_index + 1 past test_end), so ``test_end=today`` is safe
   even though the store ends yesterday pre-open.
 * ``chmod -R 777 mlruns`` runs INSIDE the container (QTDockerEnv parity) —
   the new files are root-owned, so a host-side chmod would be too late.
-* qrun output streams to ``logs/pred_refresh_<date>.log`` (a real file, never
-  a pipe: an attached container whose stdout pipe loses its reader freezes
-  qlib training mid-epoch — see docs 2026-07-15 incident).
+* Container output streams to ``logs/pred_refresh_<date>.log`` (a real file,
+  never a pipe: an attached container whose stdout pipe loses its reader
+  freezes qlib mid-run — see docs 2026-07-15 incident).
 """
 
 from __future__ import annotations
@@ -59,16 +65,23 @@ from orchestrator.state import DEFAULT_DB_PATH, PromotedStrategy
 # (its market may be operator-pinned to freeze the traded universe).
 SNAPSHOT_CONF_NAME = signal.PRED_REFRESH_CONF_NAME
 SNAPSHOT_ENV_NAME = "pred_refresh.env"
+SNAPSHOT_PARAMS_NAME = "pred_refresh_params.pkl"
+# The in-container script (execution/pred_refresh_predict.py, copied fresh
+# into the workspace every refresh so deploys propagate without
+# re-snapshotting). It duplicates the conf and params names by design — it
+# must not import this repo; a test keeps them in sync.
+PREDICT_SCRIPT_NAME = "pred_refresh_predict.py"
 
 DEFAULT_IMAGE = "local_qlib:latest"
 DEFAULT_QLIB_DIR = Path("~/.qlib")
-# 06:45 start + 70 min ends at 07:55, just before the 08:00 rebalance — a
-# late refresh degrades to the rebalancer's stale-abort, never a collision.
-# Raised 50->70 on 2026-08-06: the broad-universe promoted workspace
-# (e05ad9b4, GeneralPTNN over 581 names) retrains in ~52 min on this box
-# (measured from its original training log; early stop after epoch 8), which
-# the old budget cut too close.
-DEFAULT_TIMEOUT_MINUTES = 70.0
+# Inference from the snapshotted weights is deterministic: ~6 min dataset
+# build + ~3 min predict on the broad-universe workspace (e05ad9b4, 581
+# names), so 40 min is 3-4x headroom. A 04:45 start + 40 min ends by 05:25,
+# hours before the 08:00 rebalance — a late refresh degrades to the
+# rebalancer's stale-abort, never a collision. (The qrun re-fit era needed
+# 50-70 min budgets and still overran: early stopping makes a re-fit's
+# duration stochastic — the 2026-08-07 failure that motivated US-049.)
+DEFAULT_TIMEOUT_MINUTES = 40.0
 DEFAULT_KEEP_REFRESH_RUNS = 5
 
 # qrun logs the jinja context it rendered with; this is the recovery anchor.
@@ -81,10 +94,17 @@ _CONTAINER_ENV = {
     "MLFLOW_ALLOW_FILE_STORE": "true",
 }
 
-# A refresh (SignalRecord-only) mlflow run logs exactly these artifacts; any
-# run with anything else (portfolio_analysis, sig_analysis, ...) is a real
-# research run and must never be pruned.
-_REFRESH_ONLY_ARTIFACTS = frozenset({"pred.pkl", "label.pkl", "params.pkl"})
+# A refresh mlflow run logs at most these artifact FILES (config/dataset/task
+# are qrun bookkeeping the US-048 re-fit era also wrote); any run with an
+# artifact directory (portfolio_analysis, sig_analysis, ...) or an unknown
+# file is a real research run and must never be pruned.
+_REFRESH_ONLY_ARTIFACTS = frozenset(
+    {"pred.pkl", "label.pkl", "params.pkl", "config", "dataset", "task"}
+)
+
+# The backtested (promoted) run is the one whose artifacts include the
+# PortAnaRecord output — refresh runs never have it.
+_BACKTEST_ARTIFACT_DIR = "portfolio_analysis"
 
 # Runner signature: (docker command, qrun log file, timeout seconds) -> rc.
 Runner = Callable[[Sequence[str], Path, float], int]
@@ -221,12 +241,36 @@ def recover_context(workspace: Path) -> dict[str, str]:
     return context
 
 
-def snapshot_pred_refresh(workspace: Path) -> tuple[Path, Path]:
-    """Write conf_pred_refresh.yaml + pred_refresh.env into the workspace.
+def locate_promoted_params(workspace: Path) -> Path:
+    """params.pkl of the promoted (backtested) run — newest run with a
+    portfolio_analysis artifact dir.
 
-    Everything a later refresh needs, captured while the run's logs still
-    exist. Overwrites any previous snapshot (promotion is the source of
-    truth). Returns (conf_path, env_path).
+    The discriminator matters: refresh runs also save a params.pkl (the
+    US-048 re-fit era's fresh fits, and US-049's copy of the promoted
+    weights), so on a re-promotion of an already-refreshed workspace the
+    newest params.pkl overall could be a stochastic re-fit nobody backtested.
+    Only the backtested run carries PortAnaRecord output.
+    """
+    candidates: list[tuple[float, Path]] = []
+    for params in workspace.glob("mlruns/*/*/artifacts/params.pkl"):
+        if ".trash" in params.parts:
+            continue
+        if (params.parent / _BACKTEST_ARTIFACT_DIR).is_dir():
+            candidates.append((params.stat().st_mtime, params))
+    if not candidates:
+        raise PredRefreshError(
+            f"no backtested run with params.pkl + {_BACKTEST_ARTIFACT_DIR}/ under "
+            f"{workspace}/mlruns — cannot snapshot the promoted model's weights"
+        )
+    return max(candidates)[1]
+
+
+def snapshot_pred_refresh(workspace: Path) -> tuple[Path, Path, Path]:
+    """Write conf_pred_refresh.yaml + pred_refresh.env + pred_refresh_params.pkl.
+
+    Everything a later refresh needs, captured while the run's logs and
+    artifacts still exist. Overwrites any previous snapshot (promotion is the
+    source of truth). Returns (conf_path, env_path, params_path).
     """
     workspace = workspace.expanduser()
     source = choose_source_conf(workspace)
@@ -236,11 +280,14 @@ def snapshot_pred_refresh(workspace: Path) -> tuple[Path, Path]:
     for key, value in env.items():
         if "=" in key or any("\n" in part for part in (key, value)):
             raise PredRefreshError(f"context entry {key!r} cannot be stored as KEY=VALUE")
+    promoted_params = locate_promoted_params(workspace)
     conf_path = workspace / SNAPSHOT_CONF_NAME
     env_path = workspace / SNAPSHOT_ENV_NAME
+    params_path = workspace / SNAPSHOT_PARAMS_NAME
     conf_path.write_text(conf_text)
     env_path.write_text("".join(f"{key}={value}\n" for key, value in env.items()))
-    return conf_path, env_path
+    shutil.copyfile(promoted_params, params_path)
+    return conf_path, env_path, params_path
 
 
 # -- refresh (every trading morning) ------------------------------------------
@@ -289,14 +336,14 @@ def docker_command(
         image,
         "sh",
         "-c",
-        f"qrun {SNAPSHOT_CONF_NAME}; rc=$?;"
+        f"python {PREDICT_SCRIPT_NAME}; rc=$?;"
         " chmod -R 777 /workspace/qlib_workspace/mlruns; exit $rc",
     ]
     return command
 
 
 def _docker_runner(command: Sequence[str], log_path: Path, timeout_seconds: float) -> int:
-    """Run docker with qrun output appended to a real file (never a pipe)."""
+    """Run docker with container output appended to a real file (never a pipe)."""
     with log_path.open("ab") as log:
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -308,9 +355,9 @@ def _docker_runner(command: Sequence[str], log_path: Path, timeout_seconds: floa
             )
         except subprocess.TimeoutExpired as exc:
             raise PredRefreshError(
-                f"docker qrun exceeded {timeout_seconds / 60:.0f} min — the container may "
-                "still be running; check `docker ps` and kill any stuck rdq-pred-refresh "
-                "container before rerunning"
+                f"docker re-predict exceeded {timeout_seconds / 60:.0f} min — the container "
+                "may still be running; check `docker ps` and kill any stuck "
+                "rdq-pred-refresh container before rerunning"
             ) from exc
     return proc.returncode
 
@@ -436,11 +483,13 @@ def run_pred_refresh(
         workspace = Path(promoted.workspace_path).expanduser()
         conf_path = workspace / SNAPSHOT_CONF_NAME
         env_path = workspace / SNAPSHOT_ENV_NAME
-        if not conf_path.is_file() or not env_path.is_file():
+        params_path = workspace / SNAPSHOT_PARAMS_NAME
+        if not conf_path.is_file() or not env_path.is_file() or not params_path.is_file():
             raise PredRefreshError(
-                f"pred-refresh snapshot missing in {workspace}: need {SNAPSHOT_CONF_NAME} "
-                f"and {SNAPSHOT_ENV_NAME} — re-promote the strategy (promotion snapshots "
-                "them) or run execution.pred_refresh.snapshot_pred_refresh by hand"
+                f"pred-refresh snapshot missing in {workspace}: need {SNAPSHOT_CONF_NAME}, "
+                f"{SNAPSHOT_ENV_NAME} and {SNAPSHOT_PARAMS_NAME} — re-promote the strategy "
+                "(promotion snapshots them) or run "
+                "execution.pred_refresh.snapshot_pred_refresh by hand"
             )
         fresh = _fresh_cross_section(workspace, as_of, calendar_path)
         if fresh is not None:
@@ -457,6 +506,9 @@ def run_pred_refresh(
         env = load_env_file(env_path)
         env.update(_CONTAINER_ENV)
         env["test_end"] = as_of.isoformat()
+        # Fresh copy every run: the script deploys with this repo, the
+        # snapshot files deploy with promotions.
+        shutil.copyfile(Path(__file__).with_name(PREDICT_SCRIPT_NAME), workspace / PREDICT_SCRIPT_NAME)
         log_path = workspace / "logs" / f"pred_refresh_{as_of:%Y%m%d}.log"
         log_path.parent.mkdir(exist_ok=True)
         command = docker_command(
@@ -465,7 +517,7 @@ def run_pred_refresh(
         started = time.monotonic()
         returncode = runner(command, log_path, timeout_minutes * 60)
         if returncode != 0:
-            raise PredRefreshError(f"docker qrun exited {returncode} — see {log_path}")
+            raise PredRefreshError(f"docker re-predict exited {returncode} — see {log_path}")
 
         # Self-check: the exact gate the rebalancer will apply.
         pred_path = signal.locate_pred(workspace)
@@ -475,8 +527,8 @@ def run_pred_refresh(
 
         minutes = (time.monotonic() - started) / 60
         message = (
-            f"pred refresh ({as_of}): regenerated promoted-strategy predictions "
-            f"for the 08:00 ET paper rebalance — {minutes:.0f} min"
+            f"pred refresh ({as_of}): re-predicted from the promoted run's exact "
+            f"weights for the 08:00 ET paper rebalance — {minutes:.0f} min"
             f"\n• {describe_promoted(promoted)}"
             f"\n• {describe_cross_section(pred_date, scores)}"
         )
@@ -497,7 +549,10 @@ def run_pred_refresh(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Regenerate the promoted strategy's predictions for today (US-048)"
+        description=(
+            "Re-predict the promoted strategy's predictions for today from its "
+            "exact promoted weights (US-048/049)"
+        )
     )
     parser.add_argument(
         "--as-of",

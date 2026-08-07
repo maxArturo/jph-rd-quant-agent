@@ -15,8 +15,9 @@ The candidate is re-derived from the run row + artifacts on every click
 buttons keep working across orchestrator restarts.
 
 Confirming also snapshots everything the automated morning prediction
-refresh needs into the workspace (conf_pred_refresh.yaml + pred_refresh.env,
-US-048 — see execution/pred_refresh.py) while the run's logs still exist. A
+refresh needs into the workspace (conf_pred_refresh.yaml + pred_refresh.env +
+pred_refresh_params.pkl, US-048/049 — see execution/pred_refresh.py) while
+the run's logs and artifacts still exist. A
 snapshot failure warns in-thread but never blocks the promotion: the manual
 refresh procedure remains available, and the rebalancer's stale-pred abort
 is the backstop.
@@ -278,7 +279,8 @@ class PromotionFlow:
             lines.append(
                 f":warning: Pred-refresh snapshot failed ({exc}) — the automated morning"
                 " prediction refresh cannot run for this strategy until"
-                f" {pred_refresh.SNAPSHOT_CONF_NAME} and {pred_refresh.SNAPSHOT_ENV_NAME}"
+                f" {pred_refresh.SNAPSHOT_CONF_NAME}, {pred_refresh.SNAPSHOT_ENV_NAME}"
+                f" and {pred_refresh.SNAPSHOT_PARAMS_NAME}"
                 " exist in the workspace (tasks/us-048-automated-pred-refresh.md)."
             )
         say(text="\n".join(lines), thread_ts=thread_ts)

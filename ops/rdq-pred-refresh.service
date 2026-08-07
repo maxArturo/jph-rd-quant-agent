@@ -1,28 +1,33 @@
-# RD-Agent(Q) morning prediction refresh for the promoted strategy (US-048).
+# RD-Agent(Q) morning prediction refresh for the promoted strategy
+# (US-048/049).
 #
-# Re-runs the promoted workspace's SignalRecord-only conf
-# (conf_pred_refresh.yaml + pred_refresh.env, snapshotted at promote time) in
+# Re-predicts from the promoted run's exact weights: runs the workspace copy
+# of execution/pred_refresh_predict.py (conf_pred_refresh.yaml +
+# pred_refresh.env + pred_refresh_params.pkl, snapshotted at promote time) in
 # the local_qlib docker image with test_end=<today NY>, so the 08:00
 # rebalance trades fresh predictions instead of aborting "predictions stale"
-# every morning after the data refresh advances the store. The rebalancer's
-# own freshness gate stays as the backstop when this fails. Skips cleanly
+# every morning after the data refresh advances the store. No re-fit — the
+# traded model is exactly the backtested one, and the run length is
+# deterministic (~10-15 min; the US-048 qrun re-fit era's stochastic
+# early-stop overran every budget it was given). The rebalancer's own
+# freshness gate stays as the backstop when this fails. Skips cleanly
 # (exit 0, Slack notice) when nothing is promoted or predictions are already
 # fresh; any failure exits nonzero and posts to Slack.
 #
 # Purely local work (docker + filesystem + SQLite read) — no onecli wrapper,
 # so no proxy env exists and Slack posts go direct (no NO_PROXY needed).
-# qrun output streams to <workspace>/logs/pred_refresh_<date>.log.
+# Container output streams to <workspace>/logs/pred_refresh_<date>.log.
 #
-# Started by rdq-pred-refresh.timer (weekday 06:45 America/New_York, between
-# the 06:30 data refresh and the 08:00 rebalance); no [Install] section on
-# purpose — enable the TIMER, not this service.
+# Started by rdq-pred-refresh.timer (weekday 04:45 America/New_York, after
+# the 04:30 data refresh, hours before the 08:00 rebalance); no [Install]
+# section on purpose — enable the TIMER, not this service.
 #
 # Install:  ops/install_services.sh
 # Enable:   systemctl --user enable --now rdq-pred-refresh.timer
 # Logs:     journalctl --user -u rdq-pred-refresh.service
 
 [Unit]
-Description=RD-Agent(Q) morning prediction refresh (promoted workspace, SignalRecord-only qrun)
+Description=RD-Agent(Q) morning prediction refresh (promoted workspace, exact-weights re-predict)
 After=network-online.target rdq-data-refresh.service
 Wants=network-online.target
 

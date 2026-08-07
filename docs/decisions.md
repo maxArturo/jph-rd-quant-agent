@@ -860,3 +860,44 @@ strategy; the promoted refresh conf was pinned to a frozen
 The rdagent_client sends the universe on start_run and resume verbatim;
 conversation.py already passed it. Runs started before this change resume
 under the service default env, exactly as they started.
+
+## 2026-08-07 — US-049: daily pred refresh re-predicts from exact promoted weights; timers shifted to 04:30/04:45 ET
+
+**Incident.** The 2026-08-07 morning refresh hit its 70-min timeout mid-fit
+(epoch 14 of a GeneralPTNN re-fit whose original training early-stopped at
+epoch 8) and the 08:00 rebalance stale-aborted. The container actually
+finished at 08:05 — five minutes late. Root cause is structural, not
+resources: a qrun refresh RE-FITS the model, early stopping makes the fit
+length stochastic (worst case n_epochs=50 ≈ 4.5 h on this 4-core box), and
+no timeout inside a 06:45→08:00 window can contain that.
+
+**Decision.** The refresh no longer re-fits. `run_pred_refresh` copies
+`execution/pred_refresh_predict.py` into the promoted workspace and runs it
+in the local_qlib image: render conf_pred_refresh.yaml the way qrun does,
+build the dataset, CPU-unpickle `pred_refresh_params.pkl` (the promoted
+run's trained model, now copied at promote time by `snapshot_pred_refresh`
+from the newest mlflow run with a `portfolio_analysis` artifact dir — never
+a refresh re-fit's params), and write SignalRecord artifacts into a new
+mlruns run. Deterministic ~10-15 min (dataset build dominates), and the
+traded model is EXACTLY the backtested one — the US-048 era traded a fresh
+stochastic re-fit nobody backtested. Timeout drops 70 → 40 min. A CUDA
+map_location shim covers future GPU-trained promotions.
+
+**Explicitly rejected:** GPU-droplet bursting for the daily refresh. It puts
+provision→boot→sync→train→destroy (DO capacity not guaranteed; boot+sync
+dominates the GPU speedup) into the trading-critical pre-open path every
+morning. The GPU worker stays the RESEARCH backend; if weights ever need a
+re-fit cadence, run it off-path (weekend, alongside rdq-sweep) and re-promote.
+
+**Stopgap that stays:** rdq-data-refresh 06:30→04:30 ET, rdq-pred-refresh
+06:45→04:45 ET (FMP bars are final well before 04:30). A refresh failure now
+leaves ~3 h for the operator instead of 75 min.
+
+**Also fixed:** `prune_refresh_runs` was a silent no-op on qrun-era refresh
+runs — qrun always writes `config`/`dataset`/`task` artifact FILES, which the
+allowlist didn't include. They're allowed now; research runs stay protected
+by their artifact DIRS (portfolio_analysis/sig_analysis).
+
+**Migration note:** existing snapshots lack `pred_refresh_params.pkl`; the
+refresh fails with the remedy in the message. e05ad9b4's snapshot was
+re-run by hand at deploy time (2026-08-07).
