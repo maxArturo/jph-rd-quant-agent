@@ -42,13 +42,19 @@ HEALTHY_SS = (
     "LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n"
     "LISTEN 0 4096 100.68.23.10:443 0.0.0.0:*\n"
     "LISTEN 0 4096 100.68.23.10:3100 0.0.0.0:*\n"
+    "LISTEN 0 4096 100.68.23.10:8443 0.0.0.0:*\n"
 )
+# Mirrors the live box: three co-tenant mappings (OneCLI :443, Grafana :3100,
+# jph-master-tracker :8443) and no repo-owned :19900 until expose_traces runs.
 HEALTHY_SERVE = (
     "https://box.tail.ts.net:3100 (tailnet only)\n"
     "|-- / proxy http://127.0.0.1:3001\n"
     "\n"
     "https://box.tail.ts.net (tailnet only)\n"
     "|-- / proxy http://127.0.0.1:10254\n"
+    "\n"
+    "https://box.tail.ts.net:8443 (tailnet only)\n"
+    "|-- / proxy http://127.0.0.1:3200\n"
 )
 
 STUB_SYSTEMCTL = """#!/usr/bin/env bash
@@ -179,6 +185,57 @@ class TestHealthyBox:
         result = run_health(env)
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_cotenant_8443_mapping_is_healthy(self, tmp_path: Path) -> None:
+        """jph-master-tracker's :8443 -> 127.0.0.1:3200 belongs to another
+        project on this box: audited, counted as co-tenant, never a failure."""
+        _, env = make_stub_box(tmp_path)  # HEALTHY_SERVE already carries :8443
+        result = run_health(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "tailscale serve :8443" not in result.stdout
+        assert "3 co-tenant" in result.stdout
+
+
+class TestForeignServeOwnership:
+    """FOREIGN_SERVE is audited like the repo's own mappings — it is an
+    ownership annotation, not an escape hatch."""
+
+    def test_cotenant_retarget_fails_without_suggesting_serve_off(
+        self, tmp_path: Path
+    ) -> None:
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "serve.txt").write_text(
+            "https://box.tail.ts.net:8443 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n"
+        )
+        result = run_health(env)
+        assert result.returncode == 1
+        assert "FAIL  tailscale serve :8443" in result.stdout
+        assert "expected http://127.0.0.1:3200" in result.stdout
+        # Never tell the operator to switch off another project's mapping.
+        assert "--https=8443 off" not in result.stdout
+
+    def test_cotenant_funnel_still_fails(self, tmp_path: Path) -> None:
+        """Foreign ownership does not buy an exemption from the funnel ban."""
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "serve.txt").write_text(
+            "https://box.tail.ts.net:8443 (Funnel on)\n|-- / proxy http://127.0.0.1:3200\n"
+        )
+        result = run_health(env)
+        assert result.returncode == 1
+        assert "FAIL  tailscale funnel" in result.stdout
+
+    def test_repo_reserved_ports_never_listed_as_foreign(self) -> None:
+        """A foreign entry for 19899/19900 would whitelist the very exposure
+        this audit exists to catch; health.sh also rejects it at runtime."""
+        text = HEALTH.read_text()
+        foreign = re.search(r"declare -A FOREIGN_SERVE=\((.*?)\n\)", text, re.DOTALL)
+        assert foreign, "failed to parse FOREIGN_SERVE from health.sh"
+        for reserved in ("19899", "19900"):
+            assert reserved not in foreign.group(1)
+        assert re.search(r"declare -A REPO_SERVE=\(\s*\n\s*\[19900\]", text), (
+            "19900 must stay in REPO_SERVE — it is ours to add/remove"
+        )
+        assert "FOREIGN_SERVE claims repo-reserved port" in text
+
 
 class TestFailureModes:
     def test_inactive_service_named(self, tmp_path: Path) -> None:
@@ -254,13 +311,15 @@ class TestFailureModes:
         stub_dir, env = make_stub_box(tmp_path)
         (stub_dir / "serve.txt").write_text(
             HEALTHY_SERVE
-            + "\nhttps://box.tail.ts.net:8443 (tailnet only)\n"
-            + "|-- / proxy http://127.0.0.1:8443\n"
+            + "\nhttps://box.tail.ts.net:9443 (tailnet only)\n"
+            + "|-- / proxy http://127.0.0.1:9999\n"
         )
         result = run_health(env)
         assert result.returncode == 1
-        assert "FAIL  tailscale serve :8443" in result.stdout
+        assert "FAIL  tailscale serve :9443" in result.stdout
         assert "not in the PLAN.md port table" in result.stdout
+        # The remedy must offer both paths: remove it, or record it as foreign.
+        assert "FOREIGN_SERVE" in result.stdout
 
     def test_wrong_target_for_allowed_port_fails(self, tmp_path: Path) -> None:
         stub_dir, env = make_stub_box(tmp_path)

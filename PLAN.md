@@ -93,7 +93,7 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 
 **Slack tokens:** Socket Mode needs `xoxb-` + `xapp-` tokens. Both are used in HTTPS calls (`apps.connections.open`, Web API), so OneCLI header injection *should* work — verify in Phase 1; fallback is this repo's own `.env` (they're chat tokens, not brokerage keys — acceptable risk, decide then).
 
-**Networking / Tailscale (verified on this box):** the host is `nanoclaw-prod.tail05c9bf.ts.net` (Tailscale 1.98.3) and already uses **tailnet-only `tailscale serve`** to front local services over HTTPS (`:443 → 127.0.0.1:10254` OneCLI web UI; `:3100 → 127.0.0.1:3001`). This repo follows the same rule: **every service binds to `127.0.0.1` only; nothing listens on a public interface.** Anything a human needs in a browser gets a tailnet-only `tailscale serve` mapping (never `tailscale funnel` — no service here should ever be public). Port plan:
+**Networking / Tailscale (verified on this box):** the host is `nanoclaw-prod.tail05c9bf.ts.net` (Tailscale 1.98.3) and already uses **tailnet-only `tailscale serve`** to front local services over HTTPS (`:443 → 127.0.0.1:10254` OneCLI web UI; `:3100 → 127.0.0.1:3001` Grafana; `:8443 → 127.0.0.1:3200` jph-master-tracker). Those three belong to other projects sharing this box — `ops/health.sh` audits them (tailnet-only, expected target) but never turns them off; they live in its `FOREIGN_SERVE` table, while `REPO_SERVE` holds only what this repo may add or remove. This repo follows the same rule: **every service binds to `127.0.0.1` only; nothing listens on a public interface.** Anything a human needs in a browser gets a tailnet-only `tailscale serve` mapping (never `tailscale funnel` — no service here should ever be public). Port plan:
 
 | Service | Binds | Exposure |
 |---|---|---|
@@ -101,7 +101,9 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 | `rdagent server_ui` (control API :19899) | 127.0.0.1 | **not exposed** — orchestrator talks to it over localhost; it has known flask-cors advisories, keep it dark |
 | `rdagent ui` (Streamlit trace viewer, run on :19900 to avoid the 19899 collision) | 127.0.0.1 | `tailscale serve --bg --https=19900 http://127.0.0.1:19900` when research monitoring is wanted |
 | OneCLI web UI (:10254) | 127.0.0.1 | already served at `https://nanoclaw-prod.tail05c9bf.ts.net/` — used for approval rules (Phase 6) and manual approvals fallback |
-| Any future dashboard (e.g. P&L page) | 127.0.0.1 | new tailnet-only serve mapping on a dedicated HTTPS port; pick ports that don't collide with the existing 443/3100 mappings |
+| Grafana (:3001), co-tenant | 127.0.0.1 | pre-existing `:3100` mapping — monitoring compose stack, **not ours to change** |
+| jph-master-tracker app server (:3200), co-tenant | 127.0.0.1 | `:8443` mapping added 2026-08 by that project — **not ours to change** |
+| Any future dashboard (e.g. P&L page) | 127.0.0.1 | new tailnet-only serve mapping on a dedicated HTTPS port; pick ports that don't collide with the existing 443/3100/8443 mappings |
 
 `NO_PROXY` for all our processes must include `127.0.0.1,localhost` and the tailnet hostname/`100.64.0.0/10` range, so localhost control traffic and tailnet dashboard traffic never route through the OneCLI proxy.
 

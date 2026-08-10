@@ -12,7 +12,9 @@
 #   3. `tailscale serve status` matches the PLAN.md §1 port table: every
 #      mapping tailnet-only, never funnel, :19899 never exposed, :19900 (when
 #      enabled via ops/expose_traces.sh) proxying exactly http://127.0.0.1:19900,
-#      and no mapping outside the known allowlist.
+#      and no mapping outside the known allowlist. The allowlist distinguishes
+#      REPO_SERVE (ours to add/remove) from FOREIGN_SERVE (other projects
+#      sharing this box — audited, but never turned off from here).
 #
 # Exit: 0 on a healthy box; nonzero otherwise, naming each failing check.
 set -uo pipefail
@@ -40,17 +42,45 @@ ONESHOTS=(
 )
 
 # PLAN.md §1 port table: tailscale serve allowlist, serve port -> proxy target.
-# 443/3100 are pre-existing box mappings (OneCLI UI, not ours to change);
-# 19900 is the rdagent trace viewer, added on demand by ops/expose_traces.sh.
-declare -A ALLOWED_SERVE=(
+# Split by OWNERSHIP, because the two halves have different remedies when the
+# audit trips.
+#
+# REPO_SERVE — mappings this repo owns and may add/remove itself: currently
+# just the rdagent trace viewer, added on demand by ops/expose_traces.sh.
+declare -A REPO_SERVE=(
+  [19900]="http://127.0.0.1:19900"
+)
+# FOREIGN_SERVE — mappings belonging to OTHER projects co-tenanted on this
+# box. Still audited (tailnet-only, expected target, never a repo-reserved
+# port), but NOT ours to change: drift here is a question for the owning
+# project, never a `serve --https=<port> off` from this repo.
+#   443  -> OneCLI web UI (secrets vault + Notion app-connection grants)
+#   3100 -> Grafana, monitoring compose stack
+#   8443 -> jph-master-tracker app server
+declare -A FOREIGN_SERVE=(
   [443]="http://127.0.0.1:10254"
   [3100]="http://127.0.0.1:3001"
-  [19900]="http://127.0.0.1:19900"
+  [8443]="http://127.0.0.1:3200"
 )
 # Repo-reserved ports that must be loopback-only regardless of owning process.
 REPO_PORTS=(19899 19900)
 # server_ui must never be tailscale-served (flask-cors advisories; PLAN.md).
 FORBIDDEN_SERVE_PORT=19899
+
+# Union of both halves: what may appear in `tailscale serve status` at all.
+declare -A ALLOWED_SERVE=()
+for port in "${!REPO_SERVE[@]}"; do ALLOWED_SERVE[$port]=${REPO_SERVE[$port]}; done
+for port in "${!FOREIGN_SERVE[@]}"; do
+  # A co-tenant may never claim one of our reserved ports: that would let a
+  # foreign entry silently whitelist the exposure the audit exists to catch.
+  for repo_port in "${REPO_PORTS[@]}"; do
+    if [[ "$port" == "$repo_port" ]]; then
+      echo "ERROR: FOREIGN_SERVE claims repo-reserved port $port" >&2
+      exit 2
+    fi
+  done
+  ALLOWED_SERVE[$port]=${FOREIGN_SERVE[$port]}
+done
 
 # systemctl --user needs the user manager socket from non-login shells.
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
@@ -192,8 +222,15 @@ while IFS= read -r line; do
     if [[ -z "$cur_port" ]]; then
       fail "tailscale serve" "proxy line outside a mapping block: $line"
       serve_violations=$((serve_violations + 1))
-    elif [[ "${ALLOWED_SERVE[$cur_port]:-}" != "$target" ]]; then
-      fail "tailscale serve :$cur_port" "-> $target not in the PLAN.md port table (tailscale serve --https=$cur_port off)"
+    elif [[ -z "${ALLOWED_SERVE[$cur_port]:-}" ]]; then
+      fail "tailscale serve :$cur_port" "-> $target not in the PLAN.md port table (tailscale serve --https=$cur_port off; if another project on this box owns it, add it to FOREIGN_SERVE in ops/health.sh instead)"
+      serve_violations=$((serve_violations + 1))
+    elif [[ "${ALLOWED_SERVE[$cur_port]}" != "$target" ]]; then
+      if [[ -n "${FOREIGN_SERVE[$cur_port]:-}" ]]; then
+        fail "tailscale serve :$cur_port" "-> $target, expected ${FOREIGN_SERVE[$cur_port]} — co-tenant mapping retargeted; ask its owner, do not turn it off from this repo"
+      else
+        fail "tailscale serve :$cur_port" "-> $target, expected ${REPO_SERVE[$cur_port]} (tailscale serve --https=$cur_port off, then ops/expose_traces.sh)"
+      fi
       serve_violations=$((serve_violations + 1))
     fi
   else
@@ -202,7 +239,7 @@ while IFS= read -r line; do
   fi
 done <<<"$serve_out"
 if [[ $serve_violations -eq 0 ]]; then
-  pass "tailscale exposure" "all mappings tailnet-only and in the PLAN.md port table"
+  pass "tailscale exposure" "all mappings tailnet-only and in the PLAN.md port table (${#REPO_SERVE[@]} repo-owned, ${#FOREIGN_SERVE[@]} co-tenant)"
 fi
 
 # --- Summary --------------------------------------------------------------------

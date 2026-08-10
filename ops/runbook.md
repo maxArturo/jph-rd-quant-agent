@@ -133,9 +133,16 @@ tailscale serve status
 - Every mapping must say **(tailnet only)**; `tailscale funnel` output must
   never appear. If a funnel exists: `tailscale funnel reset`.
 - Allowed from this repo: at most `https=19900 -> http://127.0.0.1:19900`
-  (rdagent trace viewer, only while research monitoring is wanted).
-  Pre-existing box mappings (`:443 -> 127.0.0.1:10254` OneCLI UI,
-  `:3100 -> 127.0.0.1:3001`) are not ours to change.
+  (rdagent trace viewer, only while research monitoring is wanted) — that is
+  health.sh's `REPO_SERVE`.
+- Co-tenant mappings owned by other projects on this box are health.sh's
+  `FOREIGN_SERVE` and are **not ours to change**: `:443 -> 127.0.0.1:10254`
+  (OneCLI UI), `:3100 -> 127.0.0.1:3001` (Grafana), `:8443 ->
+  127.0.0.1:3200` (jph-master-tracker). health.sh still audits them for
+  tailnet-only scope and the expected target; if one is retargeted, ask its
+  owner rather than running `serve --https=<port> off`. When a co-tenant adds
+  a new mapping, health.sh fails it as unknown — record it in `FOREIGN_SERVE`
+  (and the PLAN.md §1 table) to clear the failure.
 - `rdagent server_ui` (:19899) must **never** be served — it is
   localhost-only by design (known flask-cors advisories).
 - Remove an unexpected mapping with

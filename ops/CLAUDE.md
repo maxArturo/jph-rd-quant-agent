@@ -150,6 +150,12 @@
   tailscale exposure vs the PLAN.md §1 allowlist. When adding a unit, add it to
   BOTH install_services.sh UNITS and the matching health.sh list
   (LONG_RUNNING / TIMERS / ONESHOTS) — tests/test_health.py cross-checks them.
+  The serve allowlist is split by ownership: `REPO_SERVE` (only :19900, ours to
+  add/remove via expose_traces.sh) vs `FOREIGN_SERVE` (:443 OneCLI, :3100
+  Grafana, :8443 jph-master-tracker — other projects on this box). Both halves
+  are audited identically for tailnet-only scope + expected target; the split
+  only changes the remedy, since we must never `serve --https=<port> off` a
+  co-tenant's mapping. A foreign entry claiming 19899/19900 is a hard error.
   Gotchas baked in: oneshot units are healthy when "inactive" (only `is-failed`
   == failed is a failure), and `tailscale serve` terminates TLS on the TAILNET
   interface (100.64.0.0/10 / fd7a:115c:a1e0::), so an allowed serve port bound
