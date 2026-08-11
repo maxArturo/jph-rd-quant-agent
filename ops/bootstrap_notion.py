@@ -1,9 +1,9 @@
-"""Bootstrap the six Notion databases under the parent page.
+"""Bootstrap the seven Notion databases under the parent page.
 
 Creates Research Ideas, Hypothesis Log, Backtest Results, Decision Log,
-Trade Ledger and Account Snapshots with the property schemas defined in
-docs/reference/notion-schema.md (keep database_properties() below in sync
-with that document), then writes the database ids into
+Trade Ledger, Account Snapshots and Strategy Notes with the property schemas
+defined in docs/reference/notion-schema.md (keep database_properties() below
+in sync with that document), then writes the database ids into
 orchestrator/config.yaml.
 
 Idempotent: existing child databases under the parent page are matched by
@@ -156,6 +156,17 @@ def database_properties(ideas_db_id: str) -> dict[str, dict[str, Any]]:
             "Breaker": {"rich_text": {}},
             "Notes": {"rich_text": {}},
         },
+        "Strategy Notes": {
+            "Note": {"title": {}},
+            "Run Date": {"date": {}},
+            "Universe": {"rich_text": {}},
+            "Directive": {"rich_text": {}},
+            "Hypothesis": {"rich_text": {}},
+            "IC": _number(),
+            "ARR": _number(),
+            "MDD": _number(),
+            "Sharpe": _number(),
+        },
     }
 
 
@@ -167,11 +178,12 @@ CONFIG_KEYS = {
     "Decision Log": "decision_log",
     "Trade Ledger": "trade_ledger",
     "Account Snapshots": "account_snapshots",
+    "Strategy Notes": "strategy_notes",
 }
 
 
 def bootstrap(client: NotionClient, parent_page_id: str) -> dict[str, dict[str, str]]:
-    """Ensure all six databases exist; return title -> {id, action}.
+    """Ensure all seven databases exist; return title -> {id, action}.
 
     ``action`` is "created" or "exists" so callers can report what happened.
     """
@@ -224,7 +236,7 @@ def write_config(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bootstrap the six Notion databases under the parent page."
+        description="Bootstrap the seven Notion databases under the parent page."
     )
     parser.add_argument(
         "--parent-page-id",

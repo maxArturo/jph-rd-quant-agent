@@ -77,7 +77,7 @@
   `packages.find` include) so tests can `from ops.foo import ...` — new
   Python entrypoints here are run as `python -m ops.<module>` (usually under
   `onecli run --agent <identity>`), not as loose scripts.
-- Notion database bootstrap: `ops/bootstrap_notion.py` owns the five DB
+- Notion database bootstrap: `ops/bootstrap_notion.py` owns the seven DB
   schemas — its `database_properties()` must stay in sync with
   docs/reference/notion-schema.md (a test cross-checks property names against
   the doc's tables). DB ids land in `orchestrator/config.yaml` under

@@ -10,7 +10,8 @@ from ops.notion_summary import (
     SUMMARY_PROMPT,
     build_facts,
     create_summary_page,
-    load_parent_page_id,
+    load_notes_database_id,
+    note_properties,
     text_to_blocks,
 )
 
@@ -58,6 +59,37 @@ class TestBlocks:
         )
 
 
+class TestNoteProperties:
+    def test_row_properties_from_context(self) -> None:
+        props = note_properties("Strategy note", CONTEXT)
+        assert props["Note"]["title"][0]["text"]["content"] == "Strategy note"
+        assert props["Run Date"]["date"]["start"] == "2026-08-06"
+        assert props["Universe"]["rich_text"][0]["text"]["content"] == "us_liquid"
+        assert (
+            props["Directive"]["rich_text"][0]["text"]["content"]
+            == "Focus on volume/price divergence"
+        )
+        assert (
+            props["Hypothesis"]["rich_text"][0]["text"]["content"]
+            == "Bounded intraday factors add orthogonal alpha"
+        )
+        assert props["IC"]["number"] == pytest.approx(0.0186)
+        assert props["ARR"]["number"] == pytest.approx(0.7128)
+        assert props["MDD"]["number"] == pytest.approx(-0.14)
+        assert "Sharpe" not in props  # not in the context metrics
+
+    def test_sparse_context_omits_optional_properties(self) -> None:
+        props = note_properties("t", {})
+        assert set(props) == {"Note", "Universe"}
+        assert props["Universe"]["rich_text"][0]["text"]["content"] == "us_liquid"
+
+    def test_non_finite_metrics_are_dropped(self) -> None:
+        context = {"candidate": {"metrics": {"IC": float("nan"), "Sharpe": 1.2}}}
+        props = note_properties("t", context)
+        assert "IC" not in props
+        assert props["Sharpe"]["number"] == pytest.approx(1.2)
+
+
 class StubNotion:
     def __init__(self, url: str | None = "https://www.notion.so/abc") -> None:
         self.pages: list[tuple[dict, dict, list | None]] = []
@@ -72,33 +104,33 @@ class StubNotion:
 
 
 class TestCreatePage:
-    def test_creates_child_page_with_body(self) -> None:
+    def test_creates_database_row_with_body(self) -> None:
         client = StubNotion()
-        url = create_summary_page(client, "parent-id", "Strategy note", "One.\n\nTwo.")
+        url = create_summary_page(client, "db-notes", "Strategy note", "One.\n\nTwo.", CONTEXT)
         assert url == "https://www.notion.so/abc"
         parent, properties, children = client.pages[0]
-        assert parent == {"type": "page_id", "page_id": "parent-id"}
-        assert properties["title"]["title"][0]["text"]["content"] == "Strategy note"
+        assert parent == {"type": "database_id", "database_id": "db-notes"}
+        assert properties["Note"]["title"][0]["text"]["content"] == "Strategy note"
         assert children is not None and len(children) == 2
 
     def test_url_fallback_from_page_id(self) -> None:
-        url = create_summary_page(StubNotion(url=None), "p", "t", "body")
+        url = create_summary_page(StubNotion(url=None), "db", "t", "body", CONTEXT)
         assert url == "https://www.notion.so/" + "39e9b1a436cf" + "0" * 20
 
     def test_title_clipped(self) -> None:
         client = StubNotion()
-        create_summary_page(client, "p", "t" * 300, "body")
-        assert len(client.pages[0][1]["title"]["title"][0]["text"]["content"]) == 120
+        create_summary_page(client, "db", "t" * 300, "body", CONTEXT)
+        assert len(client.pages[0][1]["Note"]["title"][0]["text"]["content"]) == 120
 
 
 class TestConfig:
-    def test_reads_parent_page_id(self, tmp_path: Path) -> None:
+    def test_reads_notes_database_id(self, tmp_path: Path) -> None:
         config = tmp_path / "config.yaml"
-        config.write_text("notion:\n  parent_page_id: 1234-abcd\n")
-        assert load_parent_page_id(config) == "1234-abcd"
+        config.write_text("notion:\n  databases:\n    strategy_notes: 1234-abcd\n")
+        assert load_notes_database_id(config) == "1234-abcd"
 
-    def test_missing_parent_is_actionable(self, tmp_path: Path) -> None:
+    def test_missing_database_is_actionable(self, tmp_path: Path) -> None:
         config = tmp_path / "config.yaml"
-        config.write_text("notion: {}\n")
+        config.write_text("notion:\n  databases: {}\n")
         with pytest.raises(RuntimeError, match="bootstrap_notion"):
-            load_parent_page_id(config)
+            load_notes_database_id(config)

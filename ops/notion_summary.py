@@ -6,14 +6,16 @@
 Reads a small context JSON (built by ops/gpu_pipeline.py at completion:
 directive, universe, loop counts, and the winning candidate's hypothesis +
 metrics), asks the judgment model for a NONTECHNICAL summary of the result
-and the investing approach, and creates a Notion PAGE (with body paragraphs)
-under the configured parent page. Prints the page URL on stdout — the caller
-posts it to Slack.
+and the investing approach, and creates a row in the Strategy Notes database
+(the prose lands in the row's page body). Prints the page URL on stdout —
+the caller posts it to Slack.
 
-Why a standalone page: the Decision Log schema has no url property and its
-rich_text rows clip at 2000 chars; per docs/reference/notion-schema.md each
-database has exactly one writer. A child page of the parent workspace page
-collides with nobody and holds unlimited prose.
+Why a database row: the notes accumulate one per run, and a database keeps
+them sortable/filterable (run date, universe, headline metrics) as they grow —
+loose child pages under the parent page do not scale. The Decision Log is
+still not an option: its rich_text rows clip at 2000 chars, and per
+docs/reference/notion-schema.md each database has exactly one writer — this
+module is the sole writer of Strategy Notes.
 
 Must run under `onecli run --agent rdq-orchestrator` — the proxy injects both
 the Anthropic key (for the summary) and the Notion bearer (app connection).
@@ -23,13 +25,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+from typing import Any
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "orchestrator" / "config.yaml"
 
 # Notion rich_text objects clip server-side at 2000 chars; stay under it.
 _BLOCK_CHAR_LIMIT = 1900
-_TITLE_LIMIT = 120
+
+# Candidate metrics mirrored into sortable number properties (schema keys).
+_METRIC_PROPERTIES = ("IC", "ARR", "MDD", "Sharpe")
 
 SUMMARY_PROMPT = """\
 You are writing for a smart, curious reader with NO trading or machine-learning
@@ -108,23 +114,53 @@ def text_to_blocks(text: str) -> list[dict]:
     return blocks
 
 
-def load_parent_page_id(config_path: Path = CONFIG_PATH) -> str:
+def note_properties(title: str, context: dict) -> dict[str, Any]:
+    """Strategy Notes row properties (docs/reference/notion-schema.md)."""
+    from orchestrator.notion_recorder import (
+        date_property,
+        number_property,
+        rich_text_property,
+        title_property,
+    )
+
+    properties: dict[str, Any] = {
+        "Note": title_property(title),
+        "Universe": rich_text_property(str(context.get("universe") or "us_liquid")),
+    }
+    if context.get("run_date"):
+        properties["Run Date"] = date_property(str(context["run_date"]))
+    if context.get("directive"):
+        properties["Directive"] = rich_text_property(str(context["directive"]))
+    candidate = context.get("candidate") or {}
+    if candidate.get("hypothesis"):
+        properties["Hypothesis"] = rich_text_property(str(candidate["hypothesis"]))
+    metrics = candidate.get("metrics") or {}
+    for key in _METRIC_PROPERTIES:
+        value = metrics.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            properties[key] = number_property(float(value))
+    return properties
+
+
+def load_notes_database_id(config_path: Path = CONFIG_PATH) -> str:
     import yaml
 
     data = yaml.safe_load(config_path.read_text()) or {}
-    parent = (data.get("notion") or {}).get("parent_page_id")
-    if not parent:
+    databases = (data.get("notion") or {}).get("databases") or {}
+    db_id = databases.get("strategy_notes")
+    if not db_id:
         raise RuntimeError(
-            f"no notion.parent_page_id in {config_path} — run ops/bootstrap_notion.py"
+            f"no notion.databases.strategy_notes in {config_path} — run"
+            " ops/bootstrap_notion.py to create the Strategy Notes database"
         )
-    return str(parent)
+    return str(db_id)
 
 
-def create_summary_page(client, parent_page_id: str, title: str, summary: str) -> str:
-    """Create the page; returns its URL."""
+def create_summary_page(client, database_id: str, title: str, summary: str, context: dict) -> str:
+    """Create the Strategy Notes row (prose in the page body); returns its URL."""
     page = client.create_page(
-        {"type": "page_id", "page_id": parent_page_id},
-        {"title": {"title": [{"type": "text", "text": {"content": title[:_TITLE_LIMIT]}}]}},
+        {"type": "database_id", "database_id": database_id},
+        note_properties(title, context),
         children=text_to_blocks(summary),
     )
     url = page.get("url")
@@ -153,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from orchestrator.notion_client import NotionClient
 
-    url = create_summary_page(NotionClient(), load_parent_page_id(), title, summary)
+    url = create_summary_page(NotionClient(), load_notes_database_id(), title, summary, context)
     print(url)
     return 0
 

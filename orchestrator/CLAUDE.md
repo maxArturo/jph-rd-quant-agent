@@ -105,7 +105,8 @@
 
 - Notion database ids live in `orchestrator/config.yaml` under
   `notion.databases.{research_ideas,hypothesis_log,backtest_results,
-  decision_log,trade_ledger}` — written (and rewritten) by
+  decision_log,trade_ledger,account_snapshots,strategy_notes}` — written
+  (and rewritten) by
   `ops/bootstrap_notion.py`; never hand-edit or hardcode the ids. The
   property schemas are documented in docs/reference/notion-schema.md; each
   database has exactly ONE writing component (one-writer-per-DB convention) —

@@ -65,6 +65,7 @@ DBS = NotionDatabases(
     decision_log="db-dec",
     trade_ledger="db-tl",
     account_snapshots="db-snap",
+    strategy_notes="db-notes",
 )
 
 DIRECTIVE = Directive(
