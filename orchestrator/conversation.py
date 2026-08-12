@@ -569,6 +569,7 @@ class ConversationCore:
         interactions: HypothesisSteering | None = None,
         promotions: PromotionManager | None = None,
         gpu: GpuRunner | None = None,
+        channel_id: str | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -610,6 +611,11 @@ class ConversationCore:
         # the loop — the model never sees a tool it cannot execute.
         self._interactions = interactions
         self._promotions = promotions
+        # Channel stamped onto new run rows (US-005) so background posters can
+        # route a run's notifications home. app.py wires config.channel_id;
+        # None (tests, legacy wiring) leaves the column NULL, which every
+        # reader treats as the paper channel.
+        self._channel_id = channel_id
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(self, thread_ts: str, text: str, say: SayFn) -> str:
@@ -758,6 +764,7 @@ class ConversationCore:
                     universe_tickers=tickers,
                     supervised=False,
                     backend="gpu",
+                    channel_id=self._channel_id,
                 )
             except DuplicateRunError as exc:
                 # Lost a start race — don't leave the just-launched pipeline up.

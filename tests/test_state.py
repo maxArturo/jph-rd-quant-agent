@@ -412,6 +412,55 @@ def test_migration_adds_supervised_to_legacy_db(db_path: Path) -> None:
     assert legacy is not None and legacy.supervised is False
 
 
+def test_run_channel_id_roundtrip_and_default(store: StateStore) -> None:
+    run = store.create_run("111.222", "/logs/run1", channel_id="C_LIVE")
+    assert run.channel_id == "C_LIVE"
+    fetched = store.get_run("111.222")
+    assert fetched is not None and fetched.channel_id == "C_LIVE"
+
+    bare = store.create_run("333.444", "/logs/run2")
+    assert bare.channel_id is None
+    fetched_bare = store.get_run("333.444")
+    assert fetched_bare is not None and fetched_bare.channel_id is None
+
+
+def test_run_channel_returns_stored_channel_else_paper(store: StateStore) -> None:
+    store.create_run("111.222", "/logs/run1", channel_id="C_LIVE")
+    store.create_run("333.444", "/logs/run2")  # no stored channel
+
+    assert store.run_channel("111.222", paper_channel_id="C_PAPER") == "C_LIVE"
+    assert store.run_channel("333.444", paper_channel_id="C_PAPER") == "C_PAPER"
+    # Unknown thread also falls back to the paper channel, never errors.
+    assert store.run_channel("999.999", paper_channel_id="C_PAPER") == "C_PAPER"
+
+
+def test_migration_adds_channel_id_to_legacy_db(db_path: Path) -> None:
+    """DBs created before US-005 lack runs.channel_id; NULL means paper channel."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE runs (thread_ts TEXT PRIMARY KEY, session_path TEXT NOT NULL,"
+            " status TEXT NOT NULL, universe TEXT, universe_tickers TEXT,"
+            " supervised INTEGER NOT NULL DEFAULT 0,"
+            " backend TEXT NOT NULL DEFAULT 'server_ui',"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO runs VALUES ('111.222', '/logs/run1', 'running', 'us_liquid',"
+            " NULL, 0, 'server_ui', '2026-01-01', '2026-01-01')"
+        )
+    store = StateStore(db_path)  # migration runs here
+    legacy = store.get_run("111.222")
+    assert legacy is not None and legacy.channel_id is None
+    assert store.run_channel("111.222", paper_channel_id="C_PAPER") == "C_PAPER"
+
+    # Idempotent: reopening the already-migrated DB is a no-op.
+    reopened = StateStore(db_path)
+    assert reopened.get_run("111.222") == legacy
+    reopened.create_run("333.444", "/logs/run2", channel_id="C_LIVE")
+    fresh = reopened.get_run("333.444")
+    assert fresh is not None and fresh.channel_id == "C_LIVE"
+
+
 def test_list_interactions_returns_all_statuses_oldest_first(store: StateStore) -> None:
     first = store.add_pending_interaction("t1", "k1", {"kind": "hypothesis"})
     second = store.add_pending_interaction("t1", "k2", {"kind": "feedback"})

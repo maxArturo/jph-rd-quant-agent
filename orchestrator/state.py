@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS runs (
     universe_tickers TEXT,
     supervised   INTEGER NOT NULL DEFAULT 0,
     backend      TEXT NOT NULL DEFAULT 'server_ui',
+    channel_id   TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -133,6 +134,9 @@ class Run:
     # and session_path holds the pipeline status file until fetch rewrites it
     # to the fetched trace dir).
     backend: str = "server_ui"
+    # Slack channel that started the run (US-005) — notifications about the
+    # run route back here. None (pre-migration rows) means the paper channel.
+    channel_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +190,7 @@ def _run_from_row(row: sqlite3.Row) -> Run:
         universe_tickers=None if tickers is None else tuple(json.loads(tickers)),
         supervised=bool(row["supervised"]),
         backend=row["backend"],
+        channel_id=row["channel_id"],
     )
 
 
@@ -256,6 +261,10 @@ class StateStore:
                 conn.execute(
                     "ALTER TABLE runs ADD COLUMN backend TEXT NOT NULL DEFAULT 'server_ui'"
                 )
+            # Originating Slack channel (US-005): pre-existing runs keep NULL,
+            # which every reader treats as the paper research channel.
+            if "channel_id" not in columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN channel_id TEXT")
 
     # -- directives ---------------------------------------------------------
 
@@ -304,6 +313,7 @@ class StateStore:
         universe_tickers: Sequence[str] | None = None,
         supervised: bool = False,
         backend: str = "server_ui",
+        channel_id: str | None = None,
     ) -> Run:
         now = _utcnow()
         tickers = None if universe_tickers is None else tuple(universe_tickers)
@@ -317,13 +327,14 @@ class StateStore:
             universe_tickers=tickers,
             supervised=supervised,
             backend=backend,
+            channel_id=channel_id,
         )
         try:
             with self._connect() as conn:
                 conn.execute(
                     "INSERT INTO runs (thread_ts, session_path, status, universe,"
-                    " universe_tickers, supervised, backend, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " universe_tickers, supervised, backend, channel_id, created_at,"
+                    " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         thread_ts,
                         session_path,
@@ -332,6 +343,7 @@ class StateStore:
                         None if tickers is None else json.dumps(list(tickers)),
                         int(supervised),
                         backend,
+                        channel_id,
                         now,
                         now,
                     ),
@@ -358,6 +370,18 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(query + " ORDER BY created_at", params).fetchall()
         return [_run_from_row(row) for row in rows]
+
+    def run_channel(self, thread_ts: str, paper_channel_id: str) -> str:
+        """Effective Slack channel for a run's notifications (US-005).
+
+        Returns the run's stored originating channel; a NULL column
+        (pre-migration rows) and an unknown thread both fall back to the
+        paper research channel, which is exactly today's routing.
+        """
+        run = self.get_run(thread_ts)
+        if run is None or run.channel_id is None:
+            return paper_channel_id
+        return run.channel_id
 
     def update_run_status(self, thread_ts: str, status: str) -> Run:
         with self._connect() as conn:

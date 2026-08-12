@@ -310,6 +310,8 @@ def main() -> None:
         interactions=poller,
         promotions=promotions,
         gpu=GpuBackend(),
+        # New run rows record their originating channel (US-005).
+        channel_id=config.channel_id,
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),

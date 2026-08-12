@@ -139,6 +139,7 @@ def make_core(
     interactions: Any | None = None,
     promotions: Any | None = None,
     gpu: StubGpu | None = None,
+    channel_id: str | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
@@ -148,6 +149,7 @@ def make_core(
         interactions=interactions,
         promotions=promotions,
         gpu=gpu if gpu is not None else StubGpu(),
+        channel_id=channel_id,
     )
     return core, store
 
@@ -406,6 +408,20 @@ def test_start_research_launches_gpu_pipeline_and_writes_row(tmp_path: Path) -> 
     # GPU runs are always autonomous.
     assert run.supervised is False
     assert "no approvals needed" in say.calls[0]["text"]
+
+
+def test_start_research_stamps_originating_channel_on_run(tmp_path: Path) -> None:
+    """US-005: the run row records the channel the core is wired to; without
+    wiring (legacy/tests) the column stays NULL, which readers treat as the
+    paper channel."""
+    client = FakeClient(judgment_messages=start_research_script())
+    core, store = make_core(tmp_path, client, gpu=StubGpu(), channel_id="C_PAPER")
+    store.create_directive(THREAD, objective="Test whether 12-1 momentum beats SPY")
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    run = store.get_run(THREAD)
+    assert run is not None and run.channel_id == "C_PAPER"
+    assert store.run_channel(THREAD, paper_channel_id="C_PAPER") == "C_PAPER"
 
 
 def test_start_research_supervised_is_refused_on_gpu(tmp_path: Path) -> None:

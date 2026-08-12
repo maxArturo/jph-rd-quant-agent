@@ -163,6 +163,13 @@
   EXISTS` (it skips existing DBs): add the column to `_SCHEMA` for fresh DBs
   AND a guarded `ALTER TABLE` in `migrate()` (check `PRAGMA table_info`),
   like `runs.universe_tickers`.
+- Run notifications route home via `runs.channel_id` (US-005): the channel
+  that started a run is stamped at create_run time (ConversationCore passes
+  its wired `channel_id`; app.py wires `config.channel_id`). NULL — legacy
+  rows and unwired cores — always means the paper channel. Anything posting
+  about a run (poller digests, completion, buttons) should resolve the
+  destination with `store.run_channel(thread_ts, paper_channel_id)`, never
+  assume the global config channel.
 
 - Hypothesis steering lives in `orchestrator/poller.py` (`HypothesisPoller`):
   one instance per process polls all `running` runs and also owns the button
