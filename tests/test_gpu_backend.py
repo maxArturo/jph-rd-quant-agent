@@ -53,6 +53,21 @@ class TestGpuBackend:
         backend.launch("1.2", universe="us_liquid")
         assert "--universe" not in runner.calls[0]
 
+    def test_launch_passes_owning_channel(self, tmp_path: Path) -> None:
+        """US-017: the run's home channel rides the pipeline command line."""
+        runner = RecordingRunner()
+        backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
+        backend.launch("1.2", channel="C_LIVE")
+        cmd = runner.calls[0]
+        assert "--channel" in cmd
+        assert cmd[cmd.index("--channel") + 1] == "C_LIVE"
+
+    def test_launch_omits_channel_when_unknown(self, tmp_path: Path) -> None:
+        runner = RecordingRunner()
+        backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
+        backend.launch("1.2")
+        assert "--channel" not in runner.calls[0]
+
     def test_launch_failure_raises(self, tmp_path: Path) -> None:
         backend = GpuBackend(status_file=tmp_path / "s.json", runner=RecordingRunner(1))
         with pytest.raises(GpuLaunchError, match="systemd-run failed"):

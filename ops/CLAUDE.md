@@ -42,13 +42,22 @@
   Slack-started runs launch it as a transient unit `rdq-gpu-run-<thread>`
   (orchestrator/gpu_backend.GpuBackend.launch via systemd-run — clean env, so
   the bot's onecli proxy never leaks into doctl/ssh). It posts into the
-  START THREAD (--thread-ts), writes live status JSON (--status-file, read by
+  START THREAD (--thread-ts) in the channel that OWNS the run (--channel,
+  US-017 — GpuBackend.launch passes the run's home channel; default is the
+  paper channel; the status file records it, and ops/gpu_watchdog.py reads
+  it to route alerts, falling back to paper when unknown), writes live
+  status JSON (--status-file, read by
   the bot's check_research_status tool), seeds the directive
   (--instruction → research/quant_runner.py — plain `rdagent fin_quant`
   ignores directives entirely), wires custom universes (--universe; worker
-  hard-refuses missing artifacts), uploads the candidate-vs-promoted chart
-  (orchestrator/summary.render_comparison_curve), runs ops/notion_summary
-  under `onecli run --agent rdq-orchestrator` and posts the page URL, and
+  hard-refuses missing artifacts), uploads the candidate-vs-promoted charts
+  (orchestrator/summary.render_comparison_curve; one chart per DISTINCT
+  promoted workspace, labeled with the slot(s) it holds — differing paper
+  and live slots get a chart each, never the old "live paper" wording),
+  runs ops/notion_summary
+  under `onecli run --agent rdq-orchestrator` and posts the page URL (its
+  context JSON carries `account_context` — the write-up states the slot
+  semantics instead of asserting a paper account), and
   finalizes the run row (session_path → fetched trace dir, status).
   SAFETY: ConversationCore takes gpu=None by default and REFUSES to start
   runs — only app.py wires the real GpuBackend. Never give it a live default:

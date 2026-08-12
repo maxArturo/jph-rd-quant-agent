@@ -183,7 +183,10 @@
   `say`. Completion rule: only paper-channel runs get the Block Kit Promote
   button; a live-channel run's summary appends `LIVE_PROMOTABLE_NOTE`
   ("say *promote to live*") instead — a paper-promotion button must never
-  appear in the real-money channel (the spoken flow is US-010).
+  appear in the real-money channel (the spoken flow is US-010). GPU runs
+  route the same way out-of-process (US-017): `_start_research_tool` passes
+  the run's home channel to `GpuBackend.launch`, which forwards it as the
+  pipeline's `--channel` — the pipeline itself never reads the runs table.
 - Dual-channel routing (US-006): with `live_channel_id` set, app.py's
   actionable check accepts BOTH channels; all other filtering is identical.
   The per-message channel rides Bolt's `Say` (`say.channel` — Bolt binds it

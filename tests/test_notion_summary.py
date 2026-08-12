@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from ops.notion_summary import (
+    DEFAULT_ACCOUNT_CONTEXT,
     SUMMARY_PROMPT,
     build_facts,
+    build_prompt,
     create_summary_page,
     load_notes_database_id,
     note_properties,
@@ -41,7 +43,22 @@ class TestFactsAndPrompt:
     def test_prompt_demands_nontechnical_prose_and_caveats(self) -> None:
         assert "NO trading or machine-learning" in SUMMARY_PROMPT
         assert "caveats" in SUMMARY_PROMPT.lower()
-        assert "paper" in SUMMARY_PROMPT
+
+    def test_prompt_no_longer_asserts_a_paper_account(self) -> None:
+        """US-017: the account context is received per run, not hardcoded."""
+        assert "trades a paper account" not in SUMMARY_PROMPT
+        assert "{account_context}" in SUMMARY_PROMPT
+
+    def test_build_prompt_states_the_received_account_context(self) -> None:
+        prompt = build_prompt(
+            {**CONTEXT, "account_context": "the live slot trades a real-money account"}
+        )
+        assert "the live slot trades a real-money account" in prompt
+        assert "ARR: 0.7128" in prompt  # facts still present
+
+    def test_build_prompt_falls_back_to_the_default_context(self) -> None:
+        prompt = build_prompt(CONTEXT)
+        assert DEFAULT_ACCOUNT_CONTEXT in prompt
 
 
 class TestBlocks:

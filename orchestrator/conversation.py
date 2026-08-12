@@ -66,6 +66,7 @@ class GpuRunner(Protocol):
         loop_n: int = 10,
         universe: str | None = None,
         instruction: str | None = None,
+        channel: str | None = None,
     ) -> str: ...
 
     def stop_unit(self, unit: str) -> None: ...
@@ -1165,6 +1166,9 @@ class ConversationCore:
                 loop_n=loop_n,
                 universe=universe,
                 instruction=directive_instruction(directive),
+                # The run's home channel travels with the pipeline so its
+                # digests/summary/chart/write-up post there (US-017).
+                channel=channel or self._channel_id,
             )
             # session_path holds the pipeline status file until the pipeline
             # rewrites it to the fetched trace dir at completion (promotion

@@ -53,13 +53,18 @@ lists, no jargon) covering:
    often its daily stock rankings pointed the right way (small positive numbers
    are normal and useful).
 4. Honest caveats: this is a simulation on past data; past results do not
-   guarantee future ones; the strategy trades paper money until explicitly
-   promoted, and even then it trades a paper account.
+   guarantee future ones; {account_context}.
 
 Facts:
 {facts}
 
 Return ONLY the summary paragraphs, separated by blank lines."""
+
+# Stated when the caller's context carries no account_context (US-017): the
+# pipeline passes the real slot semantics; a bare CLI run gets this fallback.
+DEFAULT_ACCOUNT_CONTEXT = (
+    "the strategy trades no account until an operator explicitly promotes it"
+)
 
 
 def build_facts(context: dict) -> str:
@@ -82,12 +87,18 @@ def build_facts(context: dict) -> str:
     return "\n".join(lines)
 
 
+def build_prompt(context: dict) -> str:
+    """The full summary prompt: facts plus the caller-stated account context."""
+    account_context = str(context.get("account_context") or DEFAULT_ACCOUNT_CONTEXT)
+    return SUMMARY_PROMPT.format(facts=build_facts(context), account_context=account_context)
+
+
 def generate_summary(context: dict) -> str:
     from orchestrator.llm import ModelRouter
 
     router = ModelRouter()
     message = router.judgment(
-        [{"role": "user", "content": SUMMARY_PROMPT.format(facts=build_facts(context))}],
+        [{"role": "user", "content": build_prompt(context)}],
         max_tokens=2000,
     )
     text = "".join(

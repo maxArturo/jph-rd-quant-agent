@@ -291,8 +291,8 @@
         "Tests pass"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: channel rides GpuBackend.launch(channel=) -> pipeline --channel -> SlackThread (all posts/digests/summary/chart/write-up link) + StatusFile (recorded in the status JSON); conversation passes channel or self._channel_id; comparison charts one-per-distinct promoted workspace labeled with the slot(s) ('live paper' wording gone; differing slots -> candidate vs both); notion context carries ACCOUNT_CONTEXT and notion_summary's prompt formats {account_context} (paper-account assertion removed); gpu_watchdog reads the status file's channel (owning_channel) and posts there, paper fallback; gpu None-default untouched; 26 new tests."
     },
     {
       "id": "US-018",

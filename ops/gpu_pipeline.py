@@ -16,8 +16,9 @@ ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
    droplet (billing guard: also destroys on pipeline failure and on the
    --max-hours abort; --keep-worker opts out).
 
-Slack posting: root message to SLACK_CHANNEL_ID (repo-root .env), then a
-thread per run — same channel the orchestrator uses, but these runs live
+Slack posting: root message to the owning channel (--channel when given,
+else SLACK_CHANNEL_ID from the repo-root .env), then a thread per run —
+runs started from the live channel report home (US-017). These runs live
 outside server_ui, so thread replies do NOT drive approve/stop/promote; the
 loop auto-runs to its budget. Stop early with:
   ops/gpu_worker/gpu_worker.sh ssh tmux kill-session -t rdq-run
@@ -64,6 +65,7 @@ class PipelineOptions:
     size_plan: list[tuple[str, str]] = field(default_factory=list)
     # Orchestrator integration (all optional — manual CLI runs skip them):
     thread_ts: str | None = None  # post digests into this Slack thread + finalize its run row
+    channel: str | None = None  # Slack channel that owns the run (default: paper channel)
     universe: str | None = None  # confirmed custom universe (artifacts must be materialized)
     instruction: str | None = None  # research directive, seeded into the loop's plan
     status_file: Path | None = None  # live JSON the bot's check_research_status reads
@@ -74,9 +76,18 @@ class PipelineOptions:
 class StatusFile:
     """Best-effort live status JSON — the check_research_status tool's source."""
 
-    def __init__(self, path: Path | None, thread_ts: str | None) -> None:
+    def __init__(
+        self, path: Path | None, thread_ts: str | None, channel: str | None = None
+    ) -> None:
         self._path = path
-        self._data: dict = {"thread_ts": thread_ts, "stage": "starting", "exit": None}
+        # channel rides the status file so out-of-process readers (the GPU
+        # watchdog) can route alerts to the channel that owns the run (US-017).
+        self._data: dict = {
+            "thread_ts": thread_ts,
+            "channel": channel,
+            "stage": "starting",
+            "exit": None,
+        }
         self.update()
 
     def update(self, **fields) -> None:
@@ -110,9 +121,13 @@ class SlackThread:
 
     With ``thread_ts`` given, everything goes into that existing thread (the
     orchestrator conversation that started the run) instead of a new one.
+    With ``channel`` given, posts land there instead of the paper research
+    channel — runs started from the live channel report home (US-017).
     """
 
-    def __init__(self, enabled: bool, thread_ts: str | None = None) -> None:
+    def __init__(
+        self, enabled: bool, thread_ts: str | None = None, channel: str | None = None
+    ) -> None:
         self._enabled = enabled
         self._client = None
         self._channel: str | None = None
@@ -128,7 +143,7 @@ class SlackThread:
                 # slack_sdk loads HTTPS_PROXY and ignores NO_PROXY (see
                 # orchestrator/app.py main()); loopback/Slack must not proxy.
                 self._client.proxy = None
-                self._channel = config.channel_id
+                self._channel = channel or config.channel_id
             except Exception as exc:  # noqa: BLE001 — never block the run on Slack
                 print(f"slack disabled ({exc}); falling back to stderr", file=sys.stderr)
                 self._client = None
@@ -274,37 +289,70 @@ def format_final_summary(
     return "\n".join(lines)
 
 
+def promoted_slots() -> list[tuple[str, Path]]:
+    """[(slot, workspace)] for whichever of the paper/live promotion slots are pinned."""
+    from execution.promoted import load_promoted_strategy, load_promoted_strategy_live
+
+    slots: list[tuple[str, Path]] = []
+    for slot, loader in (("paper", load_promoted_strategy), ("live", load_promoted_strategy_live)):
+        try:
+            slots.append((slot, Path(loader().workspace_path)))
+        except Exception:  # noqa: BLE001, PERF203 — an empty slot is a normal state
+            continue
+    return slots
+
+
 def post_comparison_chart(slack: SlackThread, candidate_workspace: str) -> None:
-    """Candidate vs currently-promoted equity curves into the thread."""
+    """Candidate vs promoted-slot equity curves into the thread.
+
+    One chart per DISTINCT promoted workspace, each labeled with the slot(s)
+    it holds — when the paper and live slots pin different strategies the
+    candidate is charted against both (US-017).
+    """
     from orchestrator.summary import SummaryError, render_comparison_curve
 
     candidate_ret = Path(candidate_workspace) / "ret.pkl"
     if not candidate_ret.is_file():
         slack.post(":warning: candidate workspace has no ret.pkl — skipping the comparison chart")
         return
-    promoted_ret = None
-    promoted_label = "promoted"
-    try:
-        from execution.promoted import load_promoted_strategy
-
-        promoted = load_promoted_strategy()
-        path = Path(promoted.workspace_path) / "ret.pkl"
-        if path.is_file():
-            promoted_ret = path
-            promoted_label = f"promoted ({Path(promoted.workspace_path).name[:8]}, live paper)"
-    except Exception:  # noqa: BLE001 — nothing promoted yet is a normal state
-        pass
-    try:
-        png = render_comparison_curve(
-            candidate_ret,
-            promoted_ret,
-            candidate_label=f"candidate ({Path(candidate_workspace).name[:8]})",
-            promoted_label=promoted_label,
+    grouped: dict[Path, list[str]] = {}
+    for slot, workspace in promoted_slots():
+        grouped.setdefault(workspace, []).append(slot)
+    # (promoted ret.pkl or None, series label, slot tag for title/filename)
+    comparisons: list[tuple[Path | None, str, str | None]] = []
+    for workspace, names in grouped.items():
+        tag = "+".join(names) + (" slots" if len(names) > 1 else " slot")
+        ret = workspace / "ret.pkl"
+        comparisons.append(
+            (ret if ret.is_file() else None, f"promoted ({workspace.name[:8]}, {tag})", tag)
         )
-    except SummaryError as exc:
-        slack.post(f":warning: comparison chart failed: {exc}")
-        return
-    slack.upload(png, filename="candidate_vs_promoted.png", title="Candidate vs promoted")
+    if not comparisons:  # neither slot pinned — the chart degrades honestly
+        comparisons.append((None, "promoted", None))
+    for promoted_ret, promoted_label, tag in comparisons:
+        title = f"Candidate vs promoted ({tag})" if tag else "Candidate vs promoted"
+        try:
+            png = render_comparison_curve(
+                candidate_ret,
+                promoted_ret,
+                candidate_label=f"candidate ({Path(candidate_workspace).name[:8]})",
+                promoted_label=promoted_label,
+                title=f"{title} — cumulative return",
+            )
+        except SummaryError as exc:
+            slack.post(f":warning: comparison chart failed: {exc}")
+            continue
+        suffix = "_" + tag.split(" ")[0].replace("+", "_") if tag else ""
+        slack.upload(png, filename=f"candidate_vs_promoted{suffix}.png", title=title)
+
+
+# Account context stated in the Notion write-up (US-017): research runs are
+# account-agnostic; the two promotion slots are what decide real vs paper money.
+ACCOUNT_CONTEXT = (
+    "this research run traded no account at all; promotion is a separate,"
+    " deliberate operator step — the paper promotion slot trades a"
+    " simulated-money (paper) account, and the live promotion slot trades a"
+    " real-money account"
+)
 
 
 def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict) -> str | None:
@@ -315,6 +363,7 @@ def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict
     context = {
         "run_date": datetime.date.today().isoformat(),
         "universe": options.universe or "us_liquid",
+        "account_context": ACCOUNT_CONTEXT,
         "directive": options.instruction,
         "loops_total": len([loop for loop in loops if loop.get("decision") is not None]),
         "sota_count": len([loop for loop in loops if loop.get("decision")]),
@@ -367,8 +416,10 @@ def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | No
 
 
 def run_pipeline(options: PipelineOptions) -> int:
-    slack = SlackThread(enabled=not options.no_slack, thread_ts=options.thread_ts)
-    status_file = StatusFile(options.status_file, options.thread_ts)
+    slack = SlackThread(
+        enabled=not options.no_slack, thread_ts=options.thread_ts, channel=options.channel
+    )
+    status_file = StatusFile(options.status_file, options.thread_ts, options.channel)
     size, region = "(reused)", "(reused)"
     started = time.monotonic()
     trace_dir = None
@@ -510,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll", type=int, default=120, dest="poll_seconds")
     parser.add_argument("--max-hours", type=float, default=24.0)
     parser.add_argument("--thread-ts", default=None, help="orchestrator thread to post into")
+    parser.add_argument(
+        "--channel",
+        default=None,
+        help="Slack channel that owns the run (default: SLACK_CHANNEL_ID)",
+    )
     parser.add_argument("--universe", default=None, help="confirmed custom universe name")
     parser.add_argument(
         "--instruction", default=None, help="research directive (seeded into the loop)"
@@ -536,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         no_slack=args.no_slack,
         size_plan=parse_size_plan(args.size_plan),
         thread_ts=args.thread_ts,
+        channel=args.channel,
         universe=args.universe,
         instruction=args.instruction,
         status_file=args.status_file,

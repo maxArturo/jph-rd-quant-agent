@@ -68,8 +68,14 @@ class GpuBackend:
         loop_n: int = 10,
         universe: str | None = None,
         instruction: str | None = None,
+        channel: str | None = None,
     ) -> str:
-        """Start the pipeline as a transient user unit; returns the unit name."""
+        """Start the pipeline as a transient user unit; returns the unit name.
+
+        ``channel`` is the Slack channel that owns the run (US-017): the
+        pipeline posts its digests/summary/chart there and records it in the
+        status file. None keeps the pipeline's default (the paper channel).
+        """
         unit = _unit_name(thread_ts)
         command = [
             "systemd-run",
@@ -94,6 +100,8 @@ class GpuBackend:
             command += ["--universe", universe]
         if instruction:
             command += ["--instruction", instruction]
+        if channel:
+            command += ["--channel", channel]
         result = self._run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             detail = result.stderr.strip().splitlines()[-1:] or ["no output"]

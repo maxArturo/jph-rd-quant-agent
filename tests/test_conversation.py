@@ -106,15 +106,19 @@ class StubGpu:
         loop_n: int = 10,
         universe: str | None = None,
         instruction: str | None = None,
+        channel: str | None = None,
     ) -> str:
-        self.launched.append(
-            {
-                "thread_ts": thread_ts,
-                "loop_n": loop_n,
-                "universe": universe,
-                "instruction": instruction,
-            }
-        )
+        launched = {
+            "thread_ts": thread_ts,
+            "loop_n": loop_n,
+            "universe": universe,
+            "instruction": instruction,
+        }
+        # Recorded only when resolved (channel-less cores keep the pre-US-017
+        # launch shape, so paper-era assertions stay byte-identical).
+        if channel is not None:
+            launched["channel"] = channel
+        self.launched.append(launched)
         return "rdq-gpu-run-" + thread_ts.replace(".", "-")
 
     def stop_unit(self, unit: str) -> None:
@@ -1027,6 +1031,29 @@ def test_start_research_falls_back_to_default_channel_without_say_channel(
 
     run = store.get_run(THREAD)
     assert run is not None and run.channel_id == "C_PAPER"
+
+
+def test_start_research_passes_home_channel_to_gpu_launch(tmp_path: Path) -> None:
+    """US-017: the run's home channel travels with the pipeline launch so
+    digests/summary/chart post there; the message channel wins over the
+    core's wired default."""
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu, channel_id="C_PAPER")
+    store.create_directive(THREAD, objective="Test whether 12-1 momentum beats SPY")
+    core.handle_message(THREAD, "research it", ChannelSay("C_LIVE"))
+
+    assert gpu.launched[0]["channel"] == "C_LIVE"
+
+
+def test_start_research_launch_channel_falls_back_to_wired_default(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu, channel_id="C_PAPER")
+    store.create_directive(THREAD, objective="Test whether 12-1 momentum beats SPY")
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    assert gpu.launched[0]["channel"] == "C_PAPER"
 
 
 def test_approve_hypothesis_from_another_channel_is_refused(tmp_path: Path) -> None:
