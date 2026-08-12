@@ -82,7 +82,15 @@
   docs/reference/notion-schema.md (a test cross-checks property names against
   the doc's tables). DB ids land in `orchestrator/config.yaml` under
   `notion:`; rerunning is idempotent (matches child databases by title under
-  the parent page).
+  the parent page). `--live` (US-011) additionally ensures the sibling page
+  "Automated AI Quant Investment — LIVE 🔴" (adopted by EXACT title via
+  Notion search — fuzzy matches like the paper page are skipped — or created
+  under the paper page's own parent; a workspace-level paper page refuses
+  with a pointer to operator task D) plus Trade Ledger (Live) / Account
+  Snapshots (Live), whose schemas are COPIED from the paper twins
+  (`live_database_properties()` — never a second spec). Live titles live in
+  `LIVE_CONFIG_KEYS`, deliberately NOT in `CONFIG_KEYS` (the paper loop
+  iterates CONFIG_KEYS and must never create live DBs under the paper page).
 
 ## systemd user units
 

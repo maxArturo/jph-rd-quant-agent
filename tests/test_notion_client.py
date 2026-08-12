@@ -145,6 +145,50 @@ def test_query_db_omits_filter_and_sorts_when_unset() -> None:
     assert session.calls[0]["json"] == {"page_size": 100}
 
 
+# --------------------------------------------- get_page / search / children
+
+
+def test_get_page_fetches_by_id() -> None:
+    client, session, _ = make_client([FakeResponse(200, PAGE_OBJECT)])
+
+    assert client.get_page("page-123") == PAGE_OBJECT
+
+    (call,) = session.calls
+    assert call["method"] == "GET"
+    assert call["url"] == f"{BASE_URL}/v1/pages/page-123"
+
+
+def test_search_pages_sends_page_filter_and_paginates() -> None:
+    client, session, _ = make_client(
+        [
+            query_result([{"id": "page-1"}], has_more=True, cursor="cur-2"),
+            query_result([{"id": "page-2"}]),
+        ]
+    )
+
+    assert client.search_pages("LIVE") == [{"id": "page-1"}, {"id": "page-2"}]
+
+    first, second = session.calls
+    assert first["method"] == "POST"
+    assert first["url"] == f"{BASE_URL}/v1/search"
+    assert first["json"]["query"] == "LIVE"
+    assert first["json"]["filter"] == {"value": "page", "property": "object"}
+    assert "start_cursor" not in first["json"]
+    assert second["json"]["start_cursor"] == "cur-2"
+
+
+def test_append_children_patches_block_children() -> None:
+    client, session, _ = make_client([FakeResponse(200, {"object": "list", "results": []})])
+    children = [{"object": "block", "type": "callout", "callout": {"rich_text": []}}]
+
+    client.append_children("page-123", children)
+
+    (call,) = session.calls
+    assert call["method"] == "PATCH"
+    assert call["url"] == f"{BASE_URL}/v1/blocks/page-123/children"
+    assert call["json"] == {"children": children}
+
+
 # ---------------------------------------------------------------- update_page
 
 

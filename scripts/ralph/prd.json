@@ -189,8 +189,8 @@
         "Tests pass"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: bootstrap_notion --live ensures the LIVE 🔴 sibling page (adopt by EXACT title via new NotionClient.search_pages, else create under the paper page's parent with red real-money callout; workspace-parent refuses -> LiveBootstrapError pointing at task D; adopted page missing the callout gets it appended) + Trade Ledger (Live)/Account Snapshots (Live) with schemas copied verbatim from paper (live_database_properties); config keys trade_ledger_live/account_snapshots_live + notion.live_parent_page_id, write_config now MERGES so paper/live reruns preserve each other; NotionDatabases gains two optional (None-default) fields, loader requires only defaultless fields; notion-schema.md live sections + writer table; 14 new tests, all against FakeSession."
     },
     {
       "id": "US-012",

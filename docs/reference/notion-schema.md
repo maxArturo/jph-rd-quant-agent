@@ -8,9 +8,17 @@ them (idempotently, matched by title) and writes their IDs into
 truth — the bootstrap script's `database_properties()` spec must match this
 document (tests/test_bootstrap_notion.py cross-checks the property names).
 
+Live trading reports under a separate sibling page unmistakably labeled LIVE
+("Automated AI Quant Investment — LIVE 🔴", intro callout stating it reflects
+a real-money account) holding **Trade Ledger (Live)** and **Account
+Snapshots (Live)** — created/adopted by `ops/bootstrap_notion.py --live`
+(US-011) with ids under config keys `trade_ledger_live` /
+`account_snapshots_live` and the page id under `live_parent_page_id`. A
+config without the live keys keeps loading for paper-only operation.
+
 Everything a run produced should be reconstructable from Notion alone
 (US-027); every order and fill should be auditable from the Trade Ledger
-(US-035, US-037).
+(US-035, US-037) — and from Trade Ledger (Live) for the real-money account.
 
 ## One writer per database
 
@@ -28,6 +36,14 @@ concurrent-edit conflicts (Notion 409s on concurrent saves).
 | Trade Ledger     | execution rebalancer (`execution/ledger.py` TradeLedger, US-035) |
 | Account Snapshots | execution rebalancer (`execution/account_log.py` AccountSnapshotLog, US-047) |
 | Strategy Notes   | `ops/notion_summary.py` (GPU pipeline plain-language write-up) |
+| Trade Ledger (Live) | LIVE rebalancer (`execution/rebalance.py --live`, US-014) |
+| Account Snapshots (Live) | LIVE rebalancer (`execution/rebalance.py --live`, US-014) |
+
+The Decision Log is deliberately SHARED between paper and live decisions
+(promote_live / demote_live / halt_live / resume_live rows land next to the
+paper ones) — the orchestrator's NotionRecorder remains its only writer. The
+live rebalancer writes only to the two (Live) databases; the paper rebalancer
+never touches them.
 
 Inside the orchestrator process, `orchestrator/notion_recorder.py`
 (`NotionRecorder`, US-027) is the single write funnel for the first four
@@ -143,6 +159,31 @@ when the current day's P/L is still ~0 by definition.
 | Outcome       | select    | traded / no_trade / gate_rejected / breaker_tripped / halted |
 | Breaker       | rich_text | breaker_state_line() output                                  |
 | Notes         | rich_text | rejection/trip reasons, halt note                            |
+
+## Trade Ledger (Live)
+
+One row per order the LIVE rebalancer (`execution/rebalance.py --live`)
+submitted against the real-money account, updated with its terminal fill or
+rejection. Reconciled against Alpaca LIVE order history by
+`ops/reconcile.py --live`. Lives under the "Automated AI Quant Investment —
+LIVE 🔴" page, never under the paper page.
+
+The property schema is IDENTICAL to [Trade Ledger](#trade-ledger) above:
+`ops/bootstrap_notion.py` copies the paper schema verbatim
+(`live_database_properties()`), so there is no separate live spec to drift.
+Live order ids carry the `rdq-live-` prefix (US-013), which is what keeps the
+two ledgers unambiguous in cross-account tooling.
+
+## Account Snapshots (Live)
+
+One row per LIVE rebalance day: the real-money account's status and daily
+P/L, written on the same outcomes as the paper twin. The Equity column is the
+FULL live account equity; the slice actually traded is
+`live_equity_allocation_pct` of it (recorded in the live promotion slot and
+the daily summary).
+
+The property schema is IDENTICAL to [Account Snapshots](#account-snapshots)
+above — copied verbatim by `ops/bootstrap_notion.py --live`.
 
 ## Strategy Notes
 

@@ -351,6 +351,40 @@ def test_load_notion_databases_missing_ids_raises(tmp_path: Path) -> None:
         load_notion_databases(tmp_path / "missing.yaml")
 
 
+PAPER_KEYS = (
+    "research_ideas",
+    "hypothesis_log",
+    "backtest_results",
+    "decision_log",
+    "trade_ledger",
+    "account_snapshots",
+    "strategy_notes",
+)
+
+
+def test_load_notion_databases_without_live_ids_is_paper_only(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    lines = "".join(f"    {key}: db-{i}\n" for i, key in enumerate(PAPER_KEYS))
+    config.write_text(f"notion:\n  databases:\n{lines}")
+    databases = load_notion_databases(config)
+    assert databases.trade_ledger == "db-4"
+    assert databases.trade_ledger_live is None
+    assert databases.account_snapshots_live is None
+
+
+def test_load_notion_databases_with_live_ids(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    lines = "".join(f"    {key}: db-{i}\n" for i, key in enumerate(PAPER_KEYS))
+    lines += "    trade_ledger_live: db-tl-live\n"
+    lines += "    account_snapshots_live: db-as-live\n"
+    config.write_text(f"notion:\n  databases:\n{lines}")
+    databases = load_notion_databases(config)
+    assert databases.trade_ledger_live == "db-tl-live"
+    assert databases.account_snapshots_live == "db-as-live"
+    # Live ids are never required: their absence must not raise (paper-only).
+    assert databases.trade_ledger == "db-4"
+
+
 # --- lifecycle: conversation core ----------------------------------------------------
 
 

@@ -119,6 +119,45 @@ class NotionClient:
             if not page.get("has_more") or cursor is None:
                 return results
 
+    def get_page(self, page_id: str) -> dict[str, Any]:
+        """GET /v1/pages/{id}: retrieve a page (its parent, properties, ...)."""
+        return self._request("GET", f"/v1/pages/{page_id}", None)
+
+    def search_pages(self, query: str) -> list[dict[str, Any]]:
+        """POST /v1/search filtered to pages: return ALL matches (paginates).
+
+        Search spans everything shared with the integration regardless of
+        where it lives (including workspace-level pages, whose parents have
+        no listable children) — the adopt-by-title path for bootstrap.
+        Notion's query match is fuzzy; callers must compare titles exactly.
+        """
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            payload: dict[str, Any] = {
+                "query": query,
+                "filter": {"value": "page", "property": "object"},
+                "page_size": DEFAULT_PAGE_SIZE,
+            }
+            if cursor is not None:
+                payload["start_cursor"] = cursor
+            page = self._request("POST", "/v1/search", payload)
+            page_results = page.get("results", [])
+            if not isinstance(page_results, list):
+                raise NotionError(
+                    f"expected a 'results' list from search, got: {page_results!r:.200}"
+                )
+            results.extend(page_results)
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or cursor is None:
+                return results
+
+    def append_children(
+        self, block_id: str, children: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """PATCH /v1/blocks/{id}/children: append child blocks to a page/block."""
+        return self._request("PATCH", f"/v1/blocks/{block_id}/children", {"children": children})
+
     def create_database(
         self,
         parent_page_id: str,
@@ -133,32 +172,38 @@ class NotionClient:
         }
         return self._request("POST", "/v1/databases", payload)
 
-    def list_child_databases(self, page_id: str) -> dict[str, str]:
-        """GET /v1/blocks/{id}/children: map child-database title -> database id.
-
-        Paginates through all children; non-database blocks are ignored. If two
-        child databases share a title the LAST one wins — bootstrap treats
-        titles as unique under its parent page.
-        """
-        found: dict[str, str] = {}
+    def list_children(self, block_id: str) -> list[dict[str, Any]]:
+        """GET /v1/blocks/{id}/children: return ALL child blocks (paginates)."""
+        blocks: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
             query = f"?page_size={DEFAULT_PAGE_SIZE}"
             if cursor is not None:
                 query += f"&start_cursor={cursor}"
-            page = self._request("GET", f"/v1/blocks/{page_id}/children{query}", None)
-            blocks = page.get("results", [])
-            if not isinstance(blocks, list):
+            page = self._request("GET", f"/v1/blocks/{block_id}/children{query}", None)
+            page_blocks = page.get("results", [])
+            if not isinstance(page_blocks, list):
                 raise NotionError(
-                    f"expected a 'results' list from block children, got: {blocks!r:.200}"
+                    f"expected a 'results' list from block children, got: {page_blocks!r:.200}"
                 )
-            for block in blocks:
-                if block.get("type") == "child_database":
-                    title = block.get("child_database", {}).get("title", "")
-                    found[title] = block["id"]
+            blocks.extend(page_blocks)
             cursor = page.get("next_cursor")
             if not page.get("has_more") or cursor is None:
-                return found
+                return blocks
+
+    def list_child_databases(self, page_id: str) -> dict[str, str]:
+        """Map child-database title -> database id under a page.
+
+        Non-database blocks are ignored. If two child databases share a title
+        the LAST one wins — bootstrap treats titles as unique under its
+        parent page.
+        """
+        found: dict[str, str] = {}
+        for block in self.list_children(page_id):
+            if block.get("type") == "child_database":
+                title = block.get("child_database", {}).get("title", "")
+                found[title] = block["id"]
+        return found
 
     def update_page(
         self,

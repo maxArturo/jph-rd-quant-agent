@@ -1,17 +1,27 @@
-"""Bootstrap the seven Notion databases under the parent page.
+"""Bootstrap the Notion databases (paper page, and the LIVE page with --live).
 
 Creates Research Ideas, Hypothesis Log, Backtest Results, Decision Log,
-Trade Ledger, Account Snapshots and Strategy Notes with the property schemas
-defined in docs/reference/notion-schema.md (keep database_properties() below
-in sync with that document), then writes the database ids into
-orchestrator/config.yaml.
+Trade Ledger, Account Snapshots and Strategy Notes under the paper parent
+page with the property schemas defined in docs/reference/notion-schema.md
+(keep database_properties() below in sync with that document), then writes
+the database ids into orchestrator/config.yaml.
 
-Idempotent: existing child databases under the parent page are matched by
-title and reused — rerunning never duplicates a database.
+With ``--live`` it additionally ensures the real-money reporting surface
+(US-011): a sibling page titled "Automated AI Quant Investment — LIVE 🔴"
+with an intro callout stating it reflects a real-money account, holding
+Trade Ledger (Live) and Account Snapshots (Live) with schemas identical to
+their paper counterparts. An operator-created page with that exact title is
+adopted (found via Notion search — task D of the go-live checklist lets the
+operator create and share the page when the integration cannot create
+siblings itself).
+
+Idempotent: existing pages/databases are matched by exact title and reused —
+rerunning never duplicates anything, and the paper page and its databases
+are never touched by the live path.
 
 Run through the OneCLI proxy (auth is connector-injected, never in code):
 
-    onecli run --agent rdq-orchestrator -- .venv/bin/python -m ops.bootstrap_notion
+    onecli run --agent rdq-orchestrator -- .venv/bin/python -m ops.bootstrap_notion [--live]
 """
 
 from __future__ import annotations
@@ -31,6 +41,25 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "orchestrator" / 
 # Title of the database every relation property points at. It must be created
 # first so the others can reference its id.
 IDEAS_TITLE = "Research Ideas"
+
+# --- live reporting surface (US-011) ------------------------------------------
+# The live page is a SIBLING of the paper parent page, unmistakably labeled;
+# paper and live records can never be confused. Match titles EXACTLY.
+LIVE_PAGE_TITLE = "Automated AI Quant Investment — LIVE 🔴"
+LIVE_PAGE_INTRO = (
+    "This page reflects a REAL-MONEY Alpaca account. Every row under it is a "
+    "real order or real account state — not paper trading. Paper records live "
+    'under "Automated AI Quant Investment".'
+)
+# live database title -> the paper database whose property schema it copies.
+LIVE_SOURCE_TITLES = {
+    "Trade Ledger (Live)": "Trade Ledger",
+    "Account Snapshots (Live)": "Account Snapshots",
+}
+
+
+class LiveBootstrapError(RuntimeError):
+    """The live page could not be created or adopted (see operator task D)."""
 
 _SELECT = {
     "idea_status": ["proposed", "researching", "stopped", "completed", "failed", "promoted"],
@@ -170,6 +199,16 @@ def database_properties(ideas_db_id: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def live_database_properties() -> dict[str, dict[str, Any]]:
+    """Property schema per LIVE database title — identical to the paper twins.
+
+    Neither live database has a relation property, so the ideas-db id
+    placeholder is never embedded in the schemas.
+    """
+    paper = database_properties("unused-live-schemas-have-no-relations")
+    return {live: paper[source] for live, source in LIVE_SOURCE_TITLES.items()}
+
+
 # config.yaml key per database title.
 CONFIG_KEYS = {
     IDEAS_TITLE: "research_ideas",
@@ -180,6 +219,16 @@ CONFIG_KEYS = {
     "Account Snapshots": "account_snapshots",
     "Strategy Notes": "strategy_notes",
 }
+
+# config.yaml key per LIVE database title (kept out of CONFIG_KEYS: the paper
+# bootstrap loop iterates CONFIG_KEYS and must never create these under the
+# paper page).
+LIVE_CONFIG_KEYS = {
+    "Trade Ledger (Live)": "trade_ledger_live",
+    "Account Snapshots (Live)": "account_snapshots_live",
+}
+
+ALL_CONFIG_KEYS = {**CONFIG_KEYS, **LIVE_CONFIG_KEYS}
 
 
 def bootstrap(client: NotionClient, parent_page_id: str) -> dict[str, dict[str, str]]:
@@ -207,13 +256,98 @@ def bootstrap(client: NotionClient, parent_page_id: str) -> dict[str, dict[str, 
     return outcome
 
 
+def _page_title(page: dict[str, Any]) -> str:
+    """Plain-text title of a page object (the sole ``title``-type property)."""
+    for prop in page.get("properties", {}).values():
+        if prop.get("type") == "title":
+            return "".join(
+                part.get("plain_text") or part.get("text", {}).get("content", "")
+                for part in prop.get("title", [])
+            )
+    return ""
+
+
+def _intro_callout_block() -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": [{"type": "text", "text": {"content": LIVE_PAGE_INTRO}}],
+            "icon": {"type": "emoji", "emoji": "🔴"},
+            "color": "red_background",
+        },
+    }
+
+
+def ensure_live_page(client: NotionClient, paper_page_id: str) -> dict[str, str]:
+    """Adopt or create the LIVE sibling page; return {id, action}.
+
+    Adoption matches the EXACT title via Notion search (covers an
+    operator-created page anywhere the integration can see, including
+    workspace level); an adopted page missing the real-money intro callout
+    gets it appended. Creation places the page under the paper page's own
+    parent — a true sibling. When the paper page has no page parent (it is
+    workspace-level, which the API cannot create siblings of), raise
+    LiveBootstrapError telling the operator to create + share the page
+    (go-live checklist task D) so a rerun adopts it.
+    """
+    for page in client.search_pages(LIVE_PAGE_TITLE):
+        if _page_title(page) == LIVE_PAGE_TITLE:
+            if not any(
+                block.get("type") == "callout" for block in client.list_children(page["id"])
+            ):
+                client.append_children(page["id"], [_intro_callout_block()])
+            return {"id": page["id"], "action": "exists"}
+
+    parent = client.get_page(paper_page_id).get("parent", {})
+    if parent.get("type") != "page_id":
+        raise LiveBootstrapError(
+            f"no page titled {LIVE_PAGE_TITLE!r} is shared with the integration, and "
+            f"the paper page's parent is {parent.get('type', 'unknown')!r} (not a page), "
+            "so a sibling cannot be created via the API. Create an empty page with "
+            "exactly that title, share it with the integration, and rerun --live to "
+            "adopt it (ops/runbook.md go-live checklist, task D)."
+        )
+    created = client.create_page(
+        parent={"type": "page_id", "page_id": parent["page_id"]},
+        properties={"title": {"title": [{"type": "text", "text": {"content": LIVE_PAGE_TITLE}}]}},
+        children=[_intro_callout_block()],
+    )
+    return {"id": created["id"], "action": "created"}
+
+
+def bootstrap_live(
+    client: NotionClient, paper_page_id: str
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Ensure the LIVE page and its two databases; return (page, title -> {id, action}).
+
+    The paper page and its databases are never read or written beyond
+    resolving the paper page's parent for sibling creation.
+    """
+    live_page = ensure_live_page(client, paper_page_id)
+    existing = client.list_child_databases(live_page["id"])
+    outcome: dict[str, dict[str, str]] = {}
+    for title, properties in live_database_properties().items():
+        if title in existing:
+            outcome[title] = {"id": existing[title], "action": "exists"}
+        else:
+            created = client.create_database(live_page["id"], title, properties)
+            outcome[title] = {"id": created["id"], "action": "created"}
+    return live_page, outcome
+
+
 def write_config(
-    config_path: Path, parent_page_id: str, outcome: dict[str, dict[str, str]]
+    config_path: Path,
+    parent_page_id: str,
+    outcome: dict[str, dict[str, str]],
+    live_parent_page_id: str | None = None,
 ) -> None:
     """Merge the database ids into config_path under the ``notion:`` key.
 
-    Other top-level keys in an existing file are preserved (comments are not —
-    the file is machine-managed by this script).
+    Other top-level keys in an existing file are preserved, and so are
+    notion.databases entries this run did not produce — a paper-only rerun
+    never drops previously bootstrapped live ids, and vice versa (comments
+    are not preserved — the file is machine-managed by this script).
     """
     config: dict[str, Any] = {}
     if config_path.is_file():
@@ -222,10 +356,16 @@ def write_config(
             if not isinstance(loaded, dict):
                 raise ValueError(f"{config_path} must hold a YAML mapping, got: {type(loaded)}")
             config = loaded
-    config["notion"] = {
-        "parent_page_id": parent_page_id,
-        "databases": {CONFIG_KEYS[title]: info["id"] for title, info in outcome.items()},
-    }
+    notion = config.get("notion")
+    notion = dict(notion) if isinstance(notion, dict) else {}
+    databases = notion.get("databases")
+    databases = dict(databases) if isinstance(databases, dict) else {}
+    databases.update({ALL_CONFIG_KEYS[title]: info["id"] for title, info in outcome.items()})
+    notion["parent_page_id"] = parent_page_id
+    if live_parent_page_id is not None:
+        notion["live_parent_page_id"] = live_parent_page_id
+    notion["databases"] = databases
+    config["notion"] = notion
     header = (
         "# Orchestrator configuration. The notion: section is machine-managed by\n"
         "# ops/bootstrap_notion.py — rerun it rather than editing ids by hand.\n"
@@ -236,12 +376,12 @@ def write_config(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bootstrap the seven Notion databases under the parent page."
+        description="Bootstrap the Notion databases under the parent page."
     )
     parser.add_argument(
         "--parent-page-id",
         default=DEFAULT_PARENT_PAGE_ID,
-        help="Notion page the databases live under (default: %(default)s)",
+        help="Notion page the paper databases live under (default: %(default)s)",
     )
     parser.add_argument(
         "--config",
@@ -249,11 +389,29 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_CONFIG_PATH,
         help="config.yaml to write database ids into (default: %(default)s)",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            f"also ensure the {LIVE_PAGE_TITLE!r} sibling page and its "
+            "Trade Ledger (Live) / Account Snapshots (Live) databases"
+        ),
+    )
     opts = parser.parse_args(argv)
 
     client = NotionClient()
     outcome = bootstrap(client, opts.parent_page_id)
-    write_config(opts.config, opts.parent_page_id, outcome)
+    live_page_id: str | None = None
+    if opts.live:
+        try:
+            live_page, live_outcome = bootstrap_live(client, opts.parent_page_id)
+        except LiveBootstrapError as exc:
+            print(f"live bootstrap failed: {exc}", file=sys.stderr)
+            return 1
+        live_page_id = live_page["id"]
+        print(f"{live_page['action']:>7}  {LIVE_PAGE_TITLE}: {live_page_id}")
+        outcome.update(live_outcome)
+    write_config(opts.config, opts.parent_page_id, outcome, live_parent_page_id=live_page_id)
 
     for title, info in outcome.items():
         print(f"{info['action']:>7}  {title}: {info['id']}")

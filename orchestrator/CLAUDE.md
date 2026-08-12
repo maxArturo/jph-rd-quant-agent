@@ -115,6 +115,14 @@
   database has exactly ONE writing component (one-writer-per-DB convention) —
   check the table there before adding a Notion write path. Relations are
   `single_property` (no synced back-reference on Research Ideas).
+  Live keys (US-011): `trade_ledger_live` / `account_snapshots_live` (+
+  `notion.live_parent_page_id`) are written only by `bootstrap_notion --live`
+  and are OPTIONAL in `NotionDatabases` (`str | None = None` — a paper-only
+  config keeps loading; `load_notion_databases` requires only the
+  defaultless fields). `write_config` MERGES into `notion.databases`, so a
+  paper-only rerun never drops live ids and vice versa. Decision Log stays
+  SHARED between paper and live decisions (orchestrator sole writer); the
+  live rebalancer is the sole writer of both (Live) databases.
 
 ## Testing Bolt apps (see tests/test_slack_app.py)
 

@@ -22,7 +22,7 @@ import json
 import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
@@ -52,7 +52,12 @@ class RecorderConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class NotionDatabases:
-    """The seven database ids bootstrap_notion.py writes into config.yaml."""
+    """The database ids bootstrap_notion.py writes into config.yaml.
+
+    The seven paper ids are required; the two live ids (US-011) default to
+    None so a config bootstrapped before `--live` keeps loading for
+    paper-only operation.
+    """
 
     research_ideas: str
     hypothesis_log: str
@@ -61,6 +66,8 @@ class NotionDatabases:
     trade_ledger: str
     account_snapshots: str
     strategy_notes: str
+    trade_ledger_live: str | None = None
+    account_snapshots_live: str | None = None
 
 
 def load_notion_databases(config_path: Path = DEFAULT_CONFIG_PATH) -> NotionDatabases:
@@ -79,13 +86,20 @@ def load_notion_databases(config_path: Path = DEFAULT_CONFIG_PATH) -> NotionData
         databases = loaded.get("notion", {}).get("databases", {})
     if not isinstance(databases, dict):
         databases = {}
-    missing = [f.name for f in fields(NotionDatabases) if not databases.get(f.name)]
+    required = [f.name for f in fields(NotionDatabases) if f.default is MISSING]
+    missing = [name for name in required if not databases.get(name)]
     if missing:
         raise RecorderConfigError(
             f"{config_path} lacks notion.databases ids for: {', '.join(missing)} —"
             " run ops/bootstrap_notion.py to (re)create them"
         )
-    return NotionDatabases(**{f.name: str(databases[f.name]) for f in fields(NotionDatabases)})
+    return NotionDatabases(
+        **{
+            f.name: str(databases[f.name])
+            for f in fields(NotionDatabases)
+            if databases.get(f.name)
+        }
+    )
 
 
 # -- property payload builders (Notion API property value shapes) --------------
