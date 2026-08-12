@@ -335,6 +335,21 @@
   triggering-message permalink is passed in by the caller
   (`trigger_permalink=` — the recorder's own permalink fn is paper-channel
   only).
+- Live promotion tools (US-010): `promote_to_live`/`demote_live` are ONE
+  message with NO confirmation step (2026-08-10 decision — the posted armed
+  summary IS the confirmation; never add a confirm round-trip). Registered
+  only when BOTH `live_channel_id` and `live_promotions=` (a LivePromotion)
+  are wired; gated by `_require_live_channel` like the halt tools. Tool-side
+  refusals that the backend deliberately does NOT own: live breaker halted,
+  and live guardrail config unusable (`_live_guardrails` loads
+  limits.live.json + breaker.live.json BEFORE promoting — the armed summary
+  quotes their numbers, so an unusable file refuses with nothing written).
+  The (channel, ts) permalink resolver rides the core's `permalink=` ctor
+  param (app.py wires `chat_getPermalink` in the message's own channel);
+  resolution is best-effort — a Slack failure degrades to None, never blocks
+  arming. `LIVE_REBALANCE_SCHEDULE` in conversation.py names when the live
+  rebalance fires — keep it in sync with ops/rdq-rebalance-live.timer
+  (US-019).
 
 - Spoken hypothesis decisions + conversational promotion (US-044):
   ConversationCore optionally takes `interactions=` (the HypothesisPoller) and

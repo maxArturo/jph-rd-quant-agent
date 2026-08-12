@@ -172,8 +172,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: promote_to_live/demote_live ToolSpecs (registered only when live_channel_id AND live_promotions wired; _require_live_channel gate); one-message arm — backend promote() then format_live_armed posted (workspace id, source, metrics, universe+count+mismatch, allocation, live limits/breaker numbers, LIVE_REBALANCE_SCHEDULE); tool-side refusals: halted live breaker, unusable limits.live.json/breaker.live.json (loaded BEFORE promoting), wrong/unknown channel; backend refusals relayed with nothing posted; demote posts format_live_demoted (next rebalance aborts); permalink= ctor param (channel-aware chat_getPermalink, best-effort); app.py wires LivePromotion when armed; prompt bullet (one step, no confirm); 19 tests in tests/test_live_promote_tools.py + real-backend smoke."
     },
     {
       "id": "US-011",

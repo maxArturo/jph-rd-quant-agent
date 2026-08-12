@@ -26,12 +26,16 @@ from orchestrator.state import (
     Directive,
     DuplicateRunError,
     PendingInteraction,
+    PromotedStrategy,
     Run,
     StateStore,
 )
 
 if TYPE_CHECKING:
     from execution.alpaca_client import Account, Order, PortfolioHistory, Position
+    from execution.breaker import BreakerConfig
+    from execution.order_gate import Limits
+    from orchestrator.promotion import LivePromotionResult
     from orchestrator.universe import MaterializedUniverse, UniverseProposal
 
 logger = logging.getLogger(__name__)
@@ -162,6 +166,24 @@ class PromotionManager(Protocol):
     def request_promotion(self, thread_ts: str, say: SayFn) -> None: ...
 
     def confirm_promotion(self, thread_ts: str, say: SayFn) -> None: ...
+
+
+class LivePromotionManager(Protocol):
+    """What promote_to_live/demote_live need from LivePromotion (US-009/US-010).
+
+    Both methods either succeed or raise LivePromotionError BEFORE writing
+    anything — the tools are thin wrappers that add the channel gate, the
+    guardrail/halt refusals, and the posted summary.
+    """
+
+    def promote(
+        self,
+        reference: str | None = None,
+        thread_ts: str | None = None,
+        trigger_permalink: str | None = None,
+    ) -> LivePromotionResult: ...
+
+    def demote(self, trigger_permalink: str | None = None) -> PromotedStrategy: ...
 
 
 START_RESEARCH_SCHEMA: dict[str, Any] = {
@@ -304,6 +326,28 @@ PROMOTE_RUN_SCHEMA: dict[str, Any] = {
 
 CONFIRM_PROMOTION_SCHEMA: dict[str, Any] = {
     # No inputs: confirms the thread's requested promotion.
+    "type": "object",
+    "properties": {},
+}
+
+PROMOTE_TO_LIVE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "run_reference": {
+            "type": "string",
+            "description": (
+                "Only when the operator names a specific run: its Slack thread"
+                " timestamp, or a fragment (>= 6 chars) of its session path."
+                " Omit it otherwise — the backend then promotes this thread's"
+                " run, or (when the thread has none) copies the current"
+                " paper-promoted strategy."
+            ),
+        },
+    },
+}
+
+DEMOTE_LIVE_SCHEMA: dict[str, Any] = {
+    # No inputs: clears the live promotion slot.
     "type": "object",
     "properties": {},
 }
@@ -462,6 +506,87 @@ def format_live_trading_resumed(halt_file: Path) -> str:
     )
 
 
+# When the live rebalance fires (US-019's rdq-rebalance-live.timer) — quoted
+# in the armed summary so the operator knows when the strategy first trades.
+LIVE_REBALANCE_SCHEDULE = "Mon–Fri 08:10 America/New_York (rdq-rebalance-live.timer)"
+
+
+def format_live_armed(
+    result: LivePromotionResult, limits: Limits, breaker_config: BreakerConfig
+) -> str:
+    """Slack mrkdwn armed summary posted when a strategy is promoted to LIVE.
+
+    This IS the confirmation (US-010: one message, no confirm step), so it
+    restates everything now in force: what trades, from where, under which
+    limits/breaker numbers, at what allocation, and when it first fires.
+    """
+    from orchestrator import summary
+
+    workspace = Path(result.promoted.workspace_path)
+    source = (
+        "copy of the paper-promoted strategy"
+        if result.source == "paper"
+        else f"direct run promotion (thread {result.source_thread_ts})"
+    )
+    tickers = result.universe_tickers
+    universe = f"{result.universe} " + (
+        f"({len(tickers)} tickers pinned)" if tickers is not None else "(no tickers pinned)"
+    )
+    metric_parts: list[str] = []
+    for label, keys, _style in summary.METRIC_SPECS:
+        value = next((result.metrics[k] for k in keys if k in result.metrics), None)
+        if value is not None:
+            metric_parts.append(f"{label} {value:.4f}")
+    if result.sharpe is not None:
+        metric_parts.append(f"Sharpe {result.sharpe:.4f}")
+    lines = [
+        ":rotating_light: *LIVE trading is ARMED — real-money account.*",
+        f"*Strategy:* `{workspace.name}` — {source}",
+        f"*Workspace:* `{workspace}`",
+        f"*Universe:* {universe}",
+    ]
+    if result.label_mismatch:
+        lines.append(
+            f":warning: the run was labeled `{result.universe_label}`, but the"
+            f" workspace's backtest ran `market: {result.universe}` — what"
+            f" trades live is `{result.universe}`."
+        )
+    lines.append(f"*Backtest:* {', '.join(metric_parts) if metric_parts else 'metrics n/a'}")
+    lines.append(f"*Allocation:* {result.allocation_pct:g}% of live equity")
+    lines.append(
+        f"*Live limits:* ${limits.max_order_notional_usd:,.0f}/order,"
+        f" {limits.max_position_pct_equity:g}% max position,"
+        f" {limits.max_day_orders} orders/day,"
+        f" {limits.max_total_positions} positions max"
+    )
+    lines.append(
+        f"*Live breaker:* ${breaker_config.max_daily_notional_usd:,.0f} daily"
+        f" notional, {breaker_config.max_drawdown_pct:g}% drawdown"
+    )
+    if result.replaced is not None:
+        lines.append(
+            f"*Replaced:* `{Path(result.replaced.workspace_path).name}`"
+            f" (promoted {result.replaced.promoted_at})"
+        )
+    lines.extend(f":warning: {warning}" for warning in result.warnings)
+    lines.append(
+        f"*Next live rebalance:* {LIVE_REBALANCE_SCHEDULE} — no confirmation"
+        " step; demote_live or halt_live_trading are the brakes."
+    )
+    return "\n".join(lines)
+
+
+def format_live_demoted(demoted: PromotedStrategy) -> str:
+    """Slack mrkdwn notice posted when the live strategy is demoted."""
+    return (
+        ":rotating_light: *LIVE strategy demoted — the live slot is empty.*\n"
+        f"*Was:* `{Path(demoted.workspace_path).name}` — universe"
+        f" {demoted.config.get('universe')}, promoted {demoted.promoted_at}\n"
+        "The next live rebalance will abort with no promoted strategy and"
+        " submit no orders. The paper promotion slot is unaffected."
+    )
+
+
 def _signed_usd(value: float) -> str:
     return f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
 
@@ -604,6 +729,8 @@ class ConversationCore:
         channel_id: str | None = None,
         live_channel_id: str | None = None,
         live_breaker: TradingBreaker | None = None,
+        live_promotions: LivePromotionManager | None = None,
+        permalink: Callable[[str, str], str | None] | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -670,6 +797,12 @@ class ConversationCore:
         # unregistered — the model never sees them in a paper-only deployment.
         self._live_channel_id = live_channel_id
         self._live_breaker = live_breaker
+        # Live promotion backend (US-010): promote_to_live/demote_live are
+        # registered only when BOTH the live channel and this are wired.
+        self._live_promotions = live_promotions
+        # Best-effort (channel, message_ts) -> Slack permalink resolver for
+        # Decision Log audit lines; app.py wires chat_getPermalink.
+        self._permalink = permalink
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(
@@ -709,6 +842,9 @@ class ConversationCore:
         if self._live_channel_id is not None:
             tools.append(self._halt_live_trading_tool(thread_ts, say, channel))
             tools.append(self._resume_live_trading_tool(thread_ts, say, channel))
+            if self._live_promotions is not None:
+                tools.append(self._promote_to_live_tool(thread_ts, say, channel))
+                tools.append(self._demote_live_tool(thread_ts, say, channel))
         if self._interactions is not None:
             tools.append(self._approve_hypothesis_tool(thread_ts, say, channel))
             tools.append(self._reject_hypothesis_tool(thread_ts, say, channel))
@@ -1325,6 +1461,130 @@ class ConversationCore:
                 " channel."
             ),
             input_schema=RESUME_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _live_guardrails(self) -> tuple[Limits, BreakerConfig]:
+        """The live limits + breaker numbers quoted in the armed summary.
+
+        Unusable config refuses the promotion BEFORE anything is written:
+        live must never arm unless the guardrails that would police it load.
+        """
+        from execution import breaker as breaker_module
+        from execution import order_gate
+
+        try:
+            limits = order_gate.load_limits(order_gate.LIVE_LIMITS_PATH)
+            config = breaker_module.load_breaker_config(breaker_module.LIVE_CONFIG_PATH)
+        except (order_gate.LimitsConfigError, breaker_module.BreakerConfigError) as exc:
+            raise ValueError(
+                f"live guardrail config is missing or malformed ({exc}) — fix"
+                " it before arming live trading; nothing was promoted"
+            ) from exc
+        return limits, config
+
+    def _trigger_permalink(self, channel: str | None, thread_ts: str) -> str | None:
+        """Best-effort permalink of the triggering thread (Decision Log audit).
+
+        The paper recorder's own permalink fn is paper-channel-bound, so the
+        live tools resolve theirs here. Failures degrade to None — an audit
+        nicety must never block or unwind arming/demoting.
+        """
+        if self._permalink is None or channel is None:
+            return None
+        try:
+            return self._permalink(channel, thread_ts)
+        except Exception:  # noqa: BLE001 — see docstring
+            logger.warning(
+                "permalink resolution failed for %s in %s", thread_ts, channel, exc_info=True
+            )
+            return None
+
+    def _promote_to_live_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None
+    ) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            live = self._require_live_channel(channel, "promote_to_live")
+            # Refusal paths first — all of them write nothing (US-010).
+            limits, breaker_config = self._live_guardrails()
+            if live.halted:
+                note = live.halt_note
+                detail = f" ({note})" if note else ""
+                raise ValueError(
+                    f"LIVE trading is halted{detail} — refusing to arm a"
+                    " strategy while the live breaker is tripped;"
+                    " resume_live_trading first, then promote."
+                )
+            assert self._live_promotions is not None  # registration gate
+            result = self._live_promotions.promote(
+                reference=_clean_optional(args.get("run_reference")),
+                thread_ts=thread_ts,
+                trigger_permalink=self._trigger_permalink(channel, thread_ts),
+            )
+            say(text=format_live_armed(result, limits, breaker_config), thread_ts=thread_ts)
+            logger.info(
+                "promoted to LIVE via chat from thread %s (source %s, workspace %s)",
+                thread_ts,
+                result.source,
+                result.promoted.workspace_path,
+            )
+            return (
+                "LIVE trading is ARMED: the live slot was written immediately"
+                " (one message, no confirmation step) and the armed summary was"
+                " posted — that summary is the confirmation. Relay it briefly;"
+                " demote_live or halt_live_trading are the ways back."
+            )
+
+        return ToolSpec(
+            name="promote_to_live",
+            description=(
+                "ARM LIVE (real-money) trading by pinning a strategy into the"
+                " live promotion slot — ONE message, NO confirmation step: the"
+                " slot is written immediately and the next live rebalance"
+                " trades it. The source is the run named by run_reference,"
+                " else this thread's finished run, else a copy of the current"
+                " paper-promoted strategy. Posts the armed summary as"
+                " after-the-fact confirmation. Call it only when the operator"
+                " explicitly asks to promote to live / arm live trading, and"
+                " only from the live-trading channel. The paper slot is"
+                " untouched (paper promotion is promote_run)."
+            ),
+            input_schema=PROMOTE_TO_LIVE_SCHEMA,
+            handler=handler,
+        )
+
+    def _demote_live_tool(self, thread_ts: str, say: SayFn, channel: str | None) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — clears the live slot
+            self._require_live_channel(channel, "demote_live")
+            assert self._live_promotions is not None  # registration gate
+            demoted = self._live_promotions.demote(
+                trigger_permalink=self._trigger_permalink(channel, thread_ts)
+            )
+            say(text=format_live_demoted(demoted), thread_ts=thread_ts)
+            logger.info(
+                "demoted live strategy via chat from thread %s (workspace %s)",
+                thread_ts,
+                demoted.workspace_path,
+            )
+            return (
+                "The live slot was cleared: the next live rebalance will abort"
+                " with no promoted strategy and submit no orders. The demotion"
+                " notice was posted. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="demote_live",
+            description=(
+                "DEMOTE the live strategy: clears the live promotion slot in"
+                " one message (no confirmation step), so the next live"
+                " rebalance aborts with no promoted strategy — the soft stop"
+                " for live trading (halt_live_trading is the hard stop)."
+                " Paper promotion is untouched. Call it only when the operator"
+                " explicitly asks to demote / disarm live trading, and only"
+                " from the live-trading channel."
+            ),
+            input_schema=DEMOTE_LIVE_SCHEMA,
             handler=handler,
         )
 

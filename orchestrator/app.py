@@ -319,6 +319,21 @@ def main() -> None:
     from orchestrator.gpu_backend import GpuBackend, locate_run_artifacts
 
     promotions = PromotionFlow(store, recorder=recorder, locate=locate_run_artifacts)
+
+    # Live promotion backend (US-010): only constructed when the operator
+    # armed the live channel — paper-only deployments never see the tools.
+    live_promotions = None
+    if config.live_channel_id is not None:
+        from orchestrator.promotion import LivePromotion
+
+        live_promotions = LivePromotion(store, promotions, recorder=recorder)
+
+    def _channel_permalink(channel: str, message_ts: str) -> str | None:
+        # Unlike the recorder's paper-channel-bound closure above, this one
+        # resolves in the message's own channel (live tools need it).
+        response = web_client.chat_getPermalink(channel=channel, message_ts=message_ts)
+        return response.get("permalink")
+
     conversation = ConversationCore(
         store=store,
         router=ModelRouter(),
@@ -333,6 +348,9 @@ def main() -> None:
         # Arms the live halt/resume tools (US-008); None keeps them
         # unregistered and the core constructs no live breaker.
         live_channel_id=config.live_channel_id,
+        # One-message live promotion tools (US-010).
+        live_promotions=live_promotions,
+        permalink=_channel_permalink,
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),
