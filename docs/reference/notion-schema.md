@@ -1,6 +1,6 @@
 # Notion database schemas
 
-The system's durable record lives in six Notion databases under one parent
+The system's durable record lives in seven Notion databases under one parent
 page ("Automated AI Quant Investment",
 `3979b1a4-36cf-8046-baa5-cc14c1ca7665`). `ops/bootstrap_notion.py` creates
 them (idempotently, matched by title) and writes their IDs into
@@ -27,6 +27,7 @@ concurrent-edit conflicts (Notion 409s on concurrent saves).
 | Decision Log     | orchestrator NotionRecorder (operator tools: promote, halt/resume) |
 | Trade Ledger     | execution rebalancer (`execution/ledger.py` TradeLedger, US-035) |
 | Account Snapshots | execution rebalancer (`execution/account_log.py` AccountSnapshotLog, US-047) |
+| Strategy Notes   | `ops/notion_summary.py` (GPU pipeline plain-language write-up) |
 
 Inside the orchestrator process, `orchestrator/notion_recorder.py`
 (`NotionRecorder`, US-027) is the single write funnel for the first four
@@ -142,6 +143,25 @@ when the current day's P/L is still ~0 by definition.
 | Outcome       | select    | traded / no_trade / gate_rejected / breaker_tripped / halted |
 | Breaker       | rich_text | breaker_state_line() output                                  |
 | Notes         | rich_text | rejection/trip reasons, halt note                            |
+
+## Strategy Notes
+
+One row per successful GPU research run: the plain-language write-up of the
+result and the investing approach, written for a nontechnical reader. The
+prose lives in the row's PAGE BODY (paragraph blocks, unlimited length); the
+properties exist to keep the growing collection sortable and filterable.
+
+| Property   | Type      | Notes                                                    |
+| ---------- | --------- | -------------------------------------------------------- |
+| Note       | title     | e.g. "Strategy note — us_liquid run 2026-08-06"           |
+| Run Date   | date      | pipeline completion date                                  |
+| Universe   | rich_text | universe the run traded                                   |
+| Directive  | rich_text | operator directive (omitted for open-ended runs)          |
+| Hypothesis | rich_text | the winning candidate's hypothesis                        |
+| IC         | number    | winning candidate's headline metrics                      |
+| ARR        | number    |                                                           |
+| MDD        | number    |                                                           |
+| Sharpe     | number    |                                                           |
 
 ## Conventions
 

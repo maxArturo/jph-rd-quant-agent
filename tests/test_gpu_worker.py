@@ -49,6 +49,16 @@ class TestScriptContract:
         for sub in ("provision", "bootstrap", "tunnel", "run", "status", "fetch", "destroy"):
             assert sub in result.stdout
 
+    def test_bootstrap_apt_waits_for_dpkg_lock(self) -> None:
+        # Fresh droplets race first-boot apt (cloud-init/unattended-upgrades)
+        # for the dpkg lock — the 2026-08-11 run died on it. Bootstrap must
+        # wait for first boot to finish and tell apt to wait for the lock.
+        source = SCRIPT.read_text()
+        assert "cloud-init status --wait" in source
+        for line in source.splitlines():
+            if "apt-get" in line and not line.lstrip().startswith("#"):
+                assert "DPkg::Lock::Timeout" in line, f"apt-get without lock timeout: {line}"
+
     def test_missing_subcommand_fails(self) -> None:
         result = run_script()
         assert result.returncode != 0

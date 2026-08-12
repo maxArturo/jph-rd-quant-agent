@@ -233,7 +233,11 @@ cmd_bootstrap() {
   require_local_layout
 
   note "installing packages on the worker"
-  remote "DEBIAN_FRONTEND=noninteractive apt-get -yq update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get -yq install rsync tmux git make python3-venv python3-pip zstd jq >/dev/null"
+  # A fresh droplet races first-boot apt activity (cloud-init, unattended
+  # upgrades) for the dpkg lock — the 2026-08-11 run died on exactly that.
+  # Wait out first boot, then have apt wait for the lock instead of failing.
+  remote "command -v cloud-init >/dev/null && timeout 600 cloud-init status --wait >/dev/null 2>&1 || true"
+  remote "DEBIAN_FRONTEND=noninteractive apt-get -yq -o DPkg::Lock::Timeout=600 update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get -yq -o DPkg::Lock::Timeout=600 install rsync tmux git make python3-venv python3-pip zstd jq >/dev/null"
 
   note "verifying GPU + docker runtime"
   remote "nvidia-smi -L" || fail "nvidia-smi failed — wrong image? (need the AI/ML-ready ${RDQ_GPU_IMAGE})"
