@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from execution.alpaca_client import AlpacaClient
+from execution.alpaca_client import LIVE_BASE_URL, AlpacaClient
 from ops.flatten import main, run_flatten
 
 
@@ -210,6 +210,52 @@ class TestCli:
     def test_rejects_non_positive_intervals(self) -> None:
         with pytest.raises(SystemExit):
             main(["--poll-interval-seconds", "0"])
+
+
+class TestLiveWiring:
+    """--live must construct the live-host client with allow_live=True (US-015)."""
+
+    def drive_main(
+        self, monkeypatch: pytest.MonkeyPatch, argv: list[str], broker: FlattenBroker
+    ) -> tuple[int, list[tuple[tuple[Any, ...], dict[str, Any]]]]:
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def record_client(*args: Any, **kwargs: Any) -> AlpacaClient:
+            calls.append((args, kwargs))
+            return AlpacaClient(*args, session=broker, **kwargs)
+
+        monkeypatch.setattr("ops.flatten.AlpacaClient", record_client)
+        return main(argv), calls
+
+    def test_live_flag_constructs_live_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        code, calls = self.drive_main(monkeypatch, ["--live"], FlattenBroker())
+        assert code == 0
+        assert calls == [((LIVE_BASE_URL,), {"allow_live": True})]
+
+    def test_paper_default_constructs_default_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        code, calls = self.drive_main(monkeypatch, [], FlattenBroker())
+        assert code == 0
+        assert calls == [((), {})]
+
+    def test_full_flatten_sequence_over_a_live_host_client(self) -> None:
+        broker = FlattenBroker(
+            open_orders=[order_row("o1", "AAPL", "buy")],
+            positions=[position_row("AAPL", 5)],
+        )
+        client = AlpacaClient(LIVE_BASE_URL, session=broker, allow_live=True)
+        lines: list[str] = []
+        code = run_flatten(
+            client,
+            out=lines.append,
+            sleep=lambda _s: None,
+            timeout_seconds=10.0,
+            poll_interval_seconds=1.0,
+        )
+        assert code == 0
+        assert broker.closed_symbols == ["AAPL"]
+        assert lines[-1] == "OK: /v2/positions confirmed empty — account is flat"
 
 
 class TestRunbook:

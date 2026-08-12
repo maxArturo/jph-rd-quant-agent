@@ -1,4 +1,7 @@
-"""Emergency flatten: cancel every open order, close every paper position (US-040).
+"""Emergency flatten: cancel every open order, close every position (US-040).
+
+Defaults to the paper account; ``--live`` (US-015) flattens the real-money
+live account instead — the emergency go-to-zero for live incidents.
 
 Sequence (see ops/runbook.md for when to reach for this):
 
@@ -21,9 +24,11 @@ ops/reconcile.py will (correctly) flag them as missing ledger rows for this
 date. That is the audit trail working, not a bug; note the flatten in the
 Decision Log.
 
-Run through the OneCLI proxy (paper credentials are injected; never in code):
+Run through the OneCLI proxy (credentials are injected per identity; never
+in code) — paper under rdq-exec-paper, live under rdq-exec-live:
 
     onecli run --agent rdq-exec-paper -- .venv/bin/python -m ops.flatten
+    onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.flatten --live
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 
-from execution.alpaca_client import AlpacaClient, AlpacaError
+from execution.alpaca_client import LIVE_BASE_URL, AlpacaClient, AlpacaError
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -135,7 +140,15 @@ def run_flatten(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Cancel all open orders and close all paper positions."
+        description=(
+            "Cancel all open orders and close all positions "
+            "(paper by default; --live flattens the real-money account)."
+        )
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="flatten the LIVE account (run under rdq-exec-live)",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -154,8 +167,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--timeout-seconds and --poll-interval-seconds must be positive")
 
     try:
+        client = AlpacaClient(LIVE_BASE_URL, allow_live=True) if args.live else AlpacaClient()
         return run_flatten(
-            AlpacaClient(),
+            client,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
         )

@@ -257,8 +257,8 @@
         "Tests pass"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: --live on both CLIs — reconcile selects trade_ledger_live (missing id -> ReconcileError exit 2 naming the key + bootstrap --live) + AlpacaClient(LIVE_BASE_URL, allow_live=True); flatten swaps only the client; paper paths still call AlpacaClient() zero-arg (byte-for-byte, existing tests unmodified); docstrings/CLI/ops CLAUDE.md de-paper-ed; 7 wiring tests (TestLiveWiring in both test files)."
     },
     {
       "id": "US-016",

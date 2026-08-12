@@ -1,4 +1,8 @@
-"""Reconcile the Notion Trade Ledger against Alpaca paper order history (US-037).
+"""Reconcile the Notion Trade Ledger against Alpaca order history (US-037).
+
+Defaults to the paper account and its Trade Ledger; ``--live`` (US-015)
+compares Trade Ledger (Live) against the real-money live account instead
+(read-only on both sides, so the audit tooling is identical across accounts).
 
 For a date range (America/New_York trading dates, judged by each order's
 submitted_at — the same "today" convention as execution/rebalance.py), this
@@ -25,11 +29,14 @@ an order we recorded. Note a ledger row whose Status is still 'submitted'
 against a now-filled Alpaca order is a real finding, not noise — it means
 the run's fill poll timed out and record_final never saw the fill.
 
-Run through the OneCLI proxy (Alpaca + Notion auth are both injected for
-rdq-exec-paper; never in code):
+Run through the OneCLI proxy (Alpaca + Notion auth are injected per
+identity; never in code) — paper under rdq-exec-paper, live under
+rdq-exec-live:
 
     onecli run --agent rdq-exec-paper -- .venv/bin/python -m ops.reconcile \\
         --start 2026-07-01 --end 2026-07-09
+    onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.reconcile \\
+        --live --start 2026-07-01 --end 2026-07-09
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from execution.alpaca_client import AlpacaClient, AlpacaError, Order
+from execution.alpaca_client import LIVE_BASE_URL, AlpacaClient, AlpacaError, Order
 from execution.ledger import ledger_status
 from execution.rebalance import MARKET_TZ, submitted_market_date
 from orchestrator.notion_client import NotionClient, NotionError
@@ -368,7 +375,18 @@ def run_reconcile(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Reconcile the Notion Trade Ledger against Alpaca paper order history."
+        description=(
+            "Reconcile the Notion Trade Ledger against Alpaca order history "
+            "(paper by default; --live audits the real-money account)."
+        )
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "reconcile Trade Ledger (Live) against the LIVE account "
+            "(run under rdq-exec-live)"
+        ),
     )
     parser.add_argument(
         "--start",
@@ -397,7 +415,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         databases = load_notion_databases(args.config_path)
-        return run_reconcile(NotionClient(), AlpacaClient(), databases.trade_ledger, start, end)
+        if args.live:
+            if not databases.trade_ledger_live:
+                raise ReconcileError(
+                    "--live requires the live Trade Ledger id in "
+                    "orchestrator/config.yaml (notion.databases.trade_ledger_live); "
+                    "run ops/bootstrap_notion.py --live first"
+                )
+            ledger_db_id = databases.trade_ledger_live
+            alpaca = AlpacaClient(LIVE_BASE_URL, allow_live=True)
+        else:
+            ledger_db_id = databases.trade_ledger
+            alpaca = AlpacaClient()
+        return run_reconcile(NotionClient(), alpaca, ledger_db_id, start, end)
     except (RecorderConfigError, NotionError, AlpacaError, ReconcileError) as exc:
         print(f"reconcile failed: {exc}", file=sys.stderr)
         return 2

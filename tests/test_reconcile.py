@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from execution.alpaca_client import AlpacaClient
+from execution.alpaca_client import LIVE_BASE_URL, AlpacaClient
 from ops.reconcile import (
     LedgerRow,
     Mismatch,
@@ -22,6 +22,7 @@ from ops.reconcile import (
     run_reconcile,
 )
 from orchestrator.notion_client import NotionClient
+from orchestrator.notion_recorder import NotionDatabases
 from tests.test_alpaca_client import FakeResponse as BrokerResponse
 from tests.test_alpaca_client import FakeSession as BrokerSession
 from tests.test_notion_client import FakeResponse as NotionResponse
@@ -344,3 +345,104 @@ def test_main_rejects_inverted_range() -> None:
 def test_mismatch_describe_format() -> None:
     mismatch = Mismatch("ord-1", "field_mismatch", "Qty: ledger=12 alpaca=10")
     assert mismatch.describe() == "field_mismatch [ord-1]: Qty: ledger=12 alpaca=10"
+
+
+# ---------------------------------------------------------------- --live wiring (US-015)
+
+LIVE_DB_ID = "db-trade-ledger-live"
+
+
+def make_databases(live_ledger: str | None = LIVE_DB_ID) -> NotionDatabases:
+    return NotionDatabases(
+        research_ideas="db-ideas",
+        hypothesis_log="db-hypo",
+        backtest_results="db-backtests",
+        decision_log="db-decisions",
+        trade_ledger=DB_ID,
+        account_snapshots="db-snapshots",
+        strategy_notes="db-notes",
+        trade_ledger_live=live_ledger,
+    )
+
+
+class TestLiveWiring:
+    """--live must flip the broker host, the allow_live flag, and the ledger id together."""
+
+    def drive_main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        databases: NotionDatabases,
+    ) -> tuple[int, list[tuple[tuple[Any, ...], dict[str, Any]]], dict[str, Any]]:
+        client_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        run_args: dict[str, Any] = {}
+
+        def record_client(*args: Any, **kwargs: Any) -> AlpacaClient:
+            client_calls.append((args, kwargs))
+            return AlpacaClient(*args, **kwargs)
+
+        def record_run(
+            notion: NotionClient,
+            alpaca: AlpacaClient,
+            db_id: str,
+            start: dt.date,
+            end: dt.date,
+        ) -> int:
+            run_args.update(alpaca=alpaca, db_id=db_id, start=start, end=end)
+            return 0
+
+        monkeypatch.setattr("ops.reconcile.AlpacaClient", record_client)
+        monkeypatch.setattr("ops.reconcile.load_notion_databases", lambda path: databases)
+        monkeypatch.setattr("ops.reconcile.run_reconcile", record_run)
+        return main(argv), client_calls, run_args
+
+    def test_live_selects_live_host_flag_and_live_ledger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        code, client_calls, run_args = self.drive_main(
+            monkeypatch,
+            ["--live", "--start", "2026-07-09", "--end", "2026-07-09"],
+            make_databases(),
+        )
+        assert code == 0
+        assert client_calls == [((LIVE_BASE_URL,), {"allow_live": True})]
+        assert run_args["db_id"] == LIVE_DB_ID
+
+    def test_paper_default_keeps_paper_client_and_ledger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        code, client_calls, run_args = self.drive_main(
+            monkeypatch,
+            ["--start", "2026-07-09", "--end", "2026-07-09"],
+            make_databases(),
+        )
+        assert code == 0
+        assert client_calls == [((), {})]
+        assert run_args["db_id"] == DB_ID
+
+    def test_live_without_live_ledger_id_exits_two(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, client_calls, run_args = self.drive_main(
+            monkeypatch,
+            ["--live", "--start", "2026-07-09", "--end", "2026-07-09"],
+            make_databases(live_ledger=None),
+        )
+        assert code == 2
+        assert client_calls == []
+        assert run_args == {}
+        err = capsys.readouterr().err
+        assert "trade_ledger_live" in err
+        assert "ops/bootstrap_notion.py --live" in err
+
+    def test_run_reconcile_works_over_a_live_host_client(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        notion = NotionClient(session=NotionSession([query_response([ledger_page()])]))
+        alpaca = AlpacaClient(
+            LIVE_BASE_URL,
+            session=BrokerSession([BrokerResponse(200, [order_row()])]),
+            allow_live=True,
+        )
+        assert run_reconcile(notion, alpaca, LIVE_DB_ID, START, END) == 0
+        assert "OK 2026-07-09..2026-07-09" in capsys.readouterr().out

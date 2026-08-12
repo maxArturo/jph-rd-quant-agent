@@ -229,3 +229,18 @@ Started: (not yet started)
   - When main() wiring changes, monkeypatch the module-top symbols rebalance_mod.TradeLedger/AccountSnapshotLog and call-time orchestrator.live_status.LiveStatusReader / orchestrator.notion_recorder.load_notion_databases — NotionClient() constructs offline-safe, leave it real.
   - US-015 wiring note: reconcile --live should read Trade Ledger (Live) via databases.trade_ledger_live (same missing-key refusal shape as main()'s); flatten needs no Notion.
 ---
+## 2026-08-13 04:40 - US-015
+- reconcile.py and flatten.py --live:
+  - ops/reconcile.py: --live flag in main() switches BOTH the ledger source (databases.trade_ledger_live; None -> ReconcileError "run ops/bootstrap_notion.py --live first" -> existing exit-2 catch, mirroring rebalance main()'s missing-live-ids refusal) and the broker client (AlpacaClient(LIVE_BASE_URL, allow_live=True)). run_reconcile/compare/fetch logic untouched — it was already account-agnostic (joins on Alpaca order id, so the rdq-live- client_order_id prefix is irrelevant).
+  - ops/flatten.py: --live flag swaps only the client construction; cancel/close/verify sequence and exit codes untouched.
+  - Paper paths still call AlpacaClient() with ZERO args, so TestCli's `lambda: ...` monkeypatch factories and every existing test pass unmodified (byte-for-byte AC).
+  - Docstrings + argparse descriptions de-paper-ed (both scripts now show paper AND rdq-exec-live invocations); ops/CLAUDE.md flatten/reconcile bullets updated (--live under rdq-exec-live, reconcile's missing-key refusal).
+- Files changed: ops/{reconcile.py,flatten.py,CLAUDE.md}, tests/{test_reconcile.py,test_flatten.py}, scripts/ralph/prd.json.
+- Verified: make check fully green (ruff, pyright, 1241 passed / 3 skipped, +7 new: TestLiveWiring x2 — live ctor args + ledger id selection, paper defaults unchanged, missing-live-id exit 2, plus full run_reconcile/run_flatten drives over live-host clients on fake sessions); manual smoke: reconcile --live against the committed paper-only config exited 2 with the exact refusal message; flatten --help shows --live and no paper-only claim.
+- **Learnings for future iterations:**
+  - Existing CLI tests monkeypatch ops.<mod>.AlpacaClient with ZERO-arg lambdas — any new mode must keep the default path calling AlpacaClient() with no args (build the live client in a conditional expression, not by always passing kwargs).
+  - Wiring-test idiom for these CLIs: monkeypatch module attrs (AlpacaClient -> recording factory that still constructs the real client, load_notion_databases -> lambda returning a hand-built NotionDatabases, run_reconcile -> arg recorder). NotionDatabases requires all seven paper ids positionally — see make_databases in tests/test_reconcile.py.
+  - reconcile main()'s except clause already catches ReconcileError -> exit 2; raise it for any new pre-flight refusal instead of adding print/return branches.
+  - US-018 note: ops/CLAUDE.md still has the old "Paper-only rule: never register rdq-exec-live" bullet near the top — that's US-018's to rewrite (setup_onecli/check_onecli), deliberately not touched here.
+  - US-020 note: runbook flatten one-liner should be `onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.flatten --live` (matches the new docstring).
+---
