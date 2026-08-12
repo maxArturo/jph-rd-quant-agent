@@ -307,8 +307,8 @@
         "Tests pass"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: setup_onecli.sh registers rdq-exec-live (\"RDQ Exec (LIVE)\") with allowlist exactly api.alpaca.markets api.notion.com financialmodelingprep.com (no paper host); unconditional live-host die scoped to identity != rdq-exec-live; check_onecli.sh four-direction proofs (live->live 2xx auth; paper->live / orchestrator->live / live->paper must 401/403, 2xx = hard fail) with live-auth probe SKIP-with-WARN until the live secret is vaulted AND assigned; ops/CLAUDE.md rule rewritten; shellcheck clean; 17 tests in tests/test_onecli_scripts.py (structure + stub-onecli end-to-end for both scripts)."
     },
     {
       "id": "US-019",

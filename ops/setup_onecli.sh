@@ -8,10 +8,14 @@
 #                     FMP backs on-demand universe backfill, orchestrator/universe.py)
 #   rdq-research      Anthropic + Voyage embeddings + FMP (RD-Agent + data pipeline)
 #   rdq-exec-paper    Alpaca paper + Notion + FMP        (nightly rebalancer + Trade Ledger + store refresh)
+#   rdq-exec-live     Alpaca LIVE + Notion + FMP         (live rebalance/reconcile/flatten — REAL MONEY)
 #
-# Deliberately NO rdq-exec-live: live trading is out of scope for this repo.
-# As defense in depth, this script refuses to assign any secret whose host
-# pattern is the live Alpaca host (api.alpaca.markets) to any identity.
+# Live-host rule (US-018): ONLY rdq-exec-live may hold secrets for the live
+# Alpaca host (api.alpaca.markets) — this script dies if the live host appears
+# in any other identity's allowlist. rdq-exec-live's allowlist deliberately
+# has NO paper host. Until the operator vaults the live keys (their FINAL
+# go-live step), the live-host secret is simply missing from the vault and
+# this script WARNs like any other missing secret — vault it, then rerun.
 #
 # Gotcha this script handles: new OneCLI agents start in 'selective' secret
 # mode with ZERO secrets assigned (every proxied call 401s). We therefore
@@ -25,17 +29,19 @@ ONECLI_URL="${ONECLI_URL:-http://127.0.0.1:10254}"
 LIVE_ALPACA_HOST="api.alpaca.markets"
 
 # Ordered so output is stable; bash assoc arrays iterate unordered.
-IDENTITIES=(rdq-orchestrator rdq-research rdq-exec-paper)
+IDENTITIES=(rdq-orchestrator rdq-research rdq-exec-paper rdq-exec-live)
 declare -A IDENTITY_NAMES=(
   [rdq-orchestrator]="RDQ Orchestrator"
   [rdq-research]="RDQ Research"
   [rdq-exec-paper]="RDQ Exec (paper)"
+  [rdq-exec-live]="RDQ Exec (LIVE)"
 )
 # identity -> space-separated host patterns whose vault secrets it gets
 declare -A IDENTITY_HOSTS=(
   [rdq-orchestrator]="api.anthropic.com api.notion.com paper-api.alpaca.markets financialmodelingprep.com"
   [rdq-research]="api.anthropic.com api.voyageai.com financialmodelingprep.com"
   [rdq-exec-paper]="paper-api.alpaca.markets api.notion.com financialmodelingprep.com"
+  [rdq-exec-live]="api.alpaca.markets api.notion.com financialmodelingprep.com"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -72,8 +78,8 @@ for identity in "${IDENTITIES[@]}"; do
 
   secret_ids=()
   for host in ${IDENTITY_HOSTS[$identity]}; do
-    [[ "$host" == "$LIVE_ALPACA_HOST" ]] \
-      && die "refusing to assign live Alpaca host to $identity"
+    [[ "$host" == "$LIVE_ALPACA_HOST" && "$identity" != "rdq-exec-live" ]] \
+      && die "refusing to assign live Alpaca host to $identity — only rdq-exec-live may hold it"
     mapfile -t ids < <(jq -r --arg h "$host" \
       '.data[] | select(.hostPattern == $h) | .id' <<<"$secrets_json")
     if [[ ${#ids[@]} -eq 0 ]]; then

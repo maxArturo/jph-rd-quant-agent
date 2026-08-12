@@ -7,16 +7,24 @@
 # per check. A check fails when the vault secret is missing, unassigned to the
 # identity, or the service still answers 401/403 after injection.
 #
-# Live-host isolation proof: rdq-exec-paper MUST get 401/403 from
-# https://api.alpaca.markets (live host) — it has no live secret, so a 2xx
-# there would mean credential scoping is broken.
+# Isolation proofs, four directions (US-018):
+#   rdq-exec-live    -> live host  MUST authenticate (2xx)
+#   rdq-exec-paper   -> live host  MUST fail (401/403)
+#   rdq-exec-live    -> paper host MUST fail (401/403)
+#   rdq-orchestrator -> live host  MUST fail (401/403)
+# A 2xx in any MUST-fail direction means credential scoping is broken. The
+# live-auth probe is SKIPPED with a warning (not failed) while the live Alpaca
+# secret is not yet vaulted/assigned — vaulting it is the operator's FINAL
+# go-live step, so this script stays runnable (and green) before it.
 #
 # Exit: 0 when every check passes; nonzero otherwise, listing the missing
 # secret assignments that need fixing (vault + assign, or rerun setup_onecli.sh).
 set -uo pipefail
 
 ONECLI_URL="${ONECLI_URL:-http://127.0.0.1:10254}"
+LIVE_ALPACA_HOST="api.alpaca.markets"
 LIVE_ALPACA_URL="https://api.alpaca.markets/v2/account"
+PAPER_ALPACA_URL="https://paper-api.alpaca.markets/v2/account"
 CURL_TIMEOUT=30
 
 # identity|host pattern|probe URL|optional extra header|optional POST body
@@ -125,17 +133,62 @@ for check in "${CHECKS[@]}"; do
   esac
 done
 
-# --- Live-host isolation proof ------------------------------------------------
-label="rdq-exec-paper -> api.alpaca.markets (live) isolation"
-if [[ "$(assigned_for rdq-exec-paper)" == "__NO_AGENT__" ]]; then
-  fail "$label" "identity not registered — run ops/setup_onecli.sh"
-else
-  code=$(probe rdq-exec-paper "$LIVE_ALPACA_URL")
+# --- Isolation proofs: four directions (US-018) --------------------------------
+# MUST-fail directions first: identity|probe URL|host label. A 2xx anywhere
+# here means credential scoping is broken (real-money blast radius).
+ISOLATION_MUST_FAIL=(
+  "rdq-exec-paper|$LIVE_ALPACA_URL|api.alpaca.markets (live)"
+  "rdq-orchestrator|$LIVE_ALPACA_URL|api.alpaca.markets (live)"
+  "rdq-exec-live|$PAPER_ALPACA_URL|paper-api.alpaca.markets"
+)
+for check in "${ISOLATION_MUST_FAIL[@]}"; do
+  IFS='|' read -r identity url hostlabel <<<"$check"
+  label="$identity -> $hostlabel isolation"
+  if [[ "$(assigned_for "$identity")" == "__NO_AGENT__" ]]; then
+    fail "$label" "identity not registered — run ops/setup_onecli.sh"
+    continue
+  fi
+  code=$(probe "$identity" "$url")
   case "$code" in
     401 | 403) echo "PASS  $label  (HTTP $code as required)" ;;
-    2??) fail "$label" "HTTP $code — LIVE CREDENTIALS REACHABLE FROM PAPER IDENTITY" ;;
+    2??) fail "$label" "HTTP $code — CREDENTIALS FOR $hostlabel REACHABLE FROM $identity" ;;
     *) fail "$label" "HTTP $code — expected 401/403" ;;
   esac
+done
+
+# MUST-pass direction: rdq-exec-live authenticates to the live host. Skipped
+# with a warning until the live Alpaca secret is vaulted AND assigned to
+# rdq-exec-live (the operator's final go-live step).
+label="rdq-exec-live -> api.alpaca.markets (live) auth"
+live_assigned=$(assigned_for rdq-exec-live)
+if [[ "$live_assigned" == "__NO_AGENT__" ]]; then
+  fail "$label" "identity not registered — run ops/setup_onecli.sh"
+else
+  mapfile -t live_secret_ids < <(jq -r --arg h "$LIVE_ALPACA_HOST" \
+    '.data[] | select(.hostPattern == $h) | .id' <<<"$secrets_json")
+  live_ready=1
+  if [[ ${#live_secret_ids[@]} -eq 0 ]]; then
+    live_ready=0
+  else
+    for sid in "${live_secret_ids[@]}"; do
+      grep -qx "$sid" <<<"$live_assigned" || live_ready=0
+    done
+  fi
+  if [[ $live_ready -eq 0 ]]; then
+    echo "SKIP  $label  (WARN: live Alpaca secret not vaulted/assigned yet —" \
+      "expected before the operator's go-live step; vault it, rerun" \
+      "ops/setup_onecli.sh, then this check)"
+  else
+    code=$(probe rdq-exec-live "$LIVE_ALPACA_URL")
+    case "$code" in
+      2??) echo "PASS  $label  (HTTP $code)" ;;
+      401 | 403)
+        fail "$label" "HTTP $code — live credential not injected or invalid"
+        missing+=("rdq-exec-live <- $LIVE_ALPACA_HOST (injected credential rejected)")
+        ;;
+      *) fail "$label" "HTTP $code" ;;
+    esac
+  fi
 fi
 
 echo

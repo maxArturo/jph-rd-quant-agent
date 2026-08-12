@@ -13,9 +13,15 @@
   `GET /v1/models` (requires `anthropic-version: 2023-06-01` header or it
   400s), Alpaca `GET /v2/account`, FMP `/stable/search-symbol?query=AAPL`
   (proxy appends `apikey` even when the URL already has query params).
-- Paper-only rule: never register `rdq-exec-live` or assign a secret with
-  host pattern `api.alpaca.markets`; check_onecli.sh treats a 2xx from the
-  live host as a hard failure.
+- Live identity rule (US-018): only `rdq-exec-live` may hold the live host
+  `api.alpaca.markets`, and only via setup_onecli.sh; live secrets on no
+  other identity (the script dies if the live host appears in another
+  identity's allowlist, and `rdq-exec-live` gets no paper host).
+  check_onecli.sh proves all four isolation directions — live→live 2xx,
+  paper→live / orchestrator→live / live→paper 401/403 — and treats a 2xx in
+  any must-fail direction as a hard failure; the live-auth probe is
+  skipped-with-warning until the operator vaults the live keys (their final
+  go-live step).
 - Scripts must pass shellcheck; use `set -euo pipefail` for setup-style
   scripts, `set -uo pipefail` (no `-e`) for check-style scripts that collect
   failures.
