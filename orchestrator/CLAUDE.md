@@ -318,6 +318,23 @@
   the paper keys plus `live_equity_allocation_pct` (captured at promote time
   for audit). No paper-slot code path may read or write the live table, and
   vice versa — tests assert both directions.
+- Live promotion backend (US-009): `orchestrator/promotion.py`'s
+  `LivePromotion` (over a `PromotionFlow` for provenance) is the ONLY writer
+  of the live slot; US-010's promote_to_live/demote_live tools must stay thin
+  wrappers over `promote()`/`demote()`. Resolution order: explicit run
+  reference (thread_ts exact, or >=6-char session-path fragment; ambiguous
+  and no-match both refuse with a listing) → the current thread's run → the
+  paper slot copied IN FULL (never re-derived). Every refusal raises
+  `LivePromotionError` before anything is written. Run provenance goes
+  through `PromotionFlow.candidate_from_run` — never fork the conf-market/
+  tickers derivation. Pred-refresh snapshot rules differ from paper: a
+  COMPLETE snapshot is never touched (it may carry an operator-pinned
+  market), an incomplete one is regenerated with a warning in
+  `result.warnings`, and a snapshot FAILURE refuses (paper warns-and-
+  promotes). Decision Log types are `promote_live`/`demote_live`; the
+  triggering-message permalink is passed in by the caller
+  (`trigger_permalink=` — the recorder's own permalink fn is paper-channel
+  only).
 
 - Spoken hypothesis decisions + conversational promotion (US-044):
   ConversationCore optionally takes `interactions=` (the HypothesisPoller) and

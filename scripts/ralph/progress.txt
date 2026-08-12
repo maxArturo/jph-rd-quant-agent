@@ -134,3 +134,20 @@ Started: (not yet started)
   - HALT_TRADING_SCHEMA/RESUME_TRADING_SCHEMA are reused verbatim by the live tools (same reason-string / no-input shapes) — don't fork schemas that don't differ.
   - Notion Decision Log "Type" select auto-creates new options (halt_live/resume_live needed no schema change); recorder tests assert the exact select name.
 ---
+## 2026-08-12 21:50 - US-009
+- Live promotion backend (LivePromotion in orchestrator/promotion.py):
+  - Refactor: PromotionFlow._candidate split — run-row lookup + status check stay in _candidate, the provenance derivation (locate artifacts, topk/n_drop, conf-market universe, instruments tickers, metrics/sharpe) is now public candidate_from_run(run), the single path shared by paper and live promotion (AC: no re-derived logic).
+  - LivePromotion(store, flow, recorder=, load_allocation=, snapshot=): promote(reference=, thread_ts=, trigger_permalink=) resolves explicit ref (exact thread_ts, or >=6-char fragment of session_path; ambiguity/no-match refuse with run listings) -> current thread's run -> paper slot copied IN FULL (config dict verbatim + live_equity_allocation_pct; workspace-dir existence checked; metrics degrade-load from workspace qlib_res.csv). Non-promotable status refused naming the status. All refusals = LivePromotionError raised BEFORE any write.
+  - Snapshot rules (differ from paper deliberately): complete conf+env+params set NEVER touched (operator-pinned market preserved); incomplete set regenerated via snapshot_pred_refresh with a warning in result.warnings when a conf existed (promote_fetched rule); snapshot FAILURE refuses (paper warns-and-promotes — real money must stay refreshable).
+  - Success: set_promoted_strategy_live + Decision Log row (type promote_live; details carry workspace, source, universe + ticker count, allocation pct, metrics, replaced, Triggered by: <permalink>). demote() clears the slot (refuses when empty) + demote_live row stating the next live rebalance will abort.
+  - LivePromotionResult carries everything US-010's armed summary needs (promoted row, source, metrics/sharpe, universe_label/label_mismatch, warnings, replaced).
+- Files changed: orchestrator/promotion.py, orchestrator/CLAUDE.md, tests/test_live_promotion.py (new, 21 tests), scripts/ralph/prd.json.
+- Verified: make check fully green (ruff, pyright, 1155 passed / 3 skipped, +21); manual smoke drove the full lifecycle in a tmp DB (no-candidate refusal -> direct-run promote with snapshot call + live slot pinned incl pct 10.0 while paper slot stays None -> unknown-ref refusal listing promotable runs -> demote returns the row and empties the slot -> empty-demote refusal).
+- **Learnings for future iterations:**
+  - PromotionFlow.candidate_from_run(run) is the reusable provenance derivation — US-010+ must never re-derive market/tickers; construct LivePromotion over a PromotionFlow (tests: make_live in tests/test_live_promotion.py mirrors make_flow).
+  - Decision Log has NO permalink property — permalinks go into the Details rich_text. app.py's existing _permalink closure is paper-channel-bound (chat_getPermalink(channel=config.channel_id)); US-010 must resolve the live-channel permalink itself and pass trigger_permalink=.
+  - record_decision(thread_ts=) links the Idea relation only when an idea page mapping exists — safe to pass the source run's thread unconditionally.
+  - The Notion Type select auto-creates promote_live/demote_live (same as halt_live) — no bootstrap change needed.
+  - test fixture gotcha: promotable_artifacts writes instruments/ next to the workspace under tmp_path — a second run in the same store can reuse the same artifacts stub via locate=lambda.
+  - US-010 wiring: tool passes channel-checked (reuse _require_live_channel), calls live.promote(reference=<optional user ref>, thread_ts=thread, trigger_permalink=<resolved>), posts armed summary from LivePromotionResult (+ live limits/breaker values it reads itself), and must ALSO check the live breaker halt before promoting (backend deliberately does not — it's the tool's refusal path per US-010 AC).
+---

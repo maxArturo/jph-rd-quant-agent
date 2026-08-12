@@ -154,8 +154,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: LivePromotion class in orchestrator/promotion.py (promote/demote) over PromotionFlow.candidate_from_run (extracted from _candidate — shared provenance); resolution: explicit ref (thread_ts / >=6-char session-path fragment, ambiguity+no-match refuse with listings) -> thread run -> paper slot copied in full; snapshot rules: complete set untouched, partial regenerated with warning, failure refuses; live slot + Decision Log (promote_live/demote_live, permalink via trigger_permalink=); 21 tests in tests/test_live_promotion.py."
     },
     {
       "id": "US-010",
