@@ -170,6 +170,21 @@
   about a run (poller digests, completion, buttons) should resolve the
   destination with `store.run_channel(thread_ts, paper_channel_id)`, never
   assume the global config channel.
+- Dual-channel routing (US-006): with `live_channel_id` set, app.py's
+  actionable check accepts BOTH channels; all other filtering is identical.
+  The per-message channel rides Bolt's `Say` (`say.channel` — Bolt binds it
+  to the event's channel), read via the `_say_channel` helpers in
+  conversation.py and poller.py: a non-string/missing attribute (test fakes,
+  MagicMock) means "unknown" and falls back to today's single-channel
+  behavior, so never rely on a truthy Mock. The message channel overrides
+  the core's wired default when stamping `runs.channel_id`, and thread-keyed
+  lookups reachable from a message (edit-reply consumption, spoken
+  approve/reject) refuse when the message's channel is not the channel that
+  owns the run — a live-channel thread_ts can never act on a paper-channel
+  record. New Slack-facing tools that act on thread-keyed state should take
+  the resolved `channel` the same way. Replies must always go through
+  `say`, never `chat_postMessage(config.channel_id, ...)`, or a thread
+  migrates channels.
 
 - Hypothesis steering lives in `orchestrator/poller.py` (`HypothesisPoller`):
   one instance per process polls all `running` runs and also owns the button

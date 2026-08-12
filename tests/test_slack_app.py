@@ -155,6 +155,7 @@ def make_app(
     promotions: Any | None = None,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    config: SlackConfig = CONFIG,
 ) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
@@ -171,7 +172,7 @@ def make_app(
     # dispatch(), so assertions after dispatch never race a worker thread.
     conversation = FakeConversation()
     app = create_app(
-        CONFIG,
+        config,
         conversation,
         interactions=interactions,
         promotions=promotions,
@@ -403,3 +404,89 @@ def test_handle_message_replies_true_for_valid_message() -> None:
     assert replied is True
     assert conversation.calls == [("1.2", "x")]
     assert say.call_args.kwargs["thread_ts"] == "1.2"
+
+
+# --- dual-channel routing (US-006) -----------------------------------------
+
+LIVE_CHANNEL = "C0LIVECHAN"
+CONFIG_LIVE = SlackConfig(
+    bot_token="xoxb-test",
+    app_token="xapp-test",
+    channel_id=CHANNEL,
+    live_channel_id=LIVE_CHANNEL,
+)
+
+
+def live_message(text: str, ts: str, **extra: Any) -> dict[str, Any]:
+    event = user_message(text, ts, **extra)
+    event["channel"] = LIVE_CHANNEL
+    return event
+
+
+def test_live_channel_message_is_actionable_and_replies_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, conversation = make_app(monkeypatch, config=CONFIG_LIVE)
+    dispatch_message(app, live_message("promote to live", ts="1751900100.000100"))
+    assert conversation.calls == [("1751900100.000100", "promote to live")]
+    kwargs = client.chat_postMessage.call_args.kwargs
+    # the reply lands in the originating (live) channel, threaded on the message
+    assert kwargs["channel"] == LIVE_CHANNEL
+    assert kwargs["thread_ts"] == "1751900100.000100"
+
+
+def test_paper_channel_still_handled_when_live_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, conversation = make_app(monkeypatch, config=CONFIG_LIVE)
+    dispatch_message(app, user_message("momentum idea", ts="1751900110.000200"))
+    assert conversation.calls == [("1751900110.000200", "momentum idea")]
+    assert client.chat_postMessage.call_args.kwargs["channel"] == CHANNEL
+
+
+def test_unknown_channel_ignored_when_live_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, conversation = make_app(monkeypatch, config=CONFIG_LIVE)
+    event = user_message("hello", ts="1751900120.000300")
+    event["channel"] = "C0OTHER"
+    dispatch_message(app, event)
+    assert conversation.calls == []
+    client.chat_postMessage.assert_not_called()
+
+
+def test_live_channel_ignored_when_live_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Paper freeze: with live_channel_id unset the app hears only the paper channel.
+    app, client, conversation = make_app(monkeypatch)
+    dispatch_message(app, live_message("hello", ts="1751900130.000400"))
+    assert conversation.calls == []
+    client.chat_postMessage.assert_not_called()
+
+
+def test_bot_and_subtype_messages_ignored_in_live_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # All non-channel filtering applies identically to the live channel.
+    app, client, conversation = make_app(monkeypatch, config=CONFIG_LIVE)
+    dispatch_message(app, live_message("noise", ts="1751900140.000500", bot_id="B0BOT"))
+    dispatch_message(
+        app, live_message("edited", ts="1751900150.000600", subtype="message_changed")
+    )
+    assert conversation.calls == []
+    client.chat_postMessage.assert_not_called()
+
+
+def test_handle_message_accepts_live_channel_via_parameter() -> None:
+    say = MagicMock()
+    conversation = FakeConversation()
+    replied = handle_message(
+        {"channel": LIVE_CHANNEL, "text": "x", "ts": "1.2", "user": "U1"},
+        say,
+        channel_id=CHANNEL,
+        conversation=conversation,
+        live_channel_id=LIVE_CHANNEL,
+    )
+    assert replied is True
+    assert conversation.calls == [("1.2", "x")]

@@ -89,6 +89,18 @@ logger = logging.getLogger(__name__)
 # slack_bolt's Say or any equivalent accepting (text=..., thread_ts=...).
 SayFn = Callable[..., Any]
 
+
+def _say_channel(say: SayFn) -> str | None:
+    """Originating channel of the message being handled, when ``say`` carries it.
+
+    Bolt binds each ``Say`` to the event's channel. Fakes without the
+    attribute (or mocks with a non-string one) yield None — callers skip
+    their channel guard. Keep in sync with conversation._say_channel.
+    """
+    channel = getattr(say, "channel", None)
+    return channel if isinstance(channel, str) and channel else None
+
+
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 
 # Block Kit action ids (app.py registers a Bolt listener per id).
@@ -822,15 +834,29 @@ class HypothesisPoller:
         self._store.resolve_pending_interaction(row.id, "editing")
         say(text=EDIT_PROMPT, thread_ts=row.thread_ts)
 
-    def consume_edit_reply(self, thread_ts: str, text: str, say: SayFn) -> bool:
+    def consume_edit_reply(
+        self, thread_ts: str, text: str, say: SayFn, channel: str | None = None
+    ) -> bool:
         """If this thread has an interaction in 'editing', submit the reply as the edit.
 
         Returns True when the message was consumed (the conversational core
         must then NOT see it).
+
+        ``channel`` is the message's originating Slack channel; when omitted
+        it is read off ``say`` (Bolt binds Say to the event's channel). A
+        known channel must match the channel that owns the editing row's run
+        (US-006): a live-channel message whose thread_ts collides with a
+        paper-channel edit round-trip must never be eaten as the edit text.
+        Unknown channels (direct calls, test fakes) skip the guard — today's
+        single-channel behavior.
         """
         rows = self._store.list_pending_interactions(thread_ts, status="editing")
         if not rows:
             return False
+        if channel is None:
+            channel = _say_channel(say)
+        if channel is not None and self._store.run_channel(thread_ts, self._channel_id) != channel:
+            return False  # same ts, different channel — not this run's edit reply
         row = rows[0]  # oldest first — matches the run's FIFO answer order
         if not self._submit_row(row, edited_payload(row.payload["content"], text), say):
             return True  # consumed (the operator was told the submit failed)

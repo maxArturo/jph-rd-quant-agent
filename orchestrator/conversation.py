@@ -539,6 +539,18 @@ def _clean_optional(value: Any) -> str | None:
     return text or None
 
 
+def _say_channel(say: SayFn) -> str | None:
+    """Originating channel of the message being handled, when ``say`` carries it.
+
+    Bolt binds each ``Say`` to the event's channel, so in production this is
+    exactly the channel replies post to. Fakes without the attribute (or
+    mocks with a non-string one) yield None — callers fall back to the
+    core's wired default channel. Keep in sync with poller._say_channel.
+    """
+    channel = getattr(say, "channel", None)
+    return channel if isinstance(channel, str) and channel else None
+
+
 def _final_text(message: Any) -> str:
     parts = [
         block.text
@@ -618,17 +630,29 @@ class ConversationCore:
         self._channel_id = channel_id
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
-    def handle_message(self, thread_ts: str, text: str, say: SayFn) -> str:
+    def handle_message(
+        self, thread_ts: str, text: str, say: SayFn, channel: str | None = None
+    ) -> str:
         """Run one conversational turn; posts the model's reply in-thread.
 
         Returns the reply text (also posted via say). Refusals and model
         errors are reported in-thread, never raised into the Bolt handler.
+
+        ``channel`` is the message's originating Slack channel (US-006);
+        when omitted it is read off ``say`` (Bolt binds Say to the event's
+        channel), and when unknown the core's wired default applies. It
+        travels into the tools so new runs record the channel that started
+        them and thread-keyed records are never acted on from another
+        channel — replies themselves always post through ``say``, so a
+        thread never migrates channels.
         """
+        if channel is None:
+            channel = _say_channel(say)
         history = self._histories.setdefault(thread_ts, [])
         history.append({"role": "user", "content": text})
         tools = [
             self._save_directive_tool(thread_ts, say),
-            self._start_research_tool(thread_ts, say),
+            self._start_research_tool(thread_ts, say, channel),
             self._stop_run_tool(thread_ts, say),
             self._resume_run_tool(thread_ts, say),
             self._set_universe_tool(thread_ts, say),
@@ -641,8 +665,8 @@ class ConversationCore:
             self._check_pnl_tool(),
         ]
         if self._interactions is not None:
-            tools.append(self._approve_hypothesis_tool(thread_ts, say))
-            tools.append(self._reject_hypothesis_tool(thread_ts, say))
+            tools.append(self._approve_hypothesis_tool(thread_ts, say, channel))
+            tools.append(self._reject_hypothesis_tool(thread_ts, say, channel))
         if self._promotions is not None:
             tools.append(self._promote_run_tool(thread_ts, say))
             tools.append(self._confirm_promotion_tool(thread_ts, say))
@@ -709,7 +733,9 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _start_research_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+    def _start_research_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None = None
+    ) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
             if bool(args.get("supervised", False)):
                 raise ValueError(
@@ -764,7 +790,9 @@ class ConversationCore:
                     universe_tickers=tickers,
                     supervised=False,
                     backend="gpu",
-                    channel_id=self._channel_id,
+                    # The message's channel (paper or live) wins over the
+                    # wired default so live-channel runs report home (US-006).
+                    channel_id=channel or self._channel_id,
                 )
             except DuplicateRunError as exc:
                 # Lost a start race — don't leave the just-launched pipeline up.
@@ -1202,12 +1230,28 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _awaiting_hypothesis(self, thread_ts: str) -> PendingInteraction:
+    def _awaiting_hypothesis(
+        self, thread_ts: str, channel: str | None = None
+    ) -> PendingInteraction:
         """The thread's oldest hypothesis awaiting a decision, or raise.
 
         FIFO rule (see poller.py): submitted answers go to the run's oldest
         blocked request, so the tools may only ever act on the oldest row.
+
+        When the message's ``channel`` is known, rows are only actionable
+        from the channel that owns their run (a NULL run channel means the
+        paper channel) — a live-channel thread_ts colliding with a
+        paper-channel run must never steer the paper run (US-006).
         """
+        if channel is not None:
+            run = self._store.get_run(thread_ts)
+            owner = run.channel_id or self._channel_id if run is not None else None
+            if owner is not None and owner != channel:
+                raise ValueError(
+                    "this thread's hypotheses belong to a run in another Slack"
+                    " channel — decisions must come from the channel that"
+                    " started the run"
+                )
         rows = self._store.list_pending_interactions(thread_ts, status="pending")
         if rows:
             return rows[0]
@@ -1221,11 +1265,13 @@ class ConversationCore:
             "no proposed hypothesis is awaiting a decision in this thread"
         )
 
-    def _approve_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+    def _approve_hypothesis_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None = None
+    ) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
             del args  # no inputs — acts on the thread's oldest awaiting hypothesis
             assert self._interactions is not None  # tool only registered when wired
-            row = self._awaiting_hypothesis(thread_ts)
+            row = self._awaiting_hypothesis(thread_ts, channel)
             # The poller handler owns submit/resolve/notify and posts its own
             # outcome (success or a submit-failure notice) to the thread.
             self._interactions.approve(row.id, say)
@@ -1255,11 +1301,13 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _reject_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+    def _reject_hypothesis_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None = None
+    ) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
             del args  # no inputs — acts on the thread's oldest awaiting hypothesis
             assert self._interactions is not None  # tool only registered when wired
-            row = self._awaiting_hypothesis(thread_ts)
+            row = self._awaiting_hypothesis(thread_ts, channel)
             self._interactions.reject(row.id, say)
             resolved = self._store.get_pending_interaction(row.id)
             if resolved is None or resolved.status != "rejected":

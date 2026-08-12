@@ -980,3 +980,89 @@ def test_decision_tools_offered_when_wired(tmp_path: Path) -> None:
         "promote_run",
         "confirm_promotion",
     } <= offered
+
+
+# --- US-006: per-message channel (dual-channel routing) -----------------------
+
+
+class ChannelSay(RecordingSay):
+    """RecordingSay carrying the originating channel, like Bolt's Say."""
+
+    def __init__(self, channel: str) -> None:
+        super().__init__()
+        self.channel = channel
+
+
+def test_system_prompt_covers_both_channels() -> None:
+    prompt = prompts.SYSTEM_PROMPT.lower()
+    assert "out of scope" not in prompt  # live trading no longer disclaimed away
+    assert "real-money" in prompt  # the live channel controls a real account
+    assert "independent" in prompt  # paper and live promotion slots
+    assert "#quant-research" in prompt and "live" in prompt
+
+
+def test_start_research_stamps_the_message_channel_over_the_default(
+    tmp_path: Path,
+) -> None:
+    """US-006: the channel the message arrived in (via Bolt's say) wins over
+    the core's wired default, so live-channel runs report home."""
+    client = FakeClient(judgment_messages=start_research_script())
+    core, store = make_core(tmp_path, client, gpu=StubGpu(), channel_id="C_PAPER")
+    store.create_directive(THREAD, objective="Test whether 12-1 momentum beats SPY")
+    core.handle_message(THREAD, "research it", ChannelSay("C_LIVE"))
+
+    run = store.get_run(THREAD)
+    assert run is not None and run.channel_id == "C_LIVE"
+    assert store.run_channel(THREAD, paper_channel_id="C_PAPER") == "C_LIVE"
+
+
+def test_start_research_falls_back_to_default_channel_without_say_channel(
+    tmp_path: Path,
+) -> None:
+    # RecordingSay has no .channel — exactly today's US-005 behavior.
+    client = FakeClient(judgment_messages=start_research_script())
+    core, store = make_core(tmp_path, client, gpu=StubGpu(), channel_id="C_PAPER")
+    store.create_directive(THREAD, objective="Test whether 12-1 momentum beats SPY")
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    run = store.get_run(THREAD)
+    assert run is not None and run.channel_id == "C_PAPER"
+
+
+def test_approve_hypothesis_from_another_channel_is_refused(tmp_path: Path) -> None:
+    """A live-channel thread_ts colliding with a paper run's must never steer
+    the paper run (US-006 keying)."""
+    client = FakeClient(
+        judgment_messages=lifecycle_script("approve_hypothesis", "Wrong channel.")
+    )
+    core, store = make_core(tmp_path, client, channel_id="C_PAPER")
+    steering = StubSteering(store)
+    core._interactions = steering  # noqa: SLF001 - make_core built the store first
+    store.create_run(THREAD, "/tmp/session", universe="us_liquid", channel_id="C_PAPER")
+    row = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
+    assert row is not None
+
+    core.handle_message(THREAD, "approve", ChannelSay("C_LIVE"))
+
+    assert steering.approved == []
+    assert store.get_pending_interaction(row.id).status == "pending"  # type: ignore[union-attr]
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "another Slack channel" in tool_result["content"]
+
+
+def test_approve_hypothesis_from_owning_channel_is_allowed(tmp_path: Path) -> None:
+    client = FakeClient(
+        judgment_messages=lifecycle_script("approve_hypothesis", "Approved.")
+    )
+    core, store = make_core(tmp_path, client, channel_id="C_PAPER")
+    steering = StubSteering(store)
+    core._interactions = steering  # noqa: SLF001
+    store.create_run(THREAD, "/tmp/session", universe="us_liquid", channel_id="C_LIVE")
+    row = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
+    assert row is not None
+
+    core.handle_message(THREAD, "approve", ChannelSay("C_LIVE"))
+
+    assert steering.approved == [row.id]
+    assert store.get_pending_interaction(row.id).status == "approved"  # type: ignore[union-attr]

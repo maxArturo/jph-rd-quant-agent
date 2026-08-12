@@ -1,8 +1,11 @@
 """Slack Bolt Socket Mode app (US-006 skeleton, US-009 conversational core).
 
 Connects to Slack over Socket Mode (no inbound port) and routes messages from
-the configured #quant-research channel to the conversational core, which
-refines raw ideas into saved research directives and replies in-thread.
+the configured #quant-research channel — plus the live-trading channel when
+SLACK_LIVE_CHANNEL_ID is set — to the conversational core, which refines raw
+ideas into saved research directives and replies in-thread. Replies always go
+through Bolt's ``say``, which is bound to the originating channel, so a
+thread never migrates channels.
 
 Run: ``.venv/bin/python -m orchestrator.app`` (needs SLACK_* in .env; see
 orchestrator/config.py). Anthropic auth is injected by the OneCLI proxy, so
@@ -69,8 +72,14 @@ def _is_actionable_user_message(
     channel_id: str,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    live_channel_id: str | None = None,
 ) -> bool:
-    """True for plain user messages in the target channel (top-level or in-thread).
+    """True for plain user messages in a target channel (top-level or in-thread).
+
+    Target channels: the research channel (``channel_id``) plus, when the
+    operator wired one (US-006), the live-trading channel. All other
+    filtering (subtype, bot_id, trusted-bot mention gate) is identical for
+    both channels.
 
     Bot-authored messages are ignored — except messages from a trusted bot id
     (RDQ_TRUSTED_BOT_IDS, e.g. Claude in Slack) that explicitly @mention our
@@ -81,7 +90,8 @@ def _is_actionable_user_message(
     set, or as subtype "bot_message" with a username override — so only those
     two subtypes pass.
     """
-    if event.get("channel") != channel_id:
+    channels = {channel_id} if live_channel_id is None else {channel_id, live_channel_id}
+    if event.get("channel") not in channels:
         return False
     if not (event.get("text") and event.get("ts")):
         return False
@@ -107,18 +117,25 @@ def handle_message(
     interactions: InteractionHandler | None = None,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    live_channel_id: str | None = None,
 ) -> bool:
     """Route one message event to the conversational core. Returns True if handled.
 
     Replies target the message's thread: for a top-level message the reply
     starts a thread on it (thread_ts = its ts); for a threaded message the
-    reply stays in that thread (thread_ts = the event's thread_ts).
+    reply stays in that thread (thread_ts = the event's thread_ts). ``say``
+    is bound by Bolt to the event's channel, so replies (and everything the
+    core/poller post through it) land in the originating channel — paper or
+    live — and the channel also rides ``say`` into the core and the poller's
+    edit-reply interception (US-006).
 
     When the thread has a hypothesis in the Edit round-trip, the message is
     the operator's edit text and is consumed by the poller instead of the
     conversational core.
     """
-    if not _is_actionable_user_message(event, channel_id, trusted_bot_ids, bot_user_id):
+    if not _is_actionable_user_message(
+        event, channel_id, trusted_bot_ids, bot_user_id, live_channel_id
+    ):
         return False
     thread_ts = event.get("thread_ts") or event["ts"]
     if interactions is not None and interactions.consume_edit_reply(
@@ -168,6 +185,7 @@ def create_app(
             interactions,
             trusted_bot_ids=trusted_bot_ids,
             bot_user_id=bot_user_id,
+            live_channel_id=config.live_channel_id,
         )
 
     if interactions is not None:
@@ -330,6 +348,8 @@ def main() -> None:
     )
     poller.start()
     approvals.start()
+    if config.live_channel_id is not None:
+        logger.info("live-trading channel armed: %s", config.live_channel_id)
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
     handler = SocketModeHandler(app, config.app_token)
     # Slack must never route through the OneCLI proxy (docs/decisions.md

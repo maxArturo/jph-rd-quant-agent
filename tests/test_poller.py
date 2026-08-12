@@ -944,3 +944,41 @@ def test_crashed_experiments_match_by_observations_tail(
     auto_poller.poll_once()
     assert rd.stopped == [TRACE_ID]  # identical crash site despite differing salt/prefix
     assert any("identical" in p["text"] for p in slack.posts)
+
+
+# --- US-006: edit replies are keyed by the run's channel ----------------------
+
+
+class ChannelRecordingSay(RecordingSay):
+    """RecordingSay carrying the originating channel, like Bolt's Say."""
+
+    def __init__(self, channel: str) -> None:
+        super().__init__()
+        self.channel = channel
+
+
+def test_consume_edit_reply_ignores_message_from_another_channel(
+    poller: HypothesisPoller, store: StateStore, rd: StubRdAgent
+) -> None:
+    """A live-channel message whose thread_ts collides with a paper edit
+    round-trip must reach the conversational core, not be eaten as the edit
+    (the run's NULL channel means the paper channel)."""
+    row_id = start_pending(poller, rd, store)
+    poller.request_edit(row_id, RecordingSay())
+
+    say = ChannelRecordingSay("C0LIVECHAN")
+    assert poller.consume_edit_reply(THREAD, "not an edit", say) is False
+    assert rd.submitted == []
+    assert store.get_pending_interaction(row_id).status == "editing"  # type: ignore[union-attr]
+    assert say.calls == []
+
+
+def test_consume_edit_reply_accepts_message_from_owning_channel(
+    poller: HypothesisPoller, store: StateStore, rd: StubRdAgent
+) -> None:
+    row_id = start_pending(poller, rd, store)
+    poller.request_edit(row_id, RecordingSay())
+
+    say = ChannelRecordingSay(CHANNEL)
+    assert poller.consume_edit_reply(THREAD, "Use 60-day momentum instead", say) is True
+    assert store.get_pending_interaction(row_id).status == "edited"  # type: ignore[union-attr]
