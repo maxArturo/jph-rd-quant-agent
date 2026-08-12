@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from execution.alpaca_client import Account, Order, PortfolioHistory, Position
     from execution.breaker import BreakerConfig
     from execution.order_gate import Limits
+    from orchestrator.live_status import LiveOrder, LiveSnapshot
     from orchestrator.promotion import LivePromotionResult
     from orchestrator.universe import MaterializedUniverse, UniverseProposal
 
@@ -186,6 +187,22 @@ class LivePromotionManager(Protocol):
     def demote(self, trigger_permalink: str | None = None) -> PromotedStrategy: ...
 
 
+class LiveStatusSource(Protocol):
+    """What the check_live_* tools need from LiveStatusReader (US-012).
+
+    Strictly reads of the live rebalancer's OWN records (the Live Notion
+    databases) — the read-path decision in docs/decisions.md: the
+    orchestrator never holds live broker access, so there is no live
+    BrokerReader and never will be.
+    """
+
+    def latest_snapshot(self) -> LiveSnapshot | None: ...
+
+    def snapshot_history(self, limit: int = 30) -> list[LiveSnapshot]: ...
+
+    def recent_orders(self, limit: int = 10) -> list[LiveOrder]: ...
+
+
 START_RESEARCH_SCHEMA: dict[str, Any] = {
     # The run is driven by the thread's saved directive. Runs execute on a
     # disposable GPU droplet (2026-08-06 decision) and are always autonomous.
@@ -302,6 +319,38 @@ CHECK_PNL_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["1W", "1M", "3M", "1A", "all"],
             "description": "Lookback window for the P/L history (default 1M).",
+        },
+    },
+}
+
+CHECK_LIVE_ACCOUNT_SCHEMA: dict[str, Any] = {
+    # No inputs: latest live snapshot + live slot + live breaker state.
+    "type": "object",
+    "properties": {},
+}
+
+CHECK_LIVE_ORDERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Max live ledger rows to return, newest first (default 10,"
+                " max 50)."
+            ),
+        },
+    },
+}
+
+CHECK_LIVE_PNL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "days": {
+            "type": "integer",
+            "description": (
+                "How many recorded live rebalance days to cover (default 30,"
+                " max 90)."
+            ),
         },
     },
 }
@@ -671,6 +720,155 @@ def format_pnl_report(history: PortfolioHistory, period: str) -> str:
     return "\n".join(lines)
 
 
+def _usd(value: float | None) -> str:
+    return f"${value:,.2f}" if value is not None else "n/a"
+
+
+def format_live_account_report(
+    snapshot: LiveSnapshot | None,
+    live_slot: PromotedStrategy | None,
+    paper_slot: PromotedStrategy | None,
+    trading_state: str,
+) -> str:
+    """Plain-text LIVE account status returned by check_live_account.
+
+    Sourced from the live rebalancer's own records (the latest Account
+    Snapshots (Live) row + orchestrator state), never a live broker call —
+    the numbers are as of the last live rebalance, not this instant.
+    """
+    lines = ["LIVE account (real money) — from the live rebalancer's records"]
+    if live_slot is None:
+        lines.append(
+            "live strategy: none promoted — the live slot is empty, so the"
+            " next live rebalance aborts without trading"
+        )
+    else:
+        pct = live_slot.config.get("live_equity_allocation_pct")
+        alloc = (
+            f", {pct:g}% equity allocation"
+            if isinstance(pct, (int, float)) and not isinstance(pct, bool)
+            else ""
+        )
+        lines.append(
+            f"live strategy: {Path(live_slot.workspace_path).name} — universe"
+            f" {live_slot.config.get('universe')}{alloc},"
+            f" promoted {live_slot.promoted_at}"
+        )
+    if paper_slot is not None and live_slot is not None:
+        if paper_slot.workspace_path != live_slot.workspace_path:
+            lines.append(
+                "paper slot differs: paper trades"
+                f" {Path(paper_slot.workspace_path).name}, live trades"
+                f" {Path(live_slot.workspace_path).name}"
+            )
+        else:
+            lines.append("paper slot: same strategy as live")
+    lines.append(f"live trading: {trading_state}")
+    if snapshot is None:
+        lines.append(
+            "no live data yet: the Account Snapshots (Live) database has no"
+            " rows — the live rebalancer has not recorded a day"
+        )
+        return "\n".join(lines)
+    positions = f"{snapshot.positions:g}" if snapshot.positions is not None else "n/a"
+    lines.append(
+        f"latest live snapshot ({snapshot.date or 'undated'}):"
+        f" equity {_usd(snapshot.equity)}, cash {_usd(snapshot.cash)},"
+        f" {positions} positions"
+    )
+    placed = f"{snapshot.orders_placed:g}" if snapshot.orders_placed is not None else "?"
+    filled = f"{snapshot.orders_filled:g}" if snapshot.orders_filled is not None else "?"
+    lines.append(
+        f"day outcome: {snapshot.outcome or 'unknown'}"
+        f" ({placed} orders placed, {filled} filled)"
+    )
+    if snapshot.day_pl is not None:
+        pct_text = (
+            f" ({_signed_pct(snapshot.day_pl_pct)})"
+            if snapshot.day_pl_pct is not None
+            else ""
+        )
+        lines.append(
+            f"previous completed day ({snapshot.pl_day or 'date n/a'}):"
+            f" {_signed_usd(snapshot.day_pl)}{pct_text}"
+        )
+    if snapshot.breaker:
+        lines.append(f"breaker at snapshot time: {snapshot.breaker}")
+    if snapshot.notes:
+        lines.append(f"notes: {snapshot.notes}")
+    return "\n".join(lines)
+
+
+def format_live_orders_report(orders: Sequence[LiveOrder]) -> str:
+    """Plain-text live order list (newest first) returned by check_live_orders."""
+    if not orders:
+        return (
+            "no live data yet: the Trade Ledger (Live) database has no rows —"
+            " the live rebalancer has not submitted any orders"
+        )
+    lines = [
+        f"{len(orders)} live order(s) from the Trade Ledger (Live), newest"
+        " first (the live rebalancer's records, not a live broker call):"
+    ]
+    for order in orders:
+        stamp = (order.submitted_at or "unknown time").replace("T", " ")[:16]
+        qty = order.qty if order.qty is not None else order.filled_qty
+        qty_text = f"{qty:g}" if qty is not None else "?"
+        limit = (
+            f" @ limit ${order.limit_price:,.2f}" if order.limit_price is not None else ""
+        )
+        status = order.status or "unknown"
+        if status == "filled" and order.filled_avg_price is not None:
+            fill = f"filled {order.filled_qty or 0:g} @ ${order.filled_avg_price:,.2f}"
+        elif order.filled_qty:
+            fill = f"{status}, {order.filled_qty:g} filled"
+        else:
+            fill = status
+        symbol = order.symbol or order.title or "?"
+        lines.append(f"  {stamp} {order.side or '?'} {qty_text} {symbol}{limit} — {fill}")
+    return "\n".join(lines)
+
+
+def format_live_pnl_report(snapshots: Sequence[LiveSnapshot]) -> str:
+    """Plain-text live equity/P-L history returned by check_live_pnl.
+
+    ``snapshots`` arrive newest first (the reader's order); the report reads
+    oldest to newest like the paper check_pnl report. Each row's P/L is the
+    PREVIOUS completed trading day's (see execution/account_log.py).
+    """
+    valued = [s for s in reversed(snapshots) if s.equity is not None]
+    if not valued:
+        return (
+            "no live data yet: no Account Snapshots (Live) rows with equity"
+            " values — the live rebalancer has not recorded a day"
+        )
+    first, last = valued[0], valued[-1]
+    assert first.equity is not None and last.equity is not None  # `valued` filtered
+    lines = [
+        f"live P/L over the last {len(valued)} recorded rebalance day(s)"
+        " (from Account Snapshots (Live)):"
+    ]
+    if first.equity:
+        change = last.equity - first.equity
+        lines.append(
+            f"period total: {_signed_usd(change)} ({_signed_pct(change / first.equity)}) — "
+            f"equity ${first.equity:,.2f} -> ${last.equity:,.2f}"
+        )
+    for snap in valued[-10:]:
+        day_pl = "P/L n/a"
+        if snap.day_pl is not None:
+            day_pl = _signed_usd(snap.day_pl)
+            if snap.day_pl_pct is not None:
+                day_pl += f" ({_signed_pct(snap.day_pl_pct)})"
+        lines.append(
+            f"  {snap.date or 'undated'}: equity {_usd(snap.equity)},"
+            f" prev-day {day_pl}"
+        )
+    if len(valued) > 10:
+        lines.append(f"  (showing the last 10 of {len(valued)} days)")
+    return "\n".join(lines)
+
+
 def duplicate_run_message(existing: Run) -> str:
     return (
         f"this thread already has a research run (status: {existing.status}, "
@@ -730,6 +928,7 @@ class ConversationCore:
         live_channel_id: str | None = None,
         live_breaker: TradingBreaker | None = None,
         live_promotions: LivePromotionManager | None = None,
+        live_status: LiveStatusSource | None = None,
         permalink: Callable[[str, str], str | None] | None = None,
     ) -> None:
         if rdagent is None:
@@ -800,6 +999,10 @@ class ConversationCore:
         # Live promotion backend (US-010): promote_to_live/demote_live are
         # registered only when BOTH the live channel and this are wired.
         self._live_promotions = live_promotions
+        # Live read-only status source (US-012): Notion/state reads only —
+        # the orchestrator identity never holds live broker access, so
+        # there is deliberately no live BrokerReader default here.
+        self._live_status = live_status
         # Best-effort (channel, message_ts) -> Slack permalink resolver for
         # Decision Log audit lines; app.py wires chat_getPermalink.
         self._permalink = permalink
@@ -835,9 +1038,9 @@ class ConversationCore:
             self._halt_trading_tool(thread_ts, say, channel),
             self._resume_trading_tool(thread_ts, say, channel),
             self._check_research_status_tool(thread_ts),
-            self._check_account_tool(),
-            self._check_orders_tool(),
-            self._check_pnl_tool(),
+            self._check_account_tool(channel),
+            self._check_orders_tool(channel),
+            self._check_pnl_tool(channel),
         ]
         if self._live_channel_id is not None:
             tools.append(self._halt_live_trading_tool(thread_ts, say, channel))
@@ -845,6 +1048,10 @@ class ConversationCore:
             if self._live_promotions is not None:
                 tools.append(self._promote_to_live_tool(thread_ts, say, channel))
                 tools.append(self._demote_live_tool(thread_ts, say, channel))
+            if self._live_status is not None:
+                tools.append(self._check_live_account_tool(channel))
+                tools.append(self._check_live_orders_tool(channel))
+                tools.append(self._check_live_pnl_tool(channel))
         if self._interactions is not None:
             tools.append(self._approve_hypothesis_tool(thread_ts, say, channel))
             tools.append(self._reject_hypothesis_tool(thread_ts, say, channel))
@@ -1266,28 +1473,35 @@ class ConversationCore:
     def _refuse_paper_tool_in_live_channel(
         self, channel: str | None, tool: str, live_tool: str
     ) -> None:
-        """Refuse a PAPER kill-switch tool invoked from the live channel (US-008)."""
+        """Refuse a PAPER-account tool invoked from the live channel (US-008)."""
         if self._live_channel_id is not None and channel == self._live_channel_id:
             home = f" (<#{self._channel_id}>)" if self._channel_id else ""
             raise ValueError(
-                f"refusing: {tool} is the PAPER account's kill switch and only"
-                f" works from the paper research channel{home}. In this live"
-                f" channel, {live_tool} controls the real-money account."
+                f"refusing: {tool} is for the PAPER account and only works"
+                f" from the paper research channel{home}. In this live"
+                f" channel, use {live_tool} for the real-money account."
             )
 
-    def _require_live_channel(self, channel: str | None, tool: str) -> TradingBreaker:
-        """Gate a LIVE kill-switch tool to the live channel; returns the live breaker.
+    def _require_live_channel(
+        self,
+        channel: str | None,
+        tool: str,
+        paper_hint: str = (
+            "The paper account's kill switch is halt_trading/resume_trading."
+        ),
+    ) -> TradingBreaker:
+        """Gate a LIVE tool to the live channel; returns the live breaker.
 
-        Real-money control demands positive identification: an unknown
-        channel (missing on ``say``) refuses too, unlike the permissive
-        paper-side guards.
+        Anything about the REAL-MONEY account demands positive channel
+        identification: an unknown channel (missing on ``say``) refuses too,
+        unlike the permissive paper-side guards.
         """
         if channel != self._live_channel_id:
             raise ValueError(
-                f"refusing: {tool} controls the REAL-MONEY live account and"
+                f"refusing: {tool} is for the REAL-MONEY live account and"
                 " only works from the live-trading channel"
                 f" (<#{self._live_channel_id}>) — ask again there."
-                " (The paper account's kill switch is halt_trading/resume_trading.)"
+                f" ({paper_hint})"
             )
         if self._live_breaker is None:  # ctor invariant: armed => wired
             raise ValueError("live breaker is not wired — cannot touch live trading")
@@ -1598,9 +1812,12 @@ class ConversationCore:
         except Exception as exc:  # noqa: BLE001 - breaker state must not sink a read
             return f"breaker state unreadable ({exc})"
 
-    def _check_account_tool(self) -> ToolSpec:
+    def _check_account_tool(self, channel: str | None = None) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
             del args  # no inputs — one fresh snapshot
+            self._refuse_paper_tool_in_live_channel(
+                channel, "check_account", "check_live_account"
+            )
             account = self._broker.get_account()
             positions = self._broker.get_positions()
             return format_account_report(account, positions, self._trading_state_line())
@@ -1618,8 +1835,11 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _check_orders_tool(self) -> ToolSpec:
+    def _check_orders_tool(self, channel: str | None = None) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
+            self._refuse_paper_tool_in_live_channel(
+                channel, "check_orders", "check_live_orders"
+            )
             status = str(args.get("status") or "all")
             if status not in ("open", "closed", "all"):
                 raise ValueError("status must be one of open/closed/all")
@@ -1640,8 +1860,11 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _check_pnl_tool(self) -> ToolSpec:
+    def _check_pnl_tool(self, channel: str | None = None) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
+            self._refuse_paper_tool_in_live_channel(
+                channel, "check_pnl", "check_live_pnl"
+            )
             period = str(args.get("period") or "1M")
             if period not in ("1W", "1M", "3M", "1A", "all"):
                 raise ValueError("period must be one of 1W/1M/3M/1A/all")
@@ -1658,6 +1881,105 @@ class ConversationCore:
                 " today's number, check_account already reports it."
             ),
             input_schema=CHECK_PNL_SCHEMA,
+            handler=handler,
+        )
+
+    _CHECK_PAPER_HINT = (
+        "The paper account's reads are check_account/check_orders/check_pnl."
+    )
+
+    def _live_trading_state_line(self, live: TradingBreaker) -> str:
+        """One line of LIVE breaker context for the live report (never raises)."""
+        try:
+            if live.halted:
+                note = live.halt_note
+                return (
+                    f"HALTED{f' — {note}' if note else ''}"
+                    " (resume_live_trading lifts it)"
+                )
+            return "active (the live rebalancer will trade the promoted live strategy)"
+        except Exception as exc:  # noqa: BLE001 - breaker state must not sink a read
+            return f"live breaker state unreadable ({exc})"
+
+    def _check_live_account_tool(self, channel: str | None) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — latest recorded live status
+            live = self._require_live_channel(
+                channel, "check_live_account", paper_hint=self._CHECK_PAPER_HINT
+            )
+            assert self._live_status is not None  # registration gate
+            return format_live_account_report(
+                self._live_status.latest_snapshot(),
+                self._store.get_promoted_strategy_live(),
+                self._store.get_promoted_strategy(),
+                self._live_trading_state_line(live),
+            )
+
+        return ToolSpec(
+            name="check_live_account",
+            description=(
+                "READ-ONLY status of the desk's LIVE (real-money) account:"
+                " the promoted live strategy and its equity allocation, the"
+                " live halt/breaker state, and the last recorded live"
+                " snapshot (equity, cash, positions, day outcome, previous"
+                " day's P/L). Answers from the live rebalancer's own records"
+                " — the bot has no live broker access — so before the first"
+                " live rebalance it reports no live data yet. Use it whenever"
+                " the operator asks about the live account or what live is"
+                " trading; only works from the live-trading channel."
+            ),
+            input_schema=CHECK_LIVE_ACCOUNT_SCHEMA,
+            handler=handler,
+        )
+
+    def _check_live_orders_tool(self, channel: str | None) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            self._require_live_channel(
+                channel, "check_live_orders", paper_hint=self._CHECK_PAPER_HINT
+            )
+            assert self._live_status is not None  # registration gate
+            limit = args.get("limit")
+            limit = 10 if limit is None else max(1, min(int(limit), 50))
+            return format_live_orders_report(self._live_status.recent_orders(limit=limit))
+
+        return ToolSpec(
+            name="check_live_orders",
+            description=(
+                "READ-ONLY list of the LIVE (real-money) account's recent"
+                " orders with fill status, from the Trade Ledger (Live)"
+                " database the live rebalancer writes — e.g. whether the last"
+                " live rebalance executed. It cannot place or cancel anything"
+                " and holds no live broker access; before any live order"
+                " exists it reports no live data yet. Only works from the"
+                " live-trading channel."
+            ),
+            input_schema=CHECK_LIVE_ORDERS_SCHEMA,
+            handler=handler,
+        )
+
+    def _check_live_pnl_tool(self, channel: str | None) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            self._require_live_channel(
+                channel, "check_live_pnl", paper_hint=self._CHECK_PAPER_HINT
+            )
+            assert self._live_status is not None  # registration gate
+            days = args.get("days")
+            days = 30 if days is None else max(1, min(int(days), 90))
+            return format_live_pnl_report(self._live_status.snapshot_history(limit=days))
+
+        return ToolSpec(
+            name="check_live_pnl",
+            description=(
+                "READ-ONLY equity and P/L history of the LIVE (real-money)"
+                " account across its recorded rebalance days (from the"
+                " Account Snapshots (Live) database — one row per live"
+                " rebalance day, not a live broker call): period total plus"
+                " the last few daily points. Use it when the operator asks"
+                " about live performance over time; before the first live"
+                " rebalance it reports no live data yet. Only works from the"
+                " live-trading channel."
+            ),
+            input_schema=CHECK_LIVE_PNL_SCHEMA,
             handler=handler,
         )
 

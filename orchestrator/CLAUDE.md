@@ -358,6 +358,22 @@
   arming. `LIVE_REBALANCE_SCHEDULE` in conversation.py names when the live
   rebalance fires — keep it in sync with ops/rdq-rebalance-live.timer
   (US-019).
+- Live status reads (US-012): `check_live_account`/`check_live_orders`/
+  `check_live_pnl` answer from `orchestrator/live_status.py`'s
+  `LiveStatusReader` — the latest Account Snapshots (Live) / Trade Ledger
+  (Live) rows plus orchestrator state (live slot, live breaker). NEVER give
+  the orchestrator a live broker client: the US-053 read-path decision
+  (docs/decisions.md 2026-08-13) is Notion/state reads only, and
+  tests/test_live_status_tools.py greps orchestrator/*.py for the live host
+  and `allow_live` — neither may ever appear. Registered like the other
+  live tools (live_channel_id + `live_status=` wired; `_require_live_channel`
+  gating), and the paper check_* twins refuse a positively-identified live
+  channel via `_refuse_paper_tool_in_live_channel`. Empty/unbootstrapped
+  live databases (ids still None in config.yaml) read as "no live data yet"
+  — a graceful answer, not an error; only a real Notion outage surfaces as
+  an error tool result. `NotionClient.query_db(max_results=)` exists for
+  exactly these "latest N rows" reads — pass sorts + max_results instead of
+  paginating a growing database.
 
 - Spoken hypothesis decisions + conversational promotion (US-044):
   ConversationCore optionally takes `interactions=` (the HypothesisPoller) and

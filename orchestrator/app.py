@@ -292,6 +292,7 @@ def main() -> None:
         )
 
     recorder = None
+    databases = None
     try:
         databases = load_notion_databases()
     except RecorderConfigError as exc:
@@ -323,10 +324,22 @@ def main() -> None:
     # Live promotion backend (US-010): only constructed when the operator
     # armed the live channel — paper-only deployments never see the tools.
     live_promotions = None
+    live_status = None
     if config.live_channel_id is not None:
+        from orchestrator.live_status import LiveStatusReader
         from orchestrator.promotion import LivePromotion
 
         live_promotions = LivePromotion(store, promotions, recorder=recorder)
+        # Live status reads (US-012) come from the Live Notion databases —
+        # never a live broker client. Ids still unset (bootstrap_notion
+        # --live not run) simply read as "no live data yet".
+        live_status = LiveStatusReader(
+            NotionClient(),
+            snapshots_db=(
+                databases.account_snapshots_live if databases is not None else None
+            ),
+            ledger_db=databases.trade_ledger_live if databases is not None else None,
+        )
 
     def _channel_permalink(channel: str, message_ts: str) -> str | None:
         # Unlike the recorder's paper-channel-bound closure above, this one
@@ -350,6 +363,8 @@ def main() -> None:
         live_channel_id=config.live_channel_id,
         # One-message live promotion tools (US-010).
         live_promotions=live_promotions,
+        # Read-only live status tools (US-012) — Notion/state reads only.
+        live_status=live_status,
         permalink=_channel_permalink,
     )
     approvals = ApprovalsBridge(

@@ -138,6 +138,29 @@ def test_query_db_paginates_through_next_cursor() -> None:
     assert second["json"]["start_cursor"] == "cur-2"
 
 
+def test_query_db_max_results_stops_paginating_and_truncates() -> None:
+    client, session, _ = make_client(
+        [query_result([{"id": "row-1"}, {"id": "row-2"}], has_more=True, cursor="cur-2")]
+    )
+
+    rows = client.query_db("db-1", page_size=2, max_results=1)
+
+    assert rows == [{"id": "row-1"}]  # truncated, and cur-2 never fetched
+    assert len(session.calls) == 1
+
+
+def test_query_db_max_results_keeps_paginating_until_reached() -> None:
+    client, session, _ = make_client(
+        [
+            query_result([{"id": "row-1"}], has_more=True, cursor="cur-2"),
+            query_result([{"id": "row-2"}], has_more=True, cursor="cur-3"),
+        ]
+    )
+
+    assert client.query_db("db-1", max_results=2) == [{"id": "row-1"}, {"id": "row-2"}]
+    assert len(session.calls) == 2  # cur-3 never fetched
+
+
 def test_query_db_omits_filter_and_sorts_when_unset() -> None:
     client, session, _ = make_client([query_result([])])
 

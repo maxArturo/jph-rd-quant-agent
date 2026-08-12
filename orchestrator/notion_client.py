@@ -96,8 +96,15 @@ class NotionClient:
         filter: dict[str, Any] | None = None,  # noqa: A002 - Notion API field name
         sorts: list[dict[str, Any]] | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
+        max_results: int | None = None,
     ) -> list[dict[str, Any]]:
-        """POST /v1/databases/{id}/query: return ALL matching rows (paginates)."""
+        """POST /v1/databases/{id}/query: return matching rows (paginates).
+
+        Default is ALL matches; ``max_results`` stops paginating once that
+        many rows are in hand (Notion has no query limit besides page_size,
+        so "latest N" reads pass sorts + max_results to avoid walking a
+        growing database).
+        """
         results: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
@@ -115,6 +122,8 @@ class NotionClient:
                     f"expected a 'results' list from database query, got: {page_results!r:.200}"
                 )
             results.extend(page_results)
+            if max_results is not None and len(results) >= max_results:
+                return results[:max_results]
             cursor = page.get("next_cursor")
             if not page.get("has_more") or cursor is None:
                 return results

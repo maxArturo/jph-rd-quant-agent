@@ -901,3 +901,37 @@ by their artifact DIRS (portfolio_analysis/sig_analysis).
 **Migration note:** existing snapshots lack `pred_refresh_params.pkl`; the
 refresh fails with the remedy in the message. e05ad9b4's snapshot was
 re-run by hand at deploy time (2026-08-07).
+
+## 2026-08-13 — US-012 (PRD US-053 decision point): live status reads come from Notion + orchestrator state, never a live broker client
+
+**Decision point.** The live channel's read-only `check_live_account` /
+`check_live_orders` / `check_live_pnl` tools need to see the live account.
+US-053 offered two read paths: (a) grant the `rdq-orchestrator` identity
+**read-scoped** live-host access via the OneCLI proxy, or (b) answer from
+the Live Notion databases and orchestrator state, gaining no live host
+access at all.
+
+**Decision: option (b).** `orchestrator/live_status.py`'s
+`LiveStatusReader` reads the latest Account Snapshots (Live) / Trade Ledger
+(Live) rows — both written solely by the live rebalancer (US-014) — and the
+tools combine them with orchestrator state (the live promotion slot and the
+live breaker). The orchestrator identity gains NO live broker access:
+
+1. The security boundary stays structural, not configurational. "Only the
+   live rebalance/reconcile/flatten paths may construct
+   `AlpacaClient(..., allow_live=True)` under `rdq-exec-live`" is a
+   greppable code invariant (tests enforce that `api.alpaca.markets` and
+   `allow_live` appear nowhere in orchestrator/). A proxy read-scoping rule
+   would be state on the gateway that a config mistake could widen to
+   order placement — invisible to code review and tests.
+2. No new failure modes in the credential path: the orchestrator identity
+   keeps exactly the secrets it has today.
+3. The staleness trade-off is honest and acceptable: the live account only
+   changes when the live rebalancer acts, and the rebalancer records every
+   action to the (Live) databases at act time. The tools label the data as
+   the rebalancer's records, and before any live data exists they answer
+   "no live data yet" instead of erroring.
+
+Consequence: intraday broker truth (unrecorded fills, exact current equity)
+is not visible from the live channel — reconciliation stays with the
+`rdq-exec-live`-side reconcile path (US-015), by design.
