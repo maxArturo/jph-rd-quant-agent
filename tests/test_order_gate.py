@@ -14,6 +14,7 @@ import pytest
 from execution.alpaca_client import Account, Position
 from execution.order_gate import (
     LIMITS_PATH,
+    LIVE_LIMITS_PATH,
     GateResult,
     Limits,
     LimitsConfigError,
@@ -102,6 +103,15 @@ def test_committed_limits_file_loads() -> None:
     assert limits.max_position_pct_equity > 0
     assert limits.max_day_orders > 0
     assert limits.max_total_positions > 0
+
+
+def test_committed_live_limits_file_loads() -> None:
+    limits = load_limits(LIVE_LIMITS_PATH)
+    assert LIVE_LIMITS_PATH.name == "limits.live.json"
+    assert limits.max_order_notional_usd == 500.0
+    assert limits.max_position_pct_equity == 10.0
+    assert limits.max_day_orders == 60
+    assert limits.max_total_positions == 60
 
 
 def test_load_limits_missing_file(tmp_path: Path) -> None:

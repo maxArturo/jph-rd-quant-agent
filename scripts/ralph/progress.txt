@@ -29,3 +29,21 @@ Started: (not yet started)
   - test_live_host_is_refused matches "paper-only" in the ValueError — keep that phrase if the refusal message changes again.
   - Client auth guidance derives identity/secrets-host at construction time (self._onecli_identity / self._secrets_host) — reuse those fields if later stories need host-aware wording.
 ---
+
+## 2026-08-12 14:05 - US-002
+- Live guardrail config, all data+paths, zero code forks:
+  - execution/limits.live.json (500 / 10 / 60 / 60) — loads via the existing order_gate.load_limits; new constant order_gate.LIVE_LIMITS_PATH.
+  - execution/breaker.live.json (5000 / 5) — loads via load_breaker_config; new constant breaker.LIVE_CONFIG_PATH.
+  - execution/allocation.py (new module): LiveAllocation dataclass + load_live_allocation() over execution/allocation.live.json (required key live_equity_allocation_pct=10; refuses missing/unknown keys, non-numbers incl. bool, and pct outside 0<pct<=100; AllocationConfigError).
+  - Live breaker state constants breaker.LIVE_STATE_DIR / LIVE_HALT_FILE / LIVE_HWM_FILE under ~/rdq-data/breaker-live/ — distinct from paper's ~/rdq-data/breaker/.
+  - Docstrings updated (breaker.py, order_gate.py) + execution/CLAUDE.md bullet on the live-guardrails-are-data-not-forks pattern.
+- Tests: TestLiveBreaker in tests/test_breaker.py (committed live config values, live-vs-paper path distinctness, halt independence both directions, separate HWM files + live drawdown trip not consulting paper's peak, corrupt live HWM -> BreakerStateError "refusing to trade"); test_committed_live_limits_file_loads in tests/test_order_gate.py; new tests/test_allocation.py (12 cases: committed load, float coercion, 100-boundary, missing file/key, bad JSON, non-object, unknown key, non-numeric incl. True/False/str, out-of-range 0/-5/100.001/250).
+- Files changed: execution/{limits.live.json,breaker.live.json,allocation.live.json,allocation.py,breaker.py,order_gate.py,CLAUDE.md}, tests/{test_allocation.py,test_breaker.py,test_order_gate.py}.
+- Verified: make check fully green (ruff, pyright, 1077 passed / 3 skipped); manual smoke drove all three loaders + printed live state paths (observed BreakerConfig(5000, 5), Limits(500, 10, 60, 60), LiveAllocation(10.0), ~/rdq-data/breaker-live/{halt,high_water_mark.json}).
+- **Learnings for future iterations:**
+  - Breaker/gate loaders are already fully parameterized — live variants of guardrails need ONLY new json files + path constants; never fork the classes (AC explicitly forbids it).
+  - Loader strictness idiom repeated 3x now (unknown keys refused -> missing keys refused -> per-key type/range check, bool excluded via isinstance(value, bool) FIRST since bool is an int subclass); copy that shape for any future config file.
+  - Committed-config tests assert exact live numbers (limits 500/10/60/60, breaker 5000/5, allocation 10) — deliberate: operator edits to the committed files must trip a test so guardrail changes are reviewed. Update tests when the PRD numbers change.
+  - NaN can't sneak through allocation range check: 0 < nan <= 100 is False -> refused.
+  - US-013 wiring note: rebalance --live must scale equity BEFORE diff (allocation pct), pass real buying_power to cap_buys_to_buying_power, and construct Breaker(load_breaker_config(LIVE_CONFIG_PATH), LIVE_HALT_FILE, LIVE_HWM_FILE).
+---

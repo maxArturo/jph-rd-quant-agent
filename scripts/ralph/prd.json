@@ -37,8 +37,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: limits.live.json (500/10/60/60), breaker.live.json (5000/5), allocation.live.json + execution/allocation.py loader (0<pct<=100, strict keys); LIVE_LIMITS_PATH / LIVE_CONFIG_PATH / LIVE_STATE_DIR|HALT|HWM constants (~/rdq-data/breaker-live/), no loader forks; independence + corrupt-live-HWM tests."
     },
     {
       "id": "US-003",

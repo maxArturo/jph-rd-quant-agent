@@ -9,6 +9,11 @@ import pytest
 
 from execution.breaker import (
     CONFIG_PATH,
+    DEFAULT_HALT_FILE,
+    DEFAULT_HWM_FILE,
+    LIVE_CONFIG_PATH,
+    LIVE_HALT_FILE,
+    LIVE_HWM_FILE,
     Breaker,
     BreakerConfig,
     BreakerConfigError,
@@ -280,3 +285,71 @@ class TestHighWaterMarkPersistence:
             breaker.high_water_mark_file
             == Path.home() / "rdq-data" / "breaker" / "high_water_mark.json"
         )
+
+
+# ----------------------------------------------------- live breaker (US-002)
+
+
+def make_paper_and_live(tmp_path: Path) -> tuple[Breaker, Breaker]:
+    """Paper and live Breakers over tmp state dirs mirroring the real layout."""
+    paper = Breaker(
+        CONFIG,
+        halt_file=tmp_path / "breaker" / "halt",
+        high_water_mark_file=tmp_path / "breaker" / "high_water_mark.json",
+    )
+    live = Breaker(
+        load_breaker_config(LIVE_CONFIG_PATH),
+        halt_file=tmp_path / "breaker-live" / "halt",
+        high_water_mark_file=tmp_path / "breaker-live" / "high_water_mark.json",
+    )
+    return paper, live
+
+
+class TestLiveBreaker:
+    def test_committed_live_config_loads(self) -> None:
+        config = load_breaker_config(LIVE_CONFIG_PATH)
+        assert LIVE_CONFIG_PATH.name == "breaker.live.json"
+        assert config.max_daily_notional_usd == 5_000.0
+        assert config.max_drawdown_pct == 5.0
+
+    def test_live_state_paths_distinct_from_paper(self) -> None:
+        assert LIVE_HALT_FILE == Path.home() / "rdq-data" / "breaker-live" / "halt"
+        assert (
+            LIVE_HWM_FILE
+            == Path.home() / "rdq-data" / "breaker-live" / "high_water_mark.json"
+        )
+        assert LIVE_HALT_FILE != DEFAULT_HALT_FILE
+        assert LIVE_HWM_FILE != DEFAULT_HWM_FILE
+
+    def test_halting_live_leaves_paper_untripped(self, tmp_path: Path) -> None:
+        paper, live = make_paper_and_live(tmp_path)
+        live.halt("live incident")
+        assert live.halted
+        assert not paper.halted
+        assert not paper.halt_file.exists()
+
+    def test_halting_paper_leaves_live_untripped(self, tmp_path: Path) -> None:
+        paper, live = make_paper_and_live(tmp_path)
+        paper.halt("paper incident")
+        assert paper.halted
+        assert not live.halted
+        assert not live.halt_file.exists()
+
+    def test_high_water_marks_are_separate_files(self, tmp_path: Path) -> None:
+        paper, live = make_paper_and_live(tmp_path)
+        assert paper.check(equity=100_000.0, day_notional_usd=0.0) is None
+        assert live.check(equity=5_000.0, day_notional_usd=0.0) is None
+        assert read_hwm(paper) == 100_000.0
+        assert read_hwm(live) == 5_000.0
+        # A live drawdown trip must not consult (or touch) paper's peak.
+        trip = live.check(equity=4_000.0, day_notional_usd=0.0)  # 20% below 5k
+        assert trip is not None
+        assert trip.reason is BreakerReason.DRAWDOWN
+        assert paper.check(equity=100_000.0, day_notional_usd=0.0) is None
+
+    def test_corrupt_live_hwm_refuses_to_trade(self, tmp_path: Path) -> None:
+        _, live = make_paper_and_live(tmp_path)
+        live.high_water_mark_file.parent.mkdir(parents=True, exist_ok=True)
+        live.high_water_mark_file.write_text("{corrupt")
+        with pytest.raises(BreakerStateError, match="refusing to trade"):
+            live.check(equity=5_000.0, day_notional_usd=0.0)

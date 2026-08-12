@@ -97,6 +97,18 @@
   touches it). A corrupt/unreadable HWM file raises `BreakerStateError`
   (refuse to trade) — never "fix" it by silently re-seeding; that disarms
   the drawdown kill switch.
+- Live guardrails (US-002) are DATA + PATHS, not code forks: the live
+  rebalance path passes `order_gate.LIVE_LIMITS_PATH` (limits.live.json:
+  500/10/60/60) and `breaker.LIVE_CONFIG_PATH` (breaker.live.json: 5000/5)
+  into the SAME `load_limits`/`load_breaker_config`, and constructs the same
+  `Breaker` class on `breaker.LIVE_HALT_FILE`/`LIVE_HWM_FILE` under
+  `~/rdq-data/breaker-live/` — never paper's `~/rdq-data/breaker/`. Keep the
+  four/two required-key sets in sync with the loaders when editing any of
+  the *.live.json or *.paper.json files. `execution/allocation.py`
+  (`load_live_allocation`, allocation.live.json, key
+  `live_equity_allocation_pct`, 0 < pct <= 100) is live-only: rebalance.py
+  scales the equity handed to diff by pct/100; buying-power capping keeps
+  using the account's real buying_power, and diff.py stays account-agnostic.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.

@@ -1,4 +1,4 @@
-"""Trading circuit breaker for the paper rebalancer.
+"""Trading circuit breaker for the paper and live rebalancers.
 
 Three independent trips, checked in a fixed order; the first one hit is
 returned as a typed :class:`BreakerTrip` (``None`` means trading may
@@ -19,7 +19,11 @@ Thresholds live in ``execution/breaker.paper.json`` (both keys required,
 unknown keys refused — same strictness as ``limits.paper.json``). Committed
 defaults are sized for the $100k paper account: daily notional 200000 allows
 one full both-sides turnover of the book; drawdown 20 halts after a 20% loss
-from the peak.
+from the peak. The live account uses ``execution/breaker.live.json``
+(``LIVE_CONFIG_PATH``: daily notional 5000, drawdown 5) with fully
+independent state files under ``~/rdq-data/breaker-live/`` (``LIVE_HALT_FILE``
+/ ``LIVE_HWM_FILE``) — same class and loader, different paths, so paper and
+live halts/high-water marks can never interact.
 
 The high-water mark is file-backed JSON (``{"high_water_mark": <float>}``)
 so it survives restarts. It is raised — never lowered — and only on a CLEAN
@@ -45,10 +49,20 @@ from enum import Enum
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parent / "breaker.paper.json"
+LIVE_CONFIG_PATH = Path(__file__).resolve().parent / "breaker.live.json"
 
 DEFAULT_STATE_DIR = Path.home() / "rdq-data" / "breaker"
 DEFAULT_HALT_FILE = DEFAULT_STATE_DIR / "halt"
 DEFAULT_HWM_FILE = DEFAULT_STATE_DIR / "high_water_mark.json"
+
+# Live breaker state is fully independent of paper's: its own halt file and
+# high-water mark under ~/rdq-data/breaker-live/. The live rebalance path
+# constructs Breaker(load_breaker_config(LIVE_CONFIG_PATH), LIVE_HALT_FILE,
+# LIVE_HWM_FILE) — same class, different files; halting one account never
+# touches the other.
+LIVE_STATE_DIR = Path.home() / "rdq-data" / "breaker-live"
+LIVE_HALT_FILE = LIVE_STATE_DIR / "halt"
+LIVE_HWM_FILE = LIVE_STATE_DIR / "high_water_mark.json"
 
 _CONFIG_KEYS = ("max_daily_notional_usd", "max_drawdown_pct")
 _HWM_KEY = "high_water_mark"

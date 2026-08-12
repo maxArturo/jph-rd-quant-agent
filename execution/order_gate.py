@@ -1,8 +1,11 @@
-"""Deterministic pre-trade limit gate for the paper rebalancer.
+"""Deterministic pre-trade limit gate for the paper and live rebalancers.
 
-Every proposed order is checked against execution/limits.paper.json BEFORE
-anything is submitted, using a fresh account/positions snapshot the caller
-passes in — this module does no HTTP and holds no state.
+Every proposed order is checked against the limits file BEFORE anything is
+submitted, using a fresh account/positions snapshot the caller passes in —
+this module does no HTTP and holds no state. The paper rebalancer loads
+execution/limits.paper.json (LIMITS_PATH, the default); the live rebalancer
+passes execution/limits.live.json (LIVE_LIMITS_PATH) — same loader, same
+four required keys, tighter numbers.
 
 Limits (all four keys required in the JSON file):
 
@@ -41,6 +44,7 @@ from typing import Any
 from execution.alpaca_client import Account, Position
 
 LIMITS_PATH = Path(__file__).resolve().parent / "limits.paper.json"
+LIVE_LIMITS_PATH = Path(__file__).resolve().parent / "limits.live.json"
 
 _FLOAT_LIMITS = ("max_order_notional_usd", "max_position_pct_equity")
 _INT_LIMITS = ("max_day_orders", "max_total_positions")
