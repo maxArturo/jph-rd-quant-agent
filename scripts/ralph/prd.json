@@ -85,8 +85,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: runs.channel_id column (_SCHEMA + guarded ALTER in migrate()); create_run(channel_id=...) persisted; Run.channel_id (None default = paper); store.run_channel(thread_ts, paper_channel_id) effective-channel accessor; ConversationCore ctor channel_id wired from app.py config.channel_id; fresh/legacy-DB migration + roundtrip + accessor + start_research stamping tests."
     },
     {
       "id": "US-006",

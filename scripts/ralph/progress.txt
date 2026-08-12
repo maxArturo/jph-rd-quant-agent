@@ -75,3 +75,15 @@ Started: (not yet started)
   - Adding an optional field WITH a default to the frozen SlackConfig keeps every existing `SlackConfig(...)`/equality test green — follow that shape for future optional config.
   - US-006 wiring note: app.py's actionable check should accept `config.live_channel_id` when not None; tests/test_slack_app.py CONFIG constant is paper-only — build a second CONFIG_LIVE with live_channel_id set for dual-channel tests.
 ---
+## 2026-08-12 17:00 - US-005
+- runs table records originating channel:
+  - orchestrator/state.py: `channel_id TEXT` on runs (in _SCHEMA for fresh DBs + guarded ALTER in migrate() for pre-US-005 DBs — the runs-column pattern predicted in the US-003 notes). Run dataclass gains `channel_id: str | None = None`; create_run accepts/persists it; `_run_from_row` reads it.
+  - New accessor `StateStore.run_channel(thread_ts, paper_channel_id)` — returns the run's stored channel, falling back to the paper channel for NULL columns (pre-migration rows) AND unknown threads (never raises; callers are background posters).
+  - ConversationCore ctor gains `channel_id: str | None = None` (stored as self._channel_id, stamped onto the run row in start_research); app.py main() wires `channel_id=config.channel_id`, so every paper run now records the paper channel explicitly. None default keeps all existing core tests/constructions green.
+- Files changed: orchestrator/state.py, orchestrator/conversation.py, orchestrator/app.py, orchestrator/CLAUDE.md, tests/test_state.py, tests/test_conversation.py.
+- Verified: make check fully green (ruff, pyright, 1099 passed / 3 skipped, +4 new); manual smoke built a pre-US-005 DB by hand (no channel_id column), opened it via StateStore twice (migration + idempotent reopen) and observed legacy row -> None/C_PAPER fallback, new row -> C_LIVE stored+returned, unknown thread -> C_PAPER, PRAGMA shows channel_id appended.
+- **Learnings for future iterations:**
+  - Guarded-ALTER migration puts the new column at the END of legacy tables while _SCHEMA puts it mid-table on fresh DBs — irrelevant because _run_from_row reads by name, but don't write INSERTs with positional VALUES against runs in new code/tests without naming columns (existing legacy-DB tests do positional inserts against the OLD schema on a raw connection, which is fine).
+  - make_core in tests/test_conversation.py now takes channel_id= — use it for US-006 dual-channel core tests.
+  - US-006/007 wiring notes: per-message channel should eventually override the ctor default (ctor channel is the US-005 stepping stone); background posters (poller/gpu) must resolve destinations via store.run_channel(run.thread_ts, config.channel_id) — the accessor is deliberately total (no KeyError) so poster loops can't crash on a deleted run.
+---
