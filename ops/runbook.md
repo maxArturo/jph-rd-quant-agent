@@ -368,7 +368,21 @@ reach the paper host.
 
 All code for live trading ships and verifies against fakes **before** any
 of this; funding the account and vaulting live keys is deliberately the
-last thing that happens. Run the order of operations exactly:
+last thing that happens.
+
+**Pre-go-live gate (step 0, automated):** `tests/test_live_e2e.py` drives
+the complete `--live` code path end-to-end in fixture mode — live slot,
+live guardrail paths, allocation-scaled sizing, `rdq-live-` order ids, 1:1
+Trade Ledger (Live) reconciliation, the daily snapshot row, the live-channel
+summary, and the halt-file refusal — with no network and no real accounts.
+Run it (and the full suite) from the repo root before any step below:
+
+```sh
+.venv/bin/python -m pytest tests/test_live_e2e.py -q   # the live-path gate alone
+make check                                             # full gate: ruff + pyright + pytest
+```
+
+Both must be green. Then run the order of operations exactly:
 
 1. **Deploy all live-trading stories** (merge to main, pull on the box).
 2. **Install + restart** — deployed code is not running code:

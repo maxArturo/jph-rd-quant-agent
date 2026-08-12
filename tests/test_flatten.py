@@ -289,6 +289,11 @@ class TestRunbook:
         assert "breaker.live.json" in runbook
         assert "ops.reconcile --live" in runbook
         assert "Automated AI Quant Investment — LIVE 🔴" in runbook
+        # Pre-go-live gate (US-021): the fixture-mode e2e test + its command.
+        assert "Pre-go-live gate" in runbook
+        assert "tests/test_live_e2e.py" in runbook
+        assert ".venv/bin/python -m pytest tests/test_live_e2e.py -q" in runbook
+        assert "make check" in runbook
 
 
 @pytest.mark.live

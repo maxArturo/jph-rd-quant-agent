@@ -356,8 +356,8 @@
         "Tests pass"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: tests/test_live_e2e.py — traded-day scenario (real AlpacaClient on live host over FakeBroker, temp DB live slot, temp guardrail files via monkeypatched live path constants, real TradeLedger/AccountSnapshotLog at (Live) db ids over fake Notion sessions, real slack_notifier(live=True) over fake WebClient; asserts scaled 25/12 targets, rdq-live- ids, live limits/breaker proven consulted at live paths, 1:1 ledger reconciliation vs broker.submitted + filled finals, snapshot row, LIVE summary to C0LIVE) + halt-file refusal scenario (exit 0, zero orders, zero ledger calls, halted snapshot row, halt line to the live channel); runbook §8 'Pre-go-live gate' step-0 section + commands, test_runbook_covers_live_procedures extended; make check fully green (ruff, pyright 0 errors, 1304 passed / 3 skipped)."
     }
   ]
 }
