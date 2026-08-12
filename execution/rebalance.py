@@ -1,10 +1,26 @@
-"""Nightly paper rebalance pipeline (US-034).
+"""Nightly rebalance pipeline (US-034; paper by default, ``--live`` for the
+real-money account, US-013).
 
 Chains the tested execution pieces end-to-end, in the PRD's order:
 
     market-calendar check -> promoted strategy load -> signal extraction
     -> order diff -> buying-power cap -> order gate -> circuit breaker
     -> submit -> poll fills
+
+``--live`` switches the whole chain to the live account in one flag: the
+LIVE promoted slot (``load_promoted_strategy_live`` — never the paper row),
+``AlpacaClient`` against the live host with ``allow_live=True`` (this
+entrypoint is one of the few callers allowed to pass it), limits.live.json +
+breaker.live.json with breaker state under ``~/rdq-data/breaker-live/``, the
+live Slack channel for every notice, and client_order_id prefix
+``rdq-live-``. The equity handed to ``diff.compute_orders`` is scaled by
+``live_equity_allocation_pct / 100`` (allocation.live.json) so the live
+account trades only its allocation slice; the buying-power cap and the order
+gate keep seeing the REAL account snapshot. Everything else — abort
+contract, halt semantics, exit codes — is identical to paper, and without
+``--live`` behavior is byte-for-byte unchanged. (Live Notion routing arrives
+with US-014; until then ``--live`` records no Notion rows rather than
+writing live fills into the paper ledger.)
 
 The buying-power cap (cap_buys_to_buying_power) defers buys the account
 snapshot's buying_power cannot fund — Alpaca reserves qty * limit_price when
@@ -61,8 +77,19 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from execution import allocation as allocation_mod
+from execution import breaker as breaker_mod
+from execution import order_gate as order_gate_mod
 from execution.account_log import AccountSnapshotLog
-from execution.alpaca_client import Account, AlpacaClient, AlpacaError, Order, Position
+from execution.allocation import AllocationConfigError, LiveAllocation, load_live_allocation
+from execution.alpaca_client import (
+    LIVE_BASE_URL,
+    Account,
+    AlpacaClient,
+    AlpacaError,
+    Order,
+    Position,
+)
 from execution.breaker import (
     Breaker,
     BreakerError,
@@ -86,7 +113,11 @@ from execution.order_gate import (
     evaluate_orders,
     load_limits,
 )
-from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
+from execution.promoted import (
+    NoPromotedStrategyError,
+    load_promoted_strategy,
+    load_promoted_strategy_live,
+)
 from execution.signal import SignalError, StrategyParams, extract_targets
 from orchestrator.state import DEFAULT_DB_PATH
 
@@ -119,6 +150,7 @@ _ABORT_ERRORS = (
     OrderGateError,
     BreakerError,
     AlpacaError,
+    AllocationConfigError,  # live mode: unusable allocation.live.json
 )
 
 
@@ -302,18 +334,21 @@ def submit_orders(
     orders: Sequence[ProposedOrder],
     as_of: dt.date,
     ledger: TradeLedger | None = None,
+    id_prefix: str = "rdq",
+    account_label: str = "paper",
 ) -> list[Order]:
     """Submit every proposed order as a day marketable-limit order.
 
     client_order_id is deterministic per (day, side, symbol) so an accidental
     same-day rerun is rejected by Alpaca's uniqueness check instead of
-    doubling the book. Each order is recorded in the Trade Ledger right
-    after its POST succeeds, so a mid-batch failure still leaves a row for
-    every order that is live.
+    doubling the book (live mode passes ``id_prefix="rdq-live"``, keeping the
+    two accounts' id spaces distinct). Each order is recorded in the Trade
+    Ledger right after its POST succeeds, so a mid-batch failure still leaves
+    a row for every order that is live.
     """
     submitted: list[Order] = []
     for order in orders:
-        client_order_id = f"rdq-{as_of.isoformat()}-{order.side}-{order.symbol}"
+        client_order_id = f"{id_prefix}-{as_of.isoformat()}-{order.side}-{order.symbol}"
         try:
             placed = client.place_order(
                 symbol=order.symbol,
@@ -327,8 +362,8 @@ def submit_orders(
         except AlpacaError as exc:
             raise RebalanceError(
                 f"order submission failed after {len(submitted)} of {len(orders)} orders "
-                f"went in (failed on {order.describe()}): {exc} — check the paper account "
-                "before rerunning; submitted orders are live"
+                f"went in (failed on {order.describe()}): {exc} — check the "
+                f"{account_label} account before rerunning; submitted orders are live"
             ) from exc
         submitted.append(placed)
         if ledger is not None:
@@ -538,11 +573,19 @@ def run_rebalance(
     sleep: Callable[[float], None] = time.sleep,
     ledger: TradeLedger | None = None,
     snapshots: AccountSnapshotLog | None = None,
+    live: bool = False,
+    allocation: LiveAllocation | None = None,
 ) -> int:
     """Run the full rebalance chain; returns the process exit code.
 
     0 = traded (or dry-ran, or nothing to trade, or operator halt);
     1 = aborted without trading (the reason is posted to Slack and stderr).
+
+    ``live=True`` (US-013) reads the LIVE promoted slot, defaults ``limits``/
+    ``breaker`` to the live guardrail files and live breaker state paths,
+    scales the diff's equity by the live allocation pct (``allocation``, or
+    allocation.live.json when None), and stamps ``rdq-live-`` order ids. The
+    caller supplies a live-host client and a live-channel ``notify``.
     """
     if as_of is None:
         as_of = dt.datetime.now(MARKET_TZ).date()
@@ -550,8 +593,9 @@ def run_rebalance(
         # 1. Market calendar: is as_of a trading day at all?
         assert_trading_day(client, as_of)
 
-        # 2. Promoted strategy: the only thing that may ever trade.
-        promoted = load_promoted_strategy(db_path)
+        # 2. Promoted strategy: the only thing that may ever trade. Live mode
+        # reads the independent live slot — never the paper row.
+        promoted = (load_promoted_strategy_live if live else load_promoted_strategy)(db_path)
         workspace = Path(promoted.workspace_path).expanduser()
         params = _strategy_params(promoted.config)
 
@@ -578,13 +622,26 @@ def run_rebalance(
         # label diverged.
         universe_warnings = universe_divergence_warnings(promoted.config, book.weights)
 
-        # 5. Diff: targets vs positions -> marketable-limit order list.
+        # 5. Diff: targets vs positions -> marketable-limit order list. Live
+        # mode trades only its allocation slice: the equity the diff sizes
+        # against is scaled by live_equity_allocation_pct / 100 (loaded at
+        # call time via the module attr so tests can repoint the file). The
+        # buying-power cap and the gate below keep the REAL account snapshot.
         prices = build_reference_prices(
             store_path, set(book.weights) | {p.symbol for p in positions}, positions
         )
+        if live:
+            if allocation is None:
+                allocation = load_live_allocation(allocation_mod.ALLOCATION_PATH)
+            diff_account = dataclasses.replace(
+                account,
+                equity=account.equity * allocation.live_equity_allocation_pct / 100.0,
+            )
+        else:
+            diff_account = account
         diff = compute_orders(
             book.weights,
-            account,
+            diff_account,
             positions,
             prices,
             min_rebalance_notional_usd=min_rebalance_notional_usd,
@@ -602,11 +659,21 @@ def run_rebalance(
         deferred_warnings = [*universe_warnings, *(skip.message for skip in deferred)]
 
         # 6. Gate: any rejected order aborts the whole batch. The rejection
-        # notice is the day's summary (equity + every violated limit).
+        # notice is the day's summary (equity + every violated limit). Live
+        # mode defaults to the live guardrail files and the live breaker
+        # state paths (call-time module attrs, monkeypatchable in tests).
         if limits is None:
-            limits = load_limits()
+            limits = load_limits(order_gate_mod.LIVE_LIMITS_PATH) if live else load_limits()
         if breaker is None:
-            breaker = Breaker(load_breaker_config())
+            breaker = (
+                Breaker(
+                    load_breaker_config(breaker_mod.LIVE_CONFIG_PATH),
+                    halt_file=breaker_mod.LIVE_HALT_FILE,
+                    high_water_mark_file=breaker_mod.LIVE_HWM_FILE,
+                )
+                if live
+                else Breaker(load_breaker_config())
+            )
         gate = evaluate_orders(diff.orders, account, positions, len(todays_orders), limits)
         if gate.rejections:
             rejection_messages = [r.message for r in gate.rejections]
@@ -693,7 +760,14 @@ def run_rebalance(
 
         # 8-9. Submit (ledger row per live order), then poll fills until
         # terminal or timeout, then record each final fill/rejection.
-        submitted = submit_orders(client, diff.orders, as_of, ledger=ledger)
+        submitted = submit_orders(
+            client,
+            diff.orders,
+            as_of,
+            ledger=ledger,
+            id_prefix="rdq-live" if live else "rdq",
+            account_label="live" if live else "paper",
+        )
         final = poll_fills(
             client,
             [order.id for order in submitted],
@@ -738,22 +812,34 @@ def run_rebalance(
         raise
 
 
-def slack_notifier() -> Notify:
+def slack_notifier(live: bool = False) -> Notify:
     """Channel notifier from the repo Slack config (raises ConfigError if unset).
 
-    Plain slack_sdk WebClient — no Bolt, no Socket Mode; the rebalancer only
-    posts. Slack traffic must bypass the OneCLI proxy (NO_PROXY=slack.com in
-    the service unit, per the orchestrator convention).
+    ``live=True`` posts to SLACK_LIVE_CHANNEL_ID instead of the paper
+    research channel — every live-mode notice must land in the live channel —
+    and refuses (ConfigError) when that var is unset. Plain slack_sdk
+    WebClient — no Bolt, no Socket Mode; the rebalancer only posts. Slack
+    traffic must bypass the OneCLI proxy (NO_PROXY=slack.com in the service
+    unit, per the orchestrator convention).
     """
     from slack_sdk import WebClient
 
-    from orchestrator.config import load_slack_config
+    from orchestrator.config import ConfigError, load_slack_config
 
     config = load_slack_config()
+    if live:
+        channel = config.live_channel_id
+        if not channel:
+            raise ConfigError(
+                "SLACK_LIVE_CHANNEL_ID is not set — the live rebalancer refuses to "
+                "run without the live Slack channel for its notices"
+            )
+    else:
+        channel = config.channel_id
     web_client = WebClient(token=config.bot_token)
 
     def notify(text: str) -> None:
-        web_client.chat_postMessage(channel=config.channel_id, text=text)
+        web_client.chat_postMessage(channel=channel, text=text)
 
     return notify
 
@@ -769,12 +855,18 @@ def stderr_notifier() -> Notify:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Nightly paper rebalance: promoted strategy -> orders -> fills"
+        description="Nightly rebalance: promoted strategy -> orders -> fills (paper by default)"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="run the full chain incl. gate and breaker, print the order list, submit nothing",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="trade the LIVE account: live promoted slot, live guardrails and breaker "
+        "state, the live Alpaca host, the live Slack channel, rdq-live- order ids",
     )
     parser.add_argument(
         "--as-of",
@@ -804,7 +896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         notify = stderr_notifier()
     else:
         try:
-            notify = slack_notifier()
+            notify = slack_notifier(live=args.live)
         except ConfigError as exc:
             print(
                 f"ERROR: {exc}\nRefusing to trade without a Slack channel for failure "
@@ -815,7 +907,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ledger: TradeLedger | None = None
     snapshots: AccountSnapshotLog | None = None
-    if not args.no_notion:
+    # Live Notion routing (Trade Ledger (Live) / Account Snapshots (Live))
+    # arrives with US-014 — until then --live records no Notion rows rather
+    # than writing live fills into the PAPER ledger.
+    if not args.no_notion and not args.live:
         from orchestrator.notion_client import NotionClient
         from orchestrator.notion_recorder import RecorderConfigError, load_notion_databases
 
@@ -832,8 +927,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ledger = TradeLedger(notion, databases.trade_ledger)
         snapshots = AccountSnapshotLog(notion, databases.account_snapshots)
 
+    client = AlpacaClient(LIVE_BASE_URL, allow_live=True) if args.live else AlpacaClient()
     return run_rebalance(
-        AlpacaClient(),
+        client,
         notify,
         dry_run=args.dry_run,
         as_of=args.as_of,
@@ -843,6 +939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         poll_interval_seconds=args.poll_interval,
         ledger=ledger,
         snapshots=snapshots,
+        live=args.live,
     )
 
 

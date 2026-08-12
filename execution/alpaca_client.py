@@ -31,6 +31,9 @@ import requests
 
 BASE_URL = "https://paper-api.alpaca.markets"
 _LIVE_HOST = "api.alpaca.markets"  # refused unless the caller passes allow_live=True
+# The live base URL for the few callers allowed to pass allow_live=True
+# (live rebalance/reconcile/flatten) — everything else must never build it.
+LIVE_BASE_URL = f"https://{_LIVE_HOST}"
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_RETRIES = 4

@@ -109,6 +109,20 @@
   `live_equity_allocation_pct`, 0 < pct <= 100) is live-only: rebalance.py
   scales the equity handed to diff by pct/100; buying-power capping keeps
   using the account's real buying_power, and diff.py stays account-agnostic.
+- `--live` (US-013) is ONE switch in rebalance.py: live promoted slot
+  (`load_promoted_strategy_live`), `AlpacaClient(LIVE_BASE_URL,
+  allow_live=True)` (constant exported by alpaca_client.py), live
+  limits/breaker files + `~/rdq-data/breaker-live/` state, the live Slack
+  channel (`slack_notifier(live=True)` — refuses when SLACK_LIVE_CHANNEL_ID
+  unset), and `rdq-live-` order ids. ONLY the diff's equity is scaled
+  (`live_equity_allocation_pct/100`); the gate, breaker (HWM/drawdown) and
+  buying-power cap see the REAL account snapshot. Live-mode defaults resolve
+  at call time via module attrs (`order_gate_mod.LIVE_LIMITS_PATH`,
+  `breaker_mod.LIVE_*`, `allocation_mod.ALLOCATION_PATH`) so tests
+  monkeypatch the constants; injected `limits`/`breaker`/`allocation` params
+  skip the file loads entirely. `AllocationConfigError` is in
+  `_ABORT_ERRORS`. Live Notion routing is US-014 — until then main() records
+  NO Notion rows in live mode (never the paper ledger).
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.
