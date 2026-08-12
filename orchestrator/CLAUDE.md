@@ -265,6 +265,14 @@
   `promoted`. The rebalancer-side check is `execution/promoted.py` —
   keep the pinned config keys (universe/universe_tickers/topk/n_drop/
   thread_ts/session_path) in sync with what US-034 consumes.
+- Live promotion slot (US-003): `promoted_strategy_live` is a second
+  single-row table with the same shape, accessed ONLY via
+  `set_promoted_strategy_live`/`get_promoted_strategy_live`/
+  `clear_promoted_strategy_live` and read by
+  `execution.promoted.load_promoted_strategy_live`. Its pinned config carries
+  the paper keys plus `live_equity_allocation_pct` (captured at promote time
+  for audit). No paper-slot code path may read or write the live table, and
+  vice versa — tests assert both directions.
 
 - Spoken hypothesis decisions + conversational promotion (US-044):
   ConversationCore optionally takes `interactions=` (the HypothesisPoller) and

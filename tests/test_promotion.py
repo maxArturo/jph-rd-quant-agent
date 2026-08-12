@@ -15,7 +15,11 @@ from typing import Any
 
 import pytest
 
-from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
+from execution.promoted import (
+    NoPromotedStrategyError,
+    load_promoted_strategy,
+    load_promoted_strategy_live,
+)
 from execution.signal import SignalError, StrategyParams, load_strategy_params
 from orchestrator.notion_client import NotionClient
 from orchestrator.notion_recorder import NotionRecorder
@@ -546,3 +550,59 @@ def test_rebalancer_loads_the_promoted_strategy(store: StateStore, tmp_path: Pat
     assert promoted.config["topk"] == 50
     assert promoted.config["n_drop"] == 5
     assert promoted.config["universe"] == "us_liquid"
+
+
+# --- live rebalancer entrypoint check (US-003) --------------------------------------
+
+
+def test_live_rebalancer_refuses_without_state_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "absent.sqlite"
+    with pytest.raises(NoPromotedStrategyError, match="state database not found"):
+        load_promoted_strategy_live(db_path)
+    assert not db_path.exists()  # the check never creates orchestrator state
+
+
+def test_live_rebalancer_refuses_without_live_promotion(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # A PAPER promotion must not arm the live account.
+    StateStore(db_path).set_promoted_strategy(str(workspace), {"topk": 50})
+    with pytest.raises(NoPromotedStrategyError, match="no live promoted strategy exists"):
+        load_promoted_strategy_live(db_path)
+
+
+def test_live_rebalancer_refuses_when_workspace_gone(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite"
+    StateStore(db_path).set_promoted_strategy_live(str(tmp_path / "vanished"), {"topk": 50})
+    with pytest.raises(NoPromotedStrategyError, match="missing on disk"):
+        load_promoted_strategy_live(db_path)
+
+
+def test_live_rebalancer_loads_the_live_slot_not_paper(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite"
+    paper_ws = tmp_path / "paper-ws"
+    live_ws = tmp_path / "live-ws"
+    paper_ws.mkdir()
+    live_ws.mkdir()
+    store = StateStore(db_path)
+    store.set_promoted_strategy(str(paper_ws), {"topk": 50, "universe": "us_liquid"})
+    store.set_promoted_strategy_live(
+        str(live_ws),
+        {"topk": 30, "universe": "us_liquid", "live_equity_allocation_pct": 10},
+    )
+
+    live = load_promoted_strategy_live(db_path)
+    assert live.workspace_path == str(live_ws)
+    assert live.config["live_equity_allocation_pct"] == 10
+    # and the paper loader still returns the paper slot
+    assert load_promoted_strategy(db_path).workspace_path == str(paper_ws)
+
+
+def test_paper_rebalancer_ignores_live_only_promotion(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite"
+    live_ws = tmp_path / "live-ws"
+    live_ws.mkdir()
+    StateStore(db_path).set_promoted_strategy_live(str(live_ws), {"topk": 30})
+    with pytest.raises(NoPromotedStrategyError, match="no promoted strategy exists"):
+        load_promoted_strategy(db_path)

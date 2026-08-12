@@ -47,3 +47,18 @@ Started: (not yet started)
   - NaN can't sneak through allocation range check: 0 < nan <= 100 is False -> refused.
   - US-013 wiring note: rebalance --live must scale equity BEFORE diff (allocation pct), pass real buying_power to cap_buys_to_buying_power, and construct Breaker(load_breaker_config(LIVE_CONFIG_PATH), LIVE_HALT_FILE, LIVE_HWM_FILE).
 ---
+## 2026-08-12 15:10 - US-003
+- Live promoted-strategy slot, fully independent of paper:
+  - orchestrator/state.py: new `promoted_strategy_live` table in _SCHEMA (same single-row shape, `CHECK (id = 1)`); paper `promoted_strategy` table untouched. Rides `CREATE TABLE IF NOT EXISTS` — no guarded ALTER needed for a whole new table (migrate() adds it to pre-live DBs automatically; test drops the table and reopens to prove the retrofit).
+  - StateStore methods: `set_promoted_strategy_live(workspace_path, config)` (upsert, returns PromotedStrategy), `get_promoted_strategy_live()`, `clear_promoted_strategy_live()` (demote; delete is a no-op when already empty). Config dict carries paper keys + `live_equity_allocation_pct` for audit — the store stays shape-agnostic like paper's; US-009's promotion backend is responsible for populating the pct.
+  - execution/promoted.py: `load_promoted_strategy_live(db_path)` mirroring paper refusals exactly (DB absent — never created; no live row — even when paper IS promoted; workspace dir gone) with live-specific messages + `LIVE_PROMOTE_HINT` ("promote-to-live message in the live Slack channel"). Module docstring covers both loaders.
+- Tests: test_state.py live-slot section (empty/set-get incl. pct round-trip/replace-keeps-single-row/clear/both-direction paper-live independence/pre-live DB retrofit); test_promotion.py live-loader section (no-DB, paper-promoted-but-live-empty refusal, workspace-gone, live-vs-paper slot selection, paper loader ignores live-only promotion).
+- Files changed: orchestrator/state.py, execution/promoted.py, orchestrator/CLAUDE.md, execution/CLAUDE.md, tests/test_state.py, tests/test_promotion.py.
+- Verified: make check fully green (ruff, pyright, 1089 passed / 3 skipped, +12 new); manual smoke drove the full lifecycle in a tmp DB (empty-slot refusal with live hint -> promote-to-live -> live loader returns live ws + pct 10 while paper loader returns paper ws -> demote -> refusal again, paper untouched -> absent-DB refusal without creating the file).
+- **Learnings for future iterations:**
+  - Adding a whole NEW table needs no migrate() retrofit code — `CREATE TABLE IF NOT EXISTS` in _SCHEMA covers old DBs (guarded ALTERs are only for new COLUMNS on existing tables). US-005's runs.channel_id WILL need the guarded-ALTER pattern.
+  - PromotedStrategy dataclass is slot-agnostic — reuse it for live; don't create a LivePromotedStrategy type.
+  - `StateStore(db_path)` migrates on construction, so the promoted.py loaders check `db_path.is_file()` BEFORE constructing the store (that's what keeps "never creates the DB" true). Preserve that order in any new loader.
+  - test_promotion.py's `store` fixture pins module-level DBS config; plain `StateStore(tmp_path / ...)` tests that don't need Notion can skip it entirely (the new live-loader tests do).
+  - US-009/US-010 wiring notes: live promotion backend should call set_promoted_strategy_live with the paper config keys + live_equity_allocation_pct (from execution.allocation.load_live_allocation), demote calls clear_promoted_strategy_live; both write Decision Log entries.
+---

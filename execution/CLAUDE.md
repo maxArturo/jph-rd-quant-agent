@@ -167,6 +167,12 @@
   universe/universe_tickers/topk/n_drop/thread_ts/session_path — pass topk/
   n_drop into `signal.StrategyParams` rather than re-deriving them from the
   workspace conf (the operator confirmed those exact values when promoting).
+- The LIVE slot has its own loader, `load_promoted_strategy_live()`
+  (same refusal semantics, reads StateStore's independent
+  `promoted_strategy_live` row — never the paper row; the pinned config adds
+  `live_equity_allocation_pct` for audit). The live rebalance path must call
+  the live loader; nothing paper-side may consult the live slot or vice
+  versa.
 - `execution/ledger.py` (`TradeLedger`) is the Notion Trade Ledger's SOLE
   writer (one-writer-per-DB; the orchestrator's NotionRecorder must never
   touch that database). Row lifecycle: `record_submitted` right after each

@@ -53,8 +53,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: promoted_strategy_live table (CHECK id=1) in _SCHEMA; set/get/clear_promoted_strategy_live on StateStore (paper table untouched); execution/promoted.py load_promoted_strategy_live with identical refusal semantics + LIVE_PROMOTE_HINT; both-direction independence tests in test_state.py, loader tests in test_promotion.py."
     },
     {
       "id": "US-004",

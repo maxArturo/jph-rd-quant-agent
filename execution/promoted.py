@@ -1,10 +1,12 @@
-"""Promoted-strategy loader: the rebalancer's entrypoint check (US-033).
+"""Promoted-strategy loaders: the rebalancer's entrypoint checks (US-033/US-003).
 
-The nightly rebalancer (US-034) must never trade without a deliberate
-operator promotion. ``load_promoted_strategy()`` reads THE single
-``promoted_strategy`` row from the orchestrator's SQLite state and raises
-``NoPromotedStrategyError`` when the state database, the row, or the pinned
-workspace is missing — the rebalancer treats that as abort-without-trading.
+The rebalancer must never trade without a deliberate operator promotion.
+``load_promoted_strategy()`` reads THE single ``promoted_strategy`` (paper)
+row and ``load_promoted_strategy_live()`` the independent
+``promoted_strategy_live`` row from the orchestrator's SQLite state; both
+raise ``NoPromotedStrategyError`` when the state database, the slot's row, or
+the pinned workspace is missing — the rebalancer treats that as
+abort-without-trading.
 """
 
 from __future__ import annotations
@@ -16,6 +18,11 @@ from orchestrator.state import DEFAULT_DB_PATH, PromotedStrategy, StateStore
 PROMOTE_HINT = (
     "promote a completed research run from Slack (Promote button on the run"
     " summary) before rebalancing"
+)
+
+LIVE_PROMOTE_HINT = (
+    "arm live trading with a promote-to-live message in the live Slack channel"
+    " before a live rebalance"
 )
 
 
@@ -44,5 +51,33 @@ def load_promoted_strategy(db_path: Path = DEFAULT_DB_PATH) -> PromotedStrategy:
         raise NoPromotedStrategyError(
             f"promoted workspace is missing on disk: {workspace} — re-promote a"
             " run whose workspace still exists"
+        )
+    return promoted
+
+
+def load_promoted_strategy_live(db_path: Path = DEFAULT_DB_PATH) -> PromotedStrategy:
+    """Return the LIVE promoted strategy, or refuse when none can be traded.
+
+    Identical refusal semantics to :func:`load_promoted_strategy`, on the
+    independent live slot: state DB absent (never create the orchestrator's
+    database from the execution side), no promoted_strategy_live row, or the
+    pinned workspace directory gone from disk. The paper slot is never
+    consulted — an armed paper strategy must not make the live account trade.
+    """
+    db_path = Path(db_path).expanduser()
+    if not db_path.is_file():
+        raise NoPromotedStrategyError(
+            f"orchestrator state database not found at {db_path} — {LIVE_PROMOTE_HINT}"
+        )
+    promoted = StateStore(db_path).get_promoted_strategy_live()
+    if promoted is None:
+        raise NoPromotedStrategyError(
+            f"no live promoted strategy exists — {LIVE_PROMOTE_HINT}"
+        )
+    workspace = Path(promoted.workspace_path).expanduser()
+    if not workspace.is_dir():
+        raise NoPromotedStrategyError(
+            f"live promoted workspace is missing on disk: {workspace} —"
+            " re-promote a run whose workspace still exists"
         )
     return promoted

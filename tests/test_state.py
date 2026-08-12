@@ -161,6 +161,89 @@ def test_promoted_strategy_replace_keeps_single_row(store: StateStore, db_path: 
     assert count == 1
 
 
+# -- live promoted strategy (US-003) ----------------------------------------------
+
+
+LIVE_CONFIG = {
+    "universe": "us_liquid",
+    "universe_tickers": ["AAPL", "MSFT"],
+    "topk": 30,
+    "n_drop": 3,
+    "thread_ts": "111.222",
+    "session_path": "/runs/session",
+    "live_equity_allocation_pct": 10,
+}
+
+
+def test_live_promoted_strategy_empty_initially(store: StateStore) -> None:
+    assert store.get_promoted_strategy_live() is None
+
+
+def test_live_promoted_strategy_set_and_get(store: StateStore) -> None:
+    store.set_promoted_strategy_live("/workspaces/live", LIVE_CONFIG)
+    fetched = store.get_promoted_strategy_live()
+    assert fetched is not None
+    assert fetched.workspace_path == "/workspaces/live"
+    assert fetched.config == LIVE_CONFIG
+    assert fetched.config["live_equity_allocation_pct"] == 10
+
+
+def test_live_promoted_strategy_replace_keeps_single_row(
+    store: StateStore, db_path: Path
+) -> None:
+    store.set_promoted_strategy_live("/workspaces/live-old", {"topk": 30})
+    store.set_promoted_strategy_live("/workspaces/live-new", {"topk": 50})
+    fetched = store.get_promoted_strategy_live()
+    assert fetched is not None and fetched.workspace_path == "/workspaces/live-new"
+    assert fetched.config == {"topk": 50}
+    with sqlite3.connect(db_path) as conn:
+        (count,) = conn.execute("SELECT COUNT(*) FROM promoted_strategy_live").fetchone()
+    assert count == 1
+
+
+def test_live_promoted_strategy_clear(store: StateStore) -> None:
+    store.set_promoted_strategy_live("/workspaces/live", LIVE_CONFIG)
+    store.clear_promoted_strategy_live()
+    assert store.get_promoted_strategy_live() is None
+    # clearing an already-empty slot is a no-op, not an error
+    store.clear_promoted_strategy_live()
+    assert store.get_promoted_strategy_live() is None
+
+
+def test_live_slot_operations_never_touch_paper(store: StateStore) -> None:
+    store.set_promoted_strategy("/workspaces/paper", {"topk": 30})
+    paper_before = store.get_promoted_strategy()
+
+    store.set_promoted_strategy_live("/workspaces/live", LIVE_CONFIG)
+    store.set_promoted_strategy_live("/workspaces/live-2", LIVE_CONFIG)
+    store.clear_promoted_strategy_live()
+
+    assert store.get_promoted_strategy() == paper_before
+
+
+def test_paper_slot_operations_never_touch_live(store: StateStore) -> None:
+    store.set_promoted_strategy_live("/workspaces/live", LIVE_CONFIG)
+    live_before = store.get_promoted_strategy_live()
+
+    store.set_promoted_strategy("/workspaces/paper", {"topk": 30})
+    store.set_promoted_strategy("/workspaces/paper-2", {"topk": 50})
+
+    assert store.get_promoted_strategy_live() == live_before
+
+
+def test_live_slot_migration_retrofits_pre_live_db(db_path: Path) -> None:
+    # Simulate a database created before the live slot existed, then reopen:
+    # migrate() must add the table without disturbing the paper row.
+    store = StateStore(db_path)
+    store.set_promoted_strategy("/workspaces/paper", {"topk": 30})
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE promoted_strategy_live")
+    reopened = StateStore(db_path)
+    assert reopened.get_promoted_strategy_live() is None
+    paper = reopened.get_promoted_strategy()
+    assert paper is not None and paper.workspace_path == "/workspaces/paper"
+
+
 # -- pending interactions ---------------------------------------------------------
 
 

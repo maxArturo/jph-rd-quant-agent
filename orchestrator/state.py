@@ -1,9 +1,9 @@
 """SQLite state store for the orchestrator.
 
 Persists what must survive a process restart: refined research directives,
-thread-to-run mappings, the single promoted strategy, and pending operator
-interactions. The schema migration is idempotent (plain ``CREATE ... IF NOT
-EXISTS``) and runs on every startup.
+thread-to-run mappings, the promoted strategies (independent single-row paper
+and live slots), and pending operator interactions. The schema migration is
+idempotent (plain ``CREATE ... IF NOT EXISTS``) and runs on every startup.
 
 Concurrency model: each helper opens a short-lived connection, so a
 ``StateStore`` instance is safe to share across threads (the Bolt handlers
@@ -60,6 +60,17 @@ CREATE TABLE IF NOT EXISTS universes (
 -- Single-row table: id is constrained to 1 so a second strategy can only
 -- ever replace the first, never coexist with it.
 CREATE TABLE IF NOT EXISTS promoted_strategy (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    workspace_path TEXT NOT NULL,
+    config         TEXT NOT NULL,
+    promoted_at    TEXT NOT NULL
+);
+
+-- Live promotion slot (US-003): same single-row shape as promoted_strategy
+-- but fully independent — the real-money account trades exactly one
+-- deliberately chosen strategy, and no paper-slot operation may touch it
+-- (nor vice versa).
+CREATE TABLE IF NOT EXISTS promoted_strategy_live (
     id             INTEGER PRIMARY KEY CHECK (id = 1),
     workspace_path TEXT NOT NULL,
     config         TEXT NOT NULL,
@@ -453,6 +464,47 @@ class StateStore:
             config=json.loads(row["config"]),
             promoted_at=row["promoted_at"],
         )
+
+    # -- live promoted strategy (US-003) ---------------------------------------
+    # The live slot mirrors the paper slot's shape but is a separate table so
+    # neither slot's operations can ever modify the other. The pinned config
+    # carries the paper keys (universe/universe_tickers/topk/n_drop/thread_ts/
+    # session_path) plus live_equity_allocation_pct captured at promote time
+    # for audit.
+
+    def set_promoted_strategy_live(
+        self, workspace_path: str, config: dict[str, Any]
+    ) -> PromotedStrategy:
+        """Replace THE live promoted strategy (single row; overwrites any previous)."""
+        now = _utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO promoted_strategy_live (id, workspace_path, config, promoted_at)"
+                " VALUES (1, ?, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET workspace_path = excluded.workspace_path,"
+                " config = excluded.config, promoted_at = excluded.promoted_at",
+                (workspace_path, json.dumps(config), now),
+            )
+        return PromotedStrategy(workspace_path=workspace_path, config=config, promoted_at=now)
+
+    def get_promoted_strategy_live(self) -> PromotedStrategy | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT workspace_path, config, promoted_at FROM promoted_strategy_live"
+                " WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return PromotedStrategy(
+            workspace_path=row["workspace_path"],
+            config=json.loads(row["config"]),
+            promoted_at=row["promoted_at"],
+        )
+
+    def clear_promoted_strategy_live(self) -> None:
+        """Demote: empty the live slot. The paper promoted_strategy row is untouched."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM promoted_strategy_live WHERE id = 1")
 
     # -- notion page mappings (US-027) -------------------------------------------
 
