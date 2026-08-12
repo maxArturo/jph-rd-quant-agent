@@ -169,7 +169,13 @@
   rows and unwired cores — always means the paper channel. Anything posting
   about a run (poller digests, completion, buttons) should resolve the
   destination with `store.run_channel(thread_ts, paper_channel_id)`, never
-  assume the global config channel.
+  assume the global config channel. The poller does this everywhere via
+  `_run_home(run)` (US-007) — hypothesis buttons, loop narration, completion
+  summary, chart upload; button/edit replies ride Bolt's channel-bound
+  `say`. Completion rule: only paper-channel runs get the Block Kit Promote
+  button; a live-channel run's summary appends `LIVE_PROMOTABLE_NOTE`
+  ("say *promote to live*") instead — a paper-promotion button must never
+  appear in the real-money channel (the spoken flow is US-010).
 - Dual-channel routing (US-006): with `live_channel_id` set, app.py's
   actionable check accepts BOTH channels; all other filtering is identical.
   The per-message channel rides Bolt's `Say` (`say.channel` — Bolt binds it

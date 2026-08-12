@@ -55,6 +55,15 @@ hypothesis becomes a Hypothesis Log row, each operator action updates it,
 each auto-acked feedback records its completed experiment's metrics as a
 Backtest Results row, and run completion moves the idea page's Status. All
 of it is best-effort — the recorder logs and swallows its own failures.
+
+Channel routing (US-007): every post about a run — hypothesis buttons, loop
+narration, completion summary, chart upload — goes to the channel that
+STARTED the run (``StateStore.run_channel``; the constructor's
+``channel_id`` is the paper fallback for legacy NULL rows and unknown
+threads). Button/edit responses ride Bolt's ``say``, which is already bound
+to the clicked message's channel. Live-channel runs never get the paper
+Promote button on completion — promoting to live is a spoken message
+(US-010) — so their summary carries a promotable note instead.
 """
 
 from __future__ import annotations
@@ -231,6 +240,15 @@ def feedback_outcome_text(content: dict[str, Any]) -> str:
             + snippet
         )
     return ":heavy_multiplication_x: Experiment result: did not beat the best so far." + snippet
+
+
+# Appended to a live-channel run's completion summary in place of the paper
+# Promote button (US-007): promotion to live is a single spoken message
+# handled by the promote_to_live tool (US-010), never a button.
+LIVE_PROMOTABLE_NOTE = (
+    "\n:rocket: This run is promotable — say *promote to live* in this"
+    " channel to arm it as the live-trading strategy."
+)
 
 
 def budget_exhausted_text(maximum: int) -> str:
@@ -588,11 +606,19 @@ class HypothesisPoller:
             return False
         return True
 
+    def _run_home(self, run: Run) -> str:
+        """The channel that owns ``run`` — where every post about it belongs.
+
+        Stamped at create_run time (US-005); NULL columns (pre-migration
+        rows) fall back to the paper channel, i.e. exactly today's routing.
+        """
+        return self._store.run_channel(run.thread_ts, self._channel_id)
+
     def _narrate(self, run: Run, text: str) -> None:
         """Best-effort thread narration — never blocks or fails the loop."""
         try:
             self._slack.chat_postMessage(
-                channel=self._channel_id, thread_ts=run.thread_ts, text=text
+                channel=self._run_home(run), thread_ts=run.thread_ts, text=text
             )
         except Exception:  # noqa: BLE001 - narration is auxiliary to the submit
             logger.exception("failed to narrate to thread %s", run.thread_ts)
@@ -607,7 +633,7 @@ class HypothesisPoller:
             return 0
         try:
             self._slack.chat_postMessage(
-                channel=self._channel_id,
+                channel=self._run_home(run),
                 thread_ts=run.thread_ts,
                 text=f"New hypothesis proposed: {interaction.content.get('hypothesis', '')}",
                 blocks=hypothesis_blocks(row.id, interaction.content),
@@ -750,8 +776,9 @@ class HypothesisPoller:
                 f" — nothing to summarize. ({artifact_problem})"
             )
 
+        channel = self._run_home(run)
         post_kwargs: dict[str, Any] = {
-            "channel": self._channel_id,
+            "channel": channel,
             "thread_ts": run.thread_ts,
             "text": text,
         }
@@ -759,7 +786,13 @@ class HypothesisPoller:
         # resolvable artifacts are promotable (unbounded orchestrator runs
         # only ever end by an operator stop); failed runs never get the button.
         if terminal_status(status) in PROMOTABLE_STATUSES and artifacts is not None:
-            post_kwargs["blocks"] = promotion_offer_blocks(run.thread_ts, text)
+            if channel == self._channel_id:
+                post_kwargs["blocks"] = promotion_offer_blocks(run.thread_ts, text)
+            else:
+                # Live-channel run (US-007): the paper Promote button must
+                # never appear on a real-money channel — promotion to live
+                # is a spoken message (US-010).
+                post_kwargs["text"] = text + LIVE_PROMOTABLE_NOTE
         self._slack.chat_postMessage(**post_kwargs)
         if chart_png is not None:
             # The chart is supplementary — never let its upload block
@@ -770,7 +803,7 @@ class HypothesisPoller:
             # only its failure should retry.
             try:
                 self._slack.files_upload_v2(
-                    channel=self._channel_id,
+                    channel=channel,
                     thread_ts=run.thread_ts,
                     filename="equity_curve.png",
                     title="Equity curve",

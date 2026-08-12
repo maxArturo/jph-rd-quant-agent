@@ -20,6 +20,7 @@ from orchestrator.poller import (
     ACTION_EDIT,
     ACTION_REJECT,
     EDIT_PROMPT,
+    LIVE_PROMOTABLE_NOTE,
     HypothesisPoller,
     edited_payload,
     rejection_payload,
@@ -36,7 +37,14 @@ from orchestrator.rdagent_client import (
     RunStatus,
 )
 from orchestrator.state import StateStore
-from tests.test_slack_app import CHANNEL, dispatch_message, make_app, user_message
+from tests.test_slack_app import (
+    CHANNEL,
+    CONFIG_LIVE,
+    LIVE_CHANNEL,
+    dispatch_message,
+    make_app,
+    user_message,
+)
 from tests.test_summary import write_qlib_res_csv, write_ret_pkl
 
 THREAD = "1751900000.000100"
@@ -614,7 +622,7 @@ class FakeInteractions:
         return self.consume
 
 
-def dispatch_action(app: App, action_id: str, value: str) -> None:
+def dispatch_action(app: App, action_id: str, value: str, channel: str = CHANNEL) -> None:
     body = {
         "type": "block_actions",
         "token": "ignored",
@@ -625,10 +633,10 @@ def dispatch_action(app: App, action_id: str, value: str) -> None:
         "container": {
             "type": "message",
             "message_ts": "1751900001.000000",
-            "channel_id": CHANNEL,
+            "channel_id": channel,
             "is_ephemeral": False,
         },
-        "channel": {"id": CHANNEL, "name": "quant-research"},
+        "channel": {"id": channel, "name": "quant-research"},
         "message": {"type": "message", "ts": "1751900001.000000", "thread_ts": THREAD},
         "response_url": "https://hooks.slack.com/actions/T0TEAM/123/xyz",
         "actions": [
@@ -982,3 +990,148 @@ def test_consume_edit_reply_accepts_message_from_owning_channel(
     say = ChannelRecordingSay(CHANNEL)
     assert poller.consume_edit_reply(THREAD, "Use 60-day momentum instead", say) is True
     assert store.get_pending_interaction(row_id).status == "edited"  # type: ignore[union-attr]
+
+
+# --- US-007: run posts route to the run's originating channel ------------------
+
+
+@pytest.fixture
+def live_store(tmp_path: Path) -> StateStore:
+    """A store whose single (supervised) run started in the LIVE channel."""
+    s = StateStore(tmp_path / "state.sqlite")
+    s.create_run(
+        THREAD, SESSION, universe="us_liquid", supervised=True, channel_id=LIVE_CHANNEL
+    )
+    return s
+
+
+@pytest.fixture
+def live_poller(live_store: StateStore, rd: StubRdAgent, slack: FakeSlack) -> HypothesisPoller:
+    return HypothesisPoller(live_store, rd, slack, CHANNEL)
+
+
+def test_hypothesis_buttons_post_to_the_runs_channel(
+    live_poller: HypothesisPoller, live_store: StateStore, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    assert live_poller.poll_once() == 1
+    (post,) = slack.posts
+    assert post["channel"] == LIVE_CHANNEL
+    assert post["thread_ts"] == THREAD
+
+
+def test_button_round_trip_for_live_channel_run(
+    live_poller: HypothesisPoller, live_store: StateStore, rd: StubRdAgent
+) -> None:
+    """Interaction records resolve normally when the run lives in the live channel."""
+    row_id = start_pending(live_poller, rd, live_store)
+    say = ChannelRecordingSay(LIVE_CHANNEL)
+    live_poller.approve(row_id, say)
+    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
+    assert live_store.get_pending_interaction(row_id).status == "approved"  # type: ignore[union-attr]
+    assert any("approved" in t for t in say.texts)
+
+
+def test_edit_round_trip_for_live_channel_run(
+    live_poller: HypothesisPoller, live_store: StateStore, rd: StubRdAgent
+) -> None:
+    """The edit reply is keyed to the run's channel: a paper-channel message
+    with the same thread_ts is not consumed; the live-channel one is."""
+    row_id = start_pending(live_poller, rd, live_store)
+    live_poller.request_edit(row_id, ChannelRecordingSay(LIVE_CHANNEL))
+
+    paper_say = ChannelRecordingSay(CHANNEL)
+    assert live_poller.consume_edit_reply(THREAD, "not the edit", paper_say) is False
+    assert live_store.get_pending_interaction(row_id).status == "editing"  # type: ignore[union-attr]
+
+    live_say = ChannelRecordingSay(LIVE_CHANNEL)
+    assert live_poller.consume_edit_reply(THREAD, "Use 60-day momentum", live_say) is True
+    assert live_store.get_pending_interaction(row_id).status == "edited"  # type: ignore[union-attr]
+
+
+def test_button_response_lands_in_the_clicked_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    live_poller: HypothesisPoller,
+    live_store: StateStore,
+    rd: StubRdAgent,
+) -> None:
+    """Bolt binds say to the clicked message's channel, so a real dispatch of
+    an approve click on a live-channel run replies in the live channel."""
+    row_id = start_pending(live_poller, rd, live_store)
+    app, client, _conversation = make_app(
+        monkeypatch, interactions=live_poller, config=CONFIG_LIVE
+    )
+    dispatch_action(app, ACTION_APPROVE, value=str(row_id), channel=LIVE_CHANNEL)
+    kwargs = client.chat_postMessage.call_args.kwargs
+    assert kwargs["channel"] == LIVE_CHANNEL
+    assert "approved" in kwargs["text"]
+    assert live_store.get_pending_interaction(row_id).status == "approved"  # type: ignore[union-attr]
+
+
+def test_autonomous_narration_posts_to_the_runs_channel(
+    tmp_path: Path, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    """Loop digests (auto-approve narration) go home, not to the paper channel."""
+    store = StateStore(tmp_path / "state.sqlite")
+    store.create_run(THREAD, SESSION, universe="us_liquid", channel_id=LIVE_CHANNEL)
+    poller = HypothesisPoller(store, rd, slack, CHANNEL, max_hypotheses=3)
+    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
+    assert poller.poll_once() == 1
+    (post,) = slack.posts
+    assert post["channel"] == LIVE_CHANNEL
+    assert "auto-approved" in post["text"]
+
+
+def test_live_completion_posts_home_without_the_paper_promote_button(
+    live_store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    artifacts = make_artifacts(tmp_path)
+    poller = HypothesisPoller(live_store, rd, slack, CHANNEL, locate=lambda _s: artifacts)
+    poller.poll_once()
+
+    (post,) = slack.posts
+    assert post["channel"] == LIVE_CHANNEL
+    assert "blocks" not in post  # the paper Promote button never reaches the live channel
+    assert LIVE_PROMOTABLE_NOTE in post["text"]
+    assert "promote to live" in post["text"]
+    (upload,) = slack.uploads
+    assert upload["channel"] == LIVE_CHANNEL
+    run = live_store.get_run(THREAD)
+    assert run is not None and run.status == "completed"
+
+
+def test_live_failed_run_gets_no_promotable_note(
+    live_store: StateStore, rd: StubRdAgent, slack: FakeSlack, tmp_path: Path
+) -> None:
+    rd.status_by_trace[TRACE_ID] = RunStatus(finished=True, end_code=2, error_msg="boom")
+    artifacts = make_artifacts(tmp_path)
+    poller = HypothesisPoller(live_store, rd, slack, CHANNEL, locate=lambda _s: artifacts)
+    poller.poll_once()
+    (post,) = slack.posts
+    assert post["channel"] == LIVE_CHANNEL
+    assert "blocks" not in post
+    assert "promote to live" not in post["text"]
+    run = live_store.get_run(THREAD)
+    assert run is not None and run.status == "failed"
+
+
+def test_paper_run_with_stored_channel_keeps_the_promote_button(
+    tmp_path: Path, rd: StubRdAgent, slack: FakeSlack
+) -> None:
+    """Runs stamped with the paper channel (app.py wires config.channel_id
+    since US-005) complete exactly like legacy NULL-channel runs: same
+    Promote button, no live phrasing."""
+    store = StateStore(tmp_path / "state.sqlite")
+    store.create_run(
+        THREAD, SESSION, universe="us_liquid", supervised=True, channel_id=CHANNEL
+    )
+    rd.status_by_trace[TRACE_ID] = FINISHED_OK
+    artifacts = make_artifacts(tmp_path)
+    poller = HypothesisPoller(store, rd, slack, CHANNEL, locate=lambda _s: artifacts)
+    poller.poll_once()
+    (post,) = slack.posts
+    assert post["channel"] == CHANNEL
+    _section, actions = post["blocks"]
+    assert actions["elements"][0]["text"]["text"] == "Promote to paper trading"
+    assert "promote to live" not in post["text"]

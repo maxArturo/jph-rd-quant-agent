@@ -1,7 +1,7 @@
 {
   "project": "rd-agent-q",
   "branchName": "ralph/live-trading",
-  "description": "Live trading: real-money Alpaca account, fully Slack-managed from #live-trading-quant-research (tasks/prd-live-trading.md, US-050..US-060). Full research parity in the live channel, direct-to-live promotion, one-message arming (no confirmation), conservative guardrails (10% equity allocation, $500/order, $5k daily notional, 5% drawdown). IMPORTANT: the operator funds the live Alpaca account and vaults live API keys as their own FINAL step after every story passes \u2014 no story may require live credentials, a funded account, or the real live host; everything verifies with fakes, fixtures, and the paper account's shapes. Paper behavior is regression-frozen throughout: with SLACK_LIVE_CHANNEL_ID unset the system must behave byte-for-byte as today and existing tests must pass unmodified.",
+  "description": "Live trading: real-money Alpaca account, fully Slack-managed from #live-trading-quant-research (tasks/prd-live-trading.md, US-050..US-060). Full research parity in the live channel, direct-to-live promotion, one-message arming (no confirmation), conservative guardrails (10% equity allocation, $500/order, $5k daily notional, 5% drawdown). IMPORTANT: the operator funds the live Alpaca account and vaults live API keys as their own FINAL step after every story passes — no story may require live credentials, a funded account, or the real live host; everything verifies with fakes, fixtures, and the paper account's shapes. Paper behavior is regression-frozen throughout: with SLACK_LIVE_CHANNEL_ID unset the system must behave byte-for-byte as today and existing tests must pass unmodified.",
   "userStories": [
     {
       "id": "US-001",
@@ -30,9 +30,9 @@
         "execution/limits.live.json exists: max_order_notional_usd 500, max_position_pct_equity 10, max_day_orders 60, max_total_positions 60 (same four required keys as paper; loader refuses missing/unknown keys with LimitsConfigError)",
         "execution/breaker.live.json exists: max_daily_notional_usd 5000, max_drawdown_pct 5 (loader refuses missing/unknown keys with BreakerConfigError)",
         "A live allocation config (new file or module constant module, e.g. execution/allocation.live.json) provides required key live_equity_allocation_pct = 10; loader validates 0 < pct <= 100 and refuses missing/unknown keys",
-        "Live breaker state path constants defined: ~/rdq-data/breaker-live/halt and ~/rdq-data/breaker-live/high_water_mark.json \u2014 distinct from paper's ~/rdq-data/breaker/; no fork of breaker.py or order_gate.py (existing parameterized ctors/loaders only)",
+        "Live breaker state path constants defined: ~/rdq-data/breaker-live/halt and ~/rdq-data/breaker-live/high_water_mark.json — distinct from paper's ~/rdq-data/breaker/; no fork of breaker.py or order_gate.py (existing parameterized ctors/loaders only)",
         "Unit test proves paper and live Breaker instances are independent: halting one leaves the other's .halted False; separate HWM files",
-        "Corrupt live HWM file raises BreakerStateError (refuse to trade), never silently re-seeds \u2014 same semantics as paper",
+        "Corrupt live HWM file raises BreakerStateError (refuse to trade), never silently re-seeds — same semantics as paper",
         "Typecheck passes",
         "Tests pass"
       ],
@@ -119,7 +119,7 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -146,7 +146,7 @@
         "A promotion function resolves its candidate: explicitly named run, run resolvable from the current thread, or (neither given) the current paper-promoted strategy copied in full including universe provenance",
         "Direct-run candidates must have status in PROMOTABLE_STATUSES ({'completed','stopped'}); anything else is a structured refusal naming the status",
         "Ambiguous references (multiple matching runs) or no candidate produce a structured refusal listing what was found; the function never guesses",
-        "Direct-run promotion derives universe from the workspace conf market: line via execution.signal.load_market and pins universe_tickers from the store instruments file \u2014 reusing the existing promotion.py provenance helpers, no re-derived logic",
+        "Direct-run promotion derives universe from the workspace conf market: line via execution.signal.load_market and pins universe_tickers from the store instruments file — reusing the existing promotion.py provenance helpers, no re-derived logic",
         "Direct-to-live promotion of a workspace lacking pred-refresh snapshot artifacts creates them via snapshot_pred_refresh() (conf_pred_refresh.yaml, pred_refresh.env, pred_refresh_params.pkl); an operator-pinned market in an existing conf_pred_refresh.yaml is warned about and not overwritten silently (same rule as ops/promote_fetched.py)",
         "Success writes the live slot (US-003) and a Decision Log entry (workspace id, universe + ticker count, allocation pct, triggering-message permalink); demote clears the slot and writes its own Decision Log entry",
         "All behavior covered by tests using fake state/store/Notion recorders",
@@ -159,7 +159,7 @@
     },
     {
       "id": "US-010",
-      "title": "promote_to_live / demote_live Slack tools \u2014 one message, no confirmation",
+      "title": "promote_to_live / demote_live Slack tools — one message, no confirmation",
       "description": "As the operator, I want a single 'promote to live' message in the live channel to arm live trading immediately, with the armed summary as after-the-fact confirmation.",
       "acceptanceCriteria": [
         "promote_to_live tool (live-channel-only) calls the US-009 backend and, on success, immediately posts the armed summary: workspace id, source (paper copy vs direct run), backtest headline metrics, universe with ticker count plus any label-vs-conf mismatch call-out, allocation pct, live limits and breaker values in force, and when the next live rebalance fires",
@@ -180,7 +180,7 @@
       "title": "Live Notion databases: bootstrap, config keys, schema doc",
       "description": "As the operator, I want Trade Ledger (Live) and Account Snapshots (Live) under a clearly-labeled LIVE Notion page so paper and live records can never be confused.",
       "acceptanceCriteria": [
-        "ops/bootstrap_notion.py idempotently creates or adopts by exact title a sibling page 'Automated AI Quant Investment \u2014 LIVE \ud83d\udd34' with an intro callout that it reflects a real-money account, then creates Trade Ledger (Live) and Account Snapshots (Live) with property schemas identical to the paper databases",
+        "ops/bootstrap_notion.py idempotently creates or adopts by exact title a sibling page 'Automated AI Quant Investment — LIVE 🔴' with an intro callout that it reflects a real-money account, then creates Trade Ledger (Live) and Account Snapshots (Live) with property schemas identical to the paper databases",
         "New database ids written to orchestrator/config.yaml under distinct keys; NotionDatabases dataclass (orchestrator/notion_recorder.py) gains the two fields; loading a config without them still works for paper-only operation",
         "docs/reference/notion-schema.md documents both live databases with sole writer = the live rebalancer; Decision Log remains shared with orchestrator as sole writer",
         "Paper page/databases untouched; bootstrap property-name cross-check tests extended to the live schemas",
@@ -197,8 +197,8 @@
       "title": "Live read-only status tools: check_live_account / check_live_orders / check_live_pnl",
       "description": "As the operator, I want to ask the bot about the live account in the live channel without the orchestrator identity ever gaining live broker access.",
       "acceptanceCriteria": [
-        "Live variants of check_account/check_orders/check_pnl registered live-channel-only; they read from the Live Notion databases (latest Account Snapshots (Live) / Trade Ledger (Live) rows) and orchestrator state \u2014 no AlpacaClient construction with the live host anywhere in orchestrator/",
-        "check_live_account reports the live slot's workspace, allocation pct, live halt/breaker state, and \u2014 when paper and live slots differ \u2014 names both workspaces",
+        "Live variants of check_account/check_orders/check_pnl registered live-channel-only; they read from the Live Notion databases (latest Account Snapshots (Live) / Trade Ledger (Live) rows) and orchestrator state — no AlpacaClient construction with the live host anywhere in orchestrator/",
+        "check_live_account reports the live slot's workspace, allocation pct, live halt/breaker state, and — when paper and live slots differ — names both workspaces",
         "Before any live data exists, each tool answers gracefully with a 'no live data yet' message rather than erroring",
         "docs/decisions.md records the read-path decision: option (b) Notion/state reads; orchestrator identity gains no live host access (PRD US-053 decision point)",
         "Paper check_account/check_orders/check_pnl unchanged and still paper-channel-only",
@@ -217,7 +217,7 @@
         "execution/rebalance.py accepts --live; it switches together: load_promoted_strategy_live (US-003), AlpacaClient(live base URL, allow_live=True), limits.live.json, breaker.live.json + live state dir (US-002), and the live Slack channel for every post",
         "Equity passed to diff.compute_orders is live account.equity * live_equity_allocation_pct / 100; cap_buys_to_buying_power still uses the account's real buying_power, never the scaled figure; diff.py itself stays account-agnostic (scaling happens in rebalance.py)",
         "client_order_id prefix is rdq-live-<date>-<side>-<symbol> in live mode (paper keeps rdq-<date>-...)",
-        "All _ABORT_ERRORS paths abort without trading and post the reason to the live channel; live halt file exits 0; unexpected exceptions notify then re-raise \u2014 same contract as paper",
+        "All _ABORT_ERRORS paths abort without trading and post the reason to the live channel; live halt file exits 0; unexpected exceptions notify then re-raise — same contract as paper",
         "Without --live, behavior is byte-for-byte today's: existing rebalance tests pass unmodified",
         "Integration-style test with a fake HTTP session drives --live end-to-end: scaled targets, live limits enforced, live order-id prefix, posts addressed to the live channel",
         "Typecheck passes",
@@ -233,7 +233,7 @@
       "description": "As the operator, I want live fills and daily state written to the Live Notion databases and summarized in the live channel, including a paper-vs-live comparison when both traded.",
       "acceptanceCriteria": [
         "--live writes each order/fill to Trade Ledger (Live) and the daily row to Account Snapshots (Live) (US-011 config keys); paper runs keep writing only to the paper databases",
-        "Daily summary posted to the live channel includes: orders, fills, skipped/deferred buys (insufficient_buying_power lines), equity, allocation pct in force, breaker state line, and universe-divergence warnings (advisory, never abort \u2014 same as paper)",
+        "Daily summary posted to the live channel includes: orders, fills, skipped/deferred buys (insufficient_buying_power lines), equity, allocation pct in force, breaker state line, and universe-divergence warnings (advisory, never abort — same as paper)",
         "When the paper account also produced a snapshot the same day, the live summary appends a one-line same-day paper-vs-live P/L comparison; absent paper data, the line is omitted without error",
         "Missing live Notion config keys cause --live to refuse to run at all (mirror of the existing missing-Trade-Ledger refusal), with a clear message",
         "Tests with fake Notion recorder and fake Slack cover ledger routing, summary content, and the comparison line's presence/absence",
@@ -286,7 +286,7 @@
         "The 'promoted ({ws}, live paper)' label (ops/gpu_pipeline.py:294) is replaced with slot-aware wording; the candidate-vs-promoted comparison names the slot compared against, and when paper and live slots differ the completion summary shows the candidate against both",
         "ops/notion_summary.py's prompt no longer asserts 'trades a paper account'; it receives and states the account context",
         "ops/gpu_watchdog.py alerts post to the channel that owns the run (falls back to the paper channel when unknown)",
-        "ConversationCore.gpu remains None-default; only app.py wires the real GpuBackend (no test may construct a real backend \u2014 2026-08-06 droplet incident)",
+        "ConversationCore.gpu remains None-default; only app.py wires the real GpuBackend (no test may construct a real backend — 2026-08-06 droplet incident)",
         "Typecheck passes",
         "Tests pass"
       ],
@@ -332,8 +332,8 @@
       "description": "As the operator, I want the real-money emergency procedures and the exact go-live order of operations written down before the first live order.",
       "acceptanceCriteria": [
         "ops/runbook.md gains a Live section: halt live from Slack; halt from the shell (exact live halt file path); flatten live (ops/flatten.py --live one-liner under rdq-exec-live); demote from Slack; rotate live keys in OneCLI; 'paper incident must not touch live (and vice versa)' note; tests/test_flatten.py required-sections check extended and passing",
-        "The operator checklist from tasks/prd-live-trading.md \u00a76 (Alpaca live onboarding/funding/keys, OneCLI vaulting + check_onecli probes, SLACK_LIVE_CHANNEL_ID, Notion LIVE page sharing, go-live steps) is copied into ops/runbook.md as the FINAL manual step after all code ships",
-        "Go-live order of operations documented: deploy all stories -> install_services + daemon-reload + restart rdq-orchestrator -> operator \u00a76 tasks -> review limits.live.json/breaker.live.json/allocation -> one promote-to-live message -> observe first 08:10 ET rebalance -> ops/reconcile.py --live",
+        "The operator checklist from tasks/prd-live-trading.md §6 (Alpaca live onboarding/funding/keys, OneCLI vaulting + check_onecli probes, SLACK_LIVE_CHANNEL_ID, Notion LIVE page sharing, go-live steps) is copied into ops/runbook.md as the FINAL manual step after all code ships",
+        "Go-live order of operations documented: deploy all stories -> install_services + daemon-reload + restart rdq-orchestrator -> operator §6 tasks -> review limits.live.json/breaker.live.json/allocation -> one promote-to-live message -> observe first 08:10 ET rebalance -> ops/reconcile.py --live",
         "README.md, PLAN.md Phase 6, and docs/decisions.md record the 2026-08-10 decisions (direct-to-live, no confirmation, full channel parity, conservative guardrails) as superseding 2026-08-05's paper-first/two-step decisions",
         "Typecheck passes",
         "Tests pass"
@@ -347,11 +347,11 @@
       "title": "End-to-end live-path dry run in fixture mode (final pre-go-live gate)",
       "description": "As the operator, I want the complete --live code path proven end-to-end against fixtures before I fund the account, so my manual Alpaca setup is the only remaining step.",
       "acceptanceCriteria": [
-        "An integration test drives run_rebalance with --live semantics end-to-end against a fake HTTP session (realistic /v2/account, /v2/positions, /v2/orders, /v2/calendar payloads), a temp state DB with a live slot, temp live guardrail configs, and fake Slack/Notion recorders \u2014 no network, no real accounts",
+        "An integration test drives run_rebalance with --live semantics end-to-end against a fake HTTP session (realistic /v2/account, /v2/positions, /v2/orders, /v2/calendar payloads), a temp state DB with a live slot, temp live guardrail configs, and fake Slack/Notion recorders — no network, no real accounts",
         "The test asserts: targets scaled to allocation pct, live limits and breaker consulted at live paths, orders carry the rdq-live- prefix, every submitted order has a Trade Ledger (Live) row (1:1 reconciliation of ledger vs submitted), daily snapshot row written, summary posted to the live channel",
         "A second scenario exercises a refusal path end-to-end (live halt file present -> exit 0, no orders, halt line posted to the live channel)",
         "A short section in ops/runbook.md names this test as the pre-go-live gate and the command to run it",
-        "Full test suite (make check) passes \u2014 this story is the final automated gate; everything after it is the operator's manual Alpaca/OneCLI/Slack/Notion setup from the runbook checklist",
+        "Full test suite (make check) passes — this story is the final automated gate; everything after it is the operator's manual Alpaca/OneCLI/Slack/Notion setup from the runbook checklist",
         "Typecheck passes",
         "Tests pass"
       ],

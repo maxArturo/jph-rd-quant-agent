@@ -104,3 +104,18 @@ Started: (not yet started)
   - US-007 wiring notes: poller digests/completion/buttons still post to self._channel_id — swap those `channel=self._channel_id` sites to `store.run_channel(run.thread_ts, self._channel_id)`; completion messages for live-channel runs must NOT attach the paper Promote button.
   - US-008/US-010 wiring: ConversationCore will need `live_channel_id` in the ctor; per-message channel already arrives in handle_message — pass it into new live tools the way _start_research_tool/_awaiting_hypothesis take it.
 ---
+## 2026-08-12 19:30 - US-007
+- Channel-aware background posters:
+  - poller.py `_run_home(run)` = `store.run_channel(run.thread_ts, self._channel_id)`; every run-scoped post now uses it: `_post_hypothesis` (buttons), `_narrate` (auto-approve narration, feedback verdicts, budget/identical-error notices), `_handle_completion` (summary post + `files_upload_v2` chart). Paper fallback preserved: NULL/legacy rows and unknown threads resolve to the ctor channel, so pre-migration behavior is byte-for-byte (all existing poller tests pass unmodified).
+  - Completion promote rule: promotable statuses with artifacts get the Block Kit Promote button ONLY when the run's home == the paper channel; otherwise (live-channel run) the summary text appends `LIVE_PROMOTABLE_NOTE` ("This run is promotable — say *promote to live* in this channel..."), no blocks. Failed runs get neither, as before.
+  - Button handlers needed NO code change: approve/reject/request_edit respond via Bolt's `say`, which is bound to the clicked message's channel (buttons only exist in the run's home channel). Proven by a real Bolt block_actions dispatch test with a live-channel container.
+- Tests (8 new): buttons post to live channel; approve round-trip resolves records for a live-channel run; edit round-trip keyed to live channel (paper-channel collision message NOT consumed, live message consumed); real Bolt dispatch replies in clicked channel; autonomous narration posts home; live completion -> live channel, no blocks, note present, chart upload to live channel; live FAILED run gets no note; paper run with STORED paper channel keeps the exact "Promote to paper trading" button. dispatch_action helper gained `channel: str = CHANNEL` (default keeps existing callers byte-identical).
+- Files changed: orchestrator/poller.py, orchestrator/CLAUDE.md, tests/test_poller.py.
+- Verified: make check fully green (ruff, pyright, 1120 passed / 3 skipped, +8 new); manual smoke drove a STOPPED (end_code -1) live-channel run through poll_once -> observed post+upload channel C0LIVECHAN, no blocks, promotable note as text tail, run row flipped to 'stopped'.
+- **Learnings for future iterations:**
+  - Bolt's `say` in block_actions handlers is bound to the CONTAINER's channel — button responses route correctly for free; only proactive `chat_postMessage`/`files_upload_v2` calls need explicit `_run_home` resolution. When adding any new poller post, use `_run_home(run)`, never `self._channel_id` directly.
+  - `store.run_channel` is one extra SQLite read per post — fine at poller cadence; don't cache it on the run object (Run rows are re-fetched every poll anyway).
+  - The live-vs-paper decision in `_handle_completion` is `channel == self._channel_id` (home == paper ctor channel), NOT "channel_id column is set" — paper runs stamped with the paper channel since US-005 must keep the button.
+  - test_poller.py's dispatch_action now takes `channel=`; test_slack_app exports CONFIG_LIVE/LIVE_CHANNEL for dual-channel tests (import them, don't redefine).
+  - US-010 wiring note: LIVE_PROMOTABLE_NOTE names the spoken phrase "promote to live" — keep the promote_to_live tool's trigger phrasing consistent with it.
+---
