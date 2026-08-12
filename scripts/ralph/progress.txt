@@ -62,3 +62,16 @@ Started: (not yet started)
   - test_promotion.py's `store` fixture pins module-level DBS config; plain `StateStore(tmp_path / ...)` tests that don't need Notion can skip it entirely (the new live-loader tests do).
   - US-009/US-010 wiring notes: live promotion backend should call set_promoted_strategy_live with the paper config keys + live_equity_allocation_pct (from execution.allocation.load_live_allocation), demote calls clear_promoted_strategy_live; both write Decision Log entries.
 ---
+## 2026-08-12 16:05 - US-004
+- SLACK_LIVE_CHANNEL_ID config plumbing:
+  - SlackConfig gains `live_channel_id: str | None = None` (frozen dataclass, default keeps equality with pre-live constructions so existing tests pass unmodified).
+  - load_slack_config reads SLACK_LIVE_CHANNEL_ID with the same env-over-file precedence as the required keys; absent, empty, or whitespace-only -> None (`(env or file or "").strip() or None`).
+  - Validation: when set and equal to SLACK_CHANNEL_ID, ConfigError naming BOTH vars ("live channel ... can never be the paper research channel").
+  - Docs: no .env.example in this repo — the config.py module docstring IS the config doc (added the var + "setting it ARMS live features" wording); orchestrator/CLAUDE.md Slack-env bullet updated too.
+- Files changed: orchestrator/config.py, orchestrator/CLAUDE.md, tests/test_slack_app.py.
+- Verified: make check fully green (ruff, pyright, 1095 passed / 3 skipped, +6 new); manual snippet drove absent/empty/set/process-override/equal-channels through load_slack_config against real tmp .env files (observed None/None/C2LIVE/CENV/ConfigError naming both vars).
+- **Learnings for future iterations:**
+  - There is NO .env.example in this repo; env vars are documented in orchestrator/config.py's module docstring (Required/Optional lists) — put new-var docs there.
+  - Adding an optional field WITH a default to the frozen SlackConfig keeps every existing `SlackConfig(...)`/equality test green — follow that shape for future optional config.
+  - US-006 wiring note: app.py's actionable check should accept `config.live_channel_id` when not None; tests/test_slack_app.py CONFIG constant is paper-only — build a second CONFIG_LIVE with live_channel_id set for dual-channel tests.
+---

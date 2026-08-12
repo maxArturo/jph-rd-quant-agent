@@ -69,8 +69,8 @@
         "Tests pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: SlackConfig.live_channel_id (None default), SLACK_LIVE_CHANNEL_ID in load_slack_config (env-over-file precedence, absent/empty/whitespace -> None, equal-to-SLACK_CHANNEL_ID raises ConfigError naming both vars); documented in config.py docstring + orchestrator/CLAUDE.md (no .env.example in repo); 6 new tests in test_slack_app.py."
     },
     {
       "id": "US-005",

@@ -14,6 +14,11 @@ Optional:
 - ``RDQ_TRUSTED_BOT_IDS`` — comma-separated Slack bot ids (B...) whose
   messages count as operator input when they @mention the bot (e.g. Claude
   in Slack). Empty by default.
+- ``SLACK_LIVE_CHANNEL_ID`` — channel id of #live-trading-quant-research.
+  Setting it ARMS the live-trading features: the bot listens in that channel
+  and live-only tools (promote-to-live, live halt/resume, ...) register.
+  Absent or empty means live features stay off and behavior is identical to
+  a paper-only deployment. Must differ from ``SLACK_CHANNEL_ID`` when set.
 """
 
 from __future__ import annotations
@@ -39,6 +44,8 @@ class SlackConfig:
     bot_token: str  # xoxb- (SLACK_OAUTH_TOKEN)
     app_token: str  # xapp- (SLACK_SOCKET_TOKEN)
     channel_id: str  # SLACK_CHANNEL_ID
+    # SLACK_LIVE_CHANNEL_ID; None = live features disarmed (paper-only).
+    live_channel_id: str | None = None
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -105,13 +112,29 @@ def load_slack_config(
         "channel's 'View channel details' pane",
     )
 
+    # Optional live channel: absent/empty -> None (live features disarmed).
+    live_channel_id = (
+        env.get("SLACK_LIVE_CHANNEL_ID") or file_values.get("SLACK_LIVE_CHANNEL_ID") or ""
+    ).strip() or None
+
     if not bot_token.startswith("xoxb-"):
         raise ConfigError("SLACK_OAUTH_TOKEN must be an xoxb- bot token (got a non-xoxb value).")
     if not app_token.startswith("xapp-"):
         raise ConfigError(
             "SLACK_SOCKET_TOKEN must be an xapp- app-level token (got a non-xapp value)."
         )
-    return SlackConfig(bot_token=bot_token, app_token=app_token, channel_id=channel_id)
+    if live_channel_id is not None and live_channel_id == channel_id:
+        raise ConfigError(
+            "SLACK_LIVE_CHANNEL_ID must name a different channel than SLACK_CHANNEL_ID "
+            f"(both are {channel_id!r}). The live channel controls a real-money account "
+            "and can never be the paper research channel."
+        )
+    return SlackConfig(
+        bot_token=bot_token,
+        app_token=app_token,
+        channel_id=channel_id,
+        live_channel_id=live_channel_id,
+    )
 
 
 def load_onecli_url(

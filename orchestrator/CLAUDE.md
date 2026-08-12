@@ -5,8 +5,11 @@
   naming the missing variable and where to set it). Extend that module for new
   settings instead of reading `os.environ` elsewhere.
 - Slack tokens come from the repo-root `.env` (SLACK_OAUTH_TOKEN xoxb-,
-  SLACK_SOCKET_TOKEN xapp-, SLACK_CHANNEL_ID). Never route Slack through the
-  OneCLI proxy and never vault these (docs/decisions.md 2026-07-08).
+  SLACK_SOCKET_TOKEN xapp-, SLACK_CHANNEL_ID; optional SLACK_LIVE_CHANNEL_ID
+  — setting it ARMS live-trading features and must differ from
+  SLACK_CHANNEL_ID; absent/empty means `live_channel_id=None` and paper-only
+  behavior). Never route Slack through the OneCLI proxy and never vault
+  these (docs/decisions.md 2026-07-08).
 - Persistent state goes through `orchestrator/state.py` (`StateStore`), not ad
   hoc sqlite3 calls. It opens a short-lived connection per method, so one
   instance is safe to share between Bolt handlers and background pollers —

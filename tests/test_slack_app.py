@@ -105,6 +105,47 @@ def test_parse_env_file_missing_file_is_empty(tmp_path: Path) -> None:
     assert parse_env_file(tmp_path / "nope.env") == {}
 
 
+# --- SLACK_LIVE_CHANNEL_ID (US-004) ---------------------------------------
+
+BASE_ENV = "SLACK_OAUTH_TOKEN=xoxb-a\nSLACK_SOCKET_TOKEN=xapp-b\nSLACK_CHANNEL_ID=C1\n"
+
+
+def test_live_channel_absent_yields_none(tmp_path: Path) -> None:
+    cfg = load_slack_config(env_file=write_env(tmp_path, BASE_ENV), environ={})
+    assert cfg.live_channel_id is None
+    # Identical to a pre-live config: the field just defaults to None.
+    assert cfg == SlackConfig(bot_token="xoxb-a", app_token="xapp-b", channel_id="C1")
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_live_channel_empty_yields_none(tmp_path: Path, empty: str) -> None:
+    env_file = write_env(tmp_path, BASE_ENV + f"SLACK_LIVE_CHANNEL_ID={empty}\n")
+    assert load_slack_config(env_file=env_file, environ={}).live_channel_id is None
+    cfg = load_slack_config(
+        env_file=write_env(tmp_path, BASE_ENV), environ={"SLACK_LIVE_CHANNEL_ID": empty}
+    )
+    assert cfg.live_channel_id is None
+
+
+def test_live_channel_read_from_env_file(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, BASE_ENV + "SLACK_LIVE_CHANNEL_ID=C2LIVE\n")
+    assert load_slack_config(env_file=env_file, environ={}).live_channel_id == "C2LIVE"
+
+
+def test_live_channel_process_environ_overrides_env_file(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, BASE_ENV + "SLACK_LIVE_CHANNEL_ID=CFILE\n")
+    cfg = load_slack_config(env_file=env_file, environ={"SLACK_LIVE_CHANNEL_ID": "CENV"})
+    assert cfg.live_channel_id == "CENV"
+
+
+def test_live_channel_equal_to_paper_channel_rejected(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, BASE_ENV + "SLACK_LIVE_CHANNEL_ID=C1\n")
+    with pytest.raises(ConfigError) as excinfo:
+        load_slack_config(env_file=env_file, environ={})
+    assert "SLACK_LIVE_CHANNEL_ID" in str(excinfo.value)
+    assert "SLACK_CHANNEL_ID" in str(excinfo.value)
+
+
 # --- message routing through Bolt ----------------------------------------
 
 
