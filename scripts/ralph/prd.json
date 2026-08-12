@@ -135,8 +135,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: halt_live_trading/resume_live_trading ToolSpecs registered only when live_channel_id set; live breaker on LIVE_HALT_FILE paths (default-constructed only when armed, injectable via live_breaker=); live tools require channel==live_channel_id (unknown refuses), paper tools refuse from the live channel with mirror pointer; format_live_trading_halted/resumed say LIVE; Decision Log types halt_live/resume_live; app.py wires config.live_channel_id; 14 new tests incl. both-direction file independence."
     },
     {
       "id": "US-009",

@@ -21,6 +21,8 @@ from execution.order_gate import Limits
 from execution.rebalance import breaker_state_line, format_daily_summary
 from orchestrator.conversation import (
     ConversationCore,
+    format_live_trading_halted,
+    format_live_trading_resumed,
     format_trading_halted,
     format_trading_resumed,
 )
@@ -28,7 +30,7 @@ from orchestrator.llm import ModelRouter
 from orchestrator.notion_client import NotionClient
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.state import StateStore
-from tests.test_conversation import THREAD, RecordingSay, StubLauncher
+from tests.test_conversation import THREAD, ChannelSay, RecordingSay, StubLauncher
 from tests.test_llm import FakeClient, message, text_block, tool_use_block
 from tests.test_notion_client import FakeSession
 from tests.test_notion_recorder import DBS, page_response, plain_text
@@ -39,6 +41,7 @@ from tests.test_rebalance import (
     write_bins,
 )
 from tests.test_signal import write_calendar, write_conf, write_pred
+from tests.test_slack_app import CHANNEL, LIVE_CHANNEL
 
 
 def make_breaker(tmp_path: Path) -> Breaker:
@@ -323,3 +326,265 @@ def test_daily_summary_includes_breaker_state_line(tmp_path: Path) -> None:
     assert lines.index("gate/breaker rejections: none") < lines.index(
         "breaker: HALTED — weekend maintenance (resume trading to lift it)"
     )
+
+
+# --- US-008: halt_live_trading / resume_live_trading ------------------------------
+
+
+def make_live_breaker(tmp_path: Path) -> Breaker:
+    return Breaker(
+        BreakerConfig(max_daily_notional_usd=5_000.0, max_drawdown_pct=5.0),
+        halt_file=tmp_path / "breaker-live" / "halt",
+        high_water_mark_file=tmp_path / "breaker-live" / "hwm.json",
+    )
+
+
+def make_live_core(
+    tmp_path: Path,
+    client: FakeClient,
+    paper_breaker: Breaker,
+    live_breaker: Breaker,
+    recorder: NotionRecorder | None = None,
+) -> ConversationCore:
+    """Core with the live channel armed: paper + live breakers on tmp paths."""
+    return ConversationCore(
+        store=StateStore(db_path=tmp_path / "conv.sqlite"),
+        router=ModelRouter(client=client),
+        rdagent=StubLauncher(),
+        recorder=recorder,
+        breaker=paper_breaker,
+        channel_id=CHANNEL,
+        live_channel_id=LIVE_CHANNEL,
+        live_breaker=live_breaker,
+    )
+
+
+def live_halt_script(reason: str | None, final_reply: str = "Live halted.") -> list[Any]:
+    args: dict[str, Any] = {} if reason is None else {"reason": reason}
+    return [
+        message("tool_use", [tool_use_block("tu_lhalt", "halt_live_trading", args)]),
+        message("end_turn", [text_block(final_reply)]),
+    ]
+
+
+def live_resume_script(final_reply: str = "Live resumed.") -> list[Any]:
+    return [
+        message("tool_use", [tool_use_block("tu_lresume", "resume_live_trading", {})]),
+        message("end_turn", [text_block(final_reply)]),
+    ]
+
+
+def tool_names(client: FakeClient) -> list[str]:
+    return [tool["name"] for tool in client.stream_calls[0]["tools"]]
+
+
+def tool_error(client: FakeClient) -> dict[str, Any]:
+    """The is_error tool_result fed back to the model on the second call."""
+    result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert result["is_error"] is True
+    return result
+
+
+def test_live_tools_not_registered_without_live_channel(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=[message("end_turn", [text_block("hi")])])
+    core = make_core(tmp_path, client, make_breaker(tmp_path))
+
+    core.handle_message(THREAD, "hello", RecordingSay())
+
+    names = tool_names(client)
+    assert "halt_live_trading" not in names
+    assert "resume_live_trading" not in names
+
+
+def test_live_tools_registered_when_live_channel_armed(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=[message("end_turn", [text_block("hi")])])
+    core = make_live_core(
+        tmp_path, client, make_breaker(tmp_path), make_live_breaker(tmp_path)
+    )
+
+    core.handle_message(THREAD, "hello", ChannelSay(LIVE_CHANNEL))
+
+    names = tool_names(client)
+    assert "halt_live_trading" in names
+    assert "resume_live_trading" in names
+
+
+def test_halt_live_trading_halts_live_and_leaves_paper_file_absent(tmp_path: Path) -> None:
+    paper = make_breaker(tmp_path)
+    live = make_live_breaker(tmp_path)
+    client = FakeClient(judgment_messages=live_halt_script("bad fill quality"))
+    core = make_live_core(tmp_path, client, paper, live)
+    say = ChannelSay(LIVE_CHANNEL)
+
+    reply = core.handle_message(THREAD, "halt live trading", say)
+
+    assert live.halted
+    assert live.halt_note == "bad fill quality"
+    assert not paper.halted
+    assert not paper.halt_file.exists()  # live halt never touches paper's file
+    assert say.calls[0]["text"] == format_live_trading_halted(
+        "bad fill quality", live.halt_file
+    )
+    assert "LIVE" in say.calls[0]["text"]  # unmistakably live wording
+    assert say.calls[0]["text"] != format_trading_halted("bad fill quality", live.halt_file)
+    assert reply == "Live halted."
+
+
+def test_paper_halt_leaves_live_file_absent(tmp_path: Path) -> None:
+    paper = make_breaker(tmp_path)
+    live = make_live_breaker(tmp_path)
+    client = FakeClient(judgment_messages=halt_script("flash crash"))
+    core = make_live_core(tmp_path, client, paper, live)
+
+    core.handle_message(THREAD, "halt trading", ChannelSay(CHANNEL))
+
+    assert paper.halted
+    assert not live.halted
+    assert not live.halt_file.exists()  # paper halt never touches live's file
+
+
+def test_halt_live_trading_refused_from_paper_channel(tmp_path: Path) -> None:
+    live = make_live_breaker(tmp_path)
+    client = FakeClient(judgment_messages=live_halt_script("x", "Refused."))
+    core = make_live_core(tmp_path, client, make_breaker(tmp_path), live)
+
+    core.handle_message(THREAD, "halt live trading", ChannelSay(CHANNEL))
+
+    error = tool_error(client)
+    assert LIVE_CHANNEL in error["content"]  # pointer to the live channel
+    assert "REAL-MONEY" in error["content"]
+    assert not live.halted
+    assert not live.halt_file.exists()
+
+
+def test_halt_live_trading_refused_from_unknown_channel(tmp_path: Path) -> None:
+    """Real-money control demands positive channel identification."""
+    live = make_live_breaker(tmp_path)
+    client = FakeClient(judgment_messages=live_halt_script("x", "Refused."))
+    core = make_live_core(tmp_path, client, make_breaker(tmp_path), live)
+
+    core.handle_message(THREAD, "halt live trading", RecordingSay())
+
+    assert LIVE_CHANNEL in tool_error(client)["content"]
+    assert not live.halted
+
+
+def test_paper_halt_trading_refused_from_live_channel(tmp_path: Path) -> None:
+    paper = make_breaker(tmp_path)
+    client = FakeClient(judgment_messages=halt_script("x", "Refused."))
+    core = make_live_core(tmp_path, client, paper, make_live_breaker(tmp_path))
+
+    core.handle_message(THREAD, "halt trading", ChannelSay(LIVE_CHANNEL))
+
+    error = tool_error(client)
+    assert CHANNEL in error["content"]  # mirror pointer to the paper channel
+    assert "halt_live_trading" in error["content"]
+    assert not paper.halted
+    assert not paper.halt_file.exists()
+
+
+def test_paper_resume_trading_refused_from_live_channel(tmp_path: Path) -> None:
+    paper = make_breaker(tmp_path)
+    paper.halt("paper maintenance")
+    client = FakeClient(judgment_messages=resume_script("Refused."))
+    core = make_live_core(tmp_path, client, paper, make_live_breaker(tmp_path))
+
+    core.handle_message(THREAD, "resume trading", ChannelSay(LIVE_CHANNEL))
+
+    error = tool_error(client)
+    assert "resume_live_trading" in error["content"]
+    assert paper.halted  # the paper halt survives the refused call
+    assert paper.halt_note == "paper maintenance"
+
+
+def test_resume_live_trading_clears_live_only(tmp_path: Path) -> None:
+    paper = make_breaker(tmp_path)
+    paper.halt("paper note")
+    live = make_live_breaker(tmp_path)
+    live.halt("live note")
+    client = FakeClient(judgment_messages=live_resume_script())
+    core = make_live_core(tmp_path, client, paper, live)
+    say = ChannelSay(LIVE_CHANNEL)
+
+    reply = core.handle_message(THREAD, "resume live trading", say)
+
+    assert not live.halted
+    assert not live.halt_file.exists()
+    assert paper.halted  # resuming live never lifts the paper halt
+    assert say.calls[0]["text"] == format_live_trading_resumed(live.halt_file)
+    assert "LIVE" in say.calls[0]["text"]
+    assert reply == "Live resumed."
+
+
+def test_resume_live_trading_refused_from_paper_channel(tmp_path: Path) -> None:
+    live = make_live_breaker(tmp_path)
+    live.halt("live note")
+    client = FakeClient(judgment_messages=live_resume_script("Refused."))
+    core = make_live_core(tmp_path, client, make_breaker(tmp_path), live)
+
+    core.handle_message(THREAD, "resume live trading", ChannelSay(CHANNEL))
+
+    assert LIVE_CHANNEL in tool_error(client)["content"]
+    assert live.halted  # the live halt survives the refused call
+
+
+def test_halt_live_trading_when_already_halted_keeps_note(tmp_path: Path) -> None:
+    live = make_live_breaker(tmp_path)
+    live.halt("original live note")
+    client = FakeClient(judgment_messages=live_halt_script("new note", "Already halted."))
+    core = make_live_core(tmp_path, client, make_breaker(tmp_path), live)
+
+    core.handle_message(THREAD, "halt live trading", ChannelSay(LIVE_CHANNEL))
+
+    assert live.halt_note == "original live note"  # not overwritten
+    error = tool_error(client)
+    assert "already halted" in error["content"]
+    assert "resume_live_trading" in error["content"]
+
+
+def test_resume_live_trading_when_not_halted_errors(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=live_resume_script("Nothing halted."))
+    core = make_live_core(
+        tmp_path, client, make_breaker(tmp_path), make_live_breaker(tmp_path)
+    )
+
+    core.handle_message(THREAD, "resume live trading", ChannelSay(LIVE_CHANNEL))
+
+    assert "not halted" in tool_error(client)["content"]
+
+
+def test_halt_live_trading_writes_decision_log_row(tmp_path: Path) -> None:
+    live = make_live_breaker(tmp_path)
+    recorder, session = make_recorder(tmp_path, [page_response("page-dec")])
+    client = FakeClient(judgment_messages=live_halt_script("bad fill quality"))
+    core = make_live_core(
+        tmp_path, client, make_breaker(tmp_path), live, recorder=recorder
+    )
+
+    core.handle_message(THREAD, "halt live trading", ChannelSay(LIVE_CHANNEL))
+
+    (call,) = session.calls
+    props = call["json"]["properties"]
+    assert plain_text(props["Decision"], "title") == "LIVE trading halted"
+    assert props["Type"] == {"select": {"name": "halt_live"}}
+    details = plain_text(props["Details"], "rich_text")
+    assert "bad fill quality" in details
+    assert str(live.halt_file) in details
+
+
+def test_resume_live_trading_writes_decision_log_row(tmp_path: Path) -> None:
+    live = make_live_breaker(tmp_path)
+    live.halt("bad fill quality")
+    recorder, session = make_recorder(tmp_path, [page_response("page-dec")])
+    client = FakeClient(judgment_messages=live_resume_script())
+    core = make_live_core(
+        tmp_path, client, make_breaker(tmp_path), live, recorder=recorder
+    )
+
+    core.handle_message(THREAD, "resume live trading", ChannelSay(LIVE_CHANNEL))
+
+    (call,) = session.calls
+    props = call["json"]["properties"]
+    assert plain_text(props["Decision"], "title") == "LIVE trading resumed"
+    assert props["Type"] == {"select": {"name": "resume_live"}}
+    assert "bad fill quality" in plain_text(props["Details"], "rich_text")

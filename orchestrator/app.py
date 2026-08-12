@@ -330,6 +330,9 @@ def main() -> None:
         gpu=GpuBackend(),
         # New run rows record their originating channel (US-005).
         channel_id=config.channel_id,
+        # Arms the live halt/resume tools (US-008); None keeps them
+        # unregistered and the core constructs no live breaker.
+        live_channel_id=config.live_channel_id,
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),

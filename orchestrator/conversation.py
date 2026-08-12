@@ -442,6 +442,26 @@ def format_trading_resumed(halt_file: Path) -> str:
     )
 
 
+def format_live_trading_halted(note: str, halt_file: Path) -> str:
+    """Slack mrkdwn confirmation posted when the operator halts LIVE trading."""
+    return (
+        ":rotating_light: *LIVE trading halted — real-money account.*\n"
+        f"*Reason:* {note}\n"
+        f"*Halt file:* `{halt_file}`\n"
+        "Every LIVE rebalance run will post a halted notice and submit no"
+        " orders until you resume live trading. Paper trading is unaffected."
+    )
+
+
+def format_live_trading_resumed(halt_file: Path) -> str:
+    """Slack mrkdwn confirmation posted when the operator resumes LIVE trading."""
+    return (
+        ":rotating_light: *LIVE trading resumed — real-money account.*\n"
+        f"*Halt file:* `{halt_file}` removed — the next LIVE rebalance will"
+        " trade the real-money account again. Paper trading is unaffected."
+    )
+
+
 def _signed_usd(value: float) -> str:
     return f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
 
@@ -582,6 +602,8 @@ class ConversationCore:
         promotions: PromotionManager | None = None,
         gpu: GpuRunner | None = None,
         channel_id: str | None = None,
+        live_channel_id: str | None = None,
+        live_breaker: TradingBreaker | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -604,6 +626,22 @@ class ConversationCore:
             from execution.alpaca_client import AlpacaClient
 
             broker = AlpacaClient()
+        if live_channel_id is not None and live_breaker is None:
+            # The LIVE kill switch (US-008): ~/rdq-data/breaker-live/halt,
+            # shared with the live rebalancer — never paper's paths. Only
+            # constructed when the live channel is armed, so paper-only
+            # deployments never touch live state.
+            from execution.breaker import (
+                LIVE_CONFIG_PATH,
+                LIVE_HALT_FILE,
+                LIVE_HWM_FILE,
+                Breaker,
+                load_breaker_config,
+            )
+
+            live_breaker = Breaker(
+                load_breaker_config(LIVE_CONFIG_PATH), LIVE_HALT_FILE, LIVE_HWM_FILE
+            )
         self._store = store
         self._router = router
         self._rdagent: ResearchLauncher = rdagent
@@ -628,6 +666,10 @@ class ConversationCore:
         # None (tests, legacy wiring) leaves the column NULL, which every
         # reader treats as the paper channel.
         self._channel_id = channel_id
+        # Live-trading channel (US-008): None keeps every live tool
+        # unregistered — the model never sees them in a paper-only deployment.
+        self._live_channel_id = live_channel_id
+        self._live_breaker = live_breaker
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
     def handle_message(
@@ -657,13 +699,16 @@ class ConversationCore:
             self._resume_run_tool(thread_ts, say),
             self._set_universe_tool(thread_ts, say),
             self._confirm_universe_tool(thread_ts, say),
-            self._halt_trading_tool(thread_ts, say),
-            self._resume_trading_tool(thread_ts, say),
+            self._halt_trading_tool(thread_ts, say, channel),
+            self._resume_trading_tool(thread_ts, say, channel),
             self._check_research_status_tool(thread_ts),
             self._check_account_tool(),
             self._check_orders_tool(),
             self._check_pnl_tool(),
         ]
+        if self._live_channel_id is not None:
+            tools.append(self._halt_live_trading_tool(thread_ts, say, channel))
+            tools.append(self._resume_live_trading_tool(thread_ts, say, channel))
         if self._interactions is not None:
             tools.append(self._approve_hypothesis_tool(thread_ts, say, channel))
             tools.append(self._reject_hypothesis_tool(thread_ts, say, channel))
@@ -1082,8 +1127,41 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _halt_trading_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+    def _refuse_paper_tool_in_live_channel(
+        self, channel: str | None, tool: str, live_tool: str
+    ) -> None:
+        """Refuse a PAPER kill-switch tool invoked from the live channel (US-008)."""
+        if self._live_channel_id is not None and channel == self._live_channel_id:
+            home = f" (<#{self._channel_id}>)" if self._channel_id else ""
+            raise ValueError(
+                f"refusing: {tool} is the PAPER account's kill switch and only"
+                f" works from the paper research channel{home}. In this live"
+                f" channel, {live_tool} controls the real-money account."
+            )
+
+    def _require_live_channel(self, channel: str | None, tool: str) -> TradingBreaker:
+        """Gate a LIVE kill-switch tool to the live channel; returns the live breaker.
+
+        Real-money control demands positive identification: an unknown
+        channel (missing on ``say``) refuses too, unlike the permissive
+        paper-side guards.
+        """
+        if channel != self._live_channel_id:
+            raise ValueError(
+                f"refusing: {tool} controls the REAL-MONEY live account and"
+                " only works from the live-trading channel"
+                f" (<#{self._live_channel_id}>) — ask again there."
+                " (The paper account's kill switch is halt_trading/resume_trading.)"
+            )
+        if self._live_breaker is None:  # ctor invariant: armed => wired
+            raise ValueError("live breaker is not wired — cannot touch live trading")
+        return self._live_breaker
+
+    def _halt_trading_tool(self, thread_ts: str, say: SayFn, channel: str | None) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
+            self._refuse_paper_tool_in_live_channel(
+                channel, "halt_trading", "halt_live_trading"
+            )
             if self._breaker.halted:
                 note = self._breaker.halt_note
                 detail = f" ({note})" if note else ""
@@ -1120,9 +1198,12 @@ class ConversationCore:
             handler=handler,
         )
 
-    def _resume_trading_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
+    def _resume_trading_tool(self, thread_ts: str, say: SayFn, channel: str | None) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
             del args  # no inputs — removes the halt file
+            self._refuse_paper_tool_in_live_channel(
+                channel, "resume_trading", "resume_live_trading"
+            )
             if not self._breaker.halted:
                 raise ValueError(
                     "trading is not halted — there is no halt file to remove"
@@ -1152,6 +1233,96 @@ class ConversationCore:
                 " written by halt_trading. Call it only when the operator"
                 " explicitly asks to resume trading; it does not touch research"
                 " runs (that is resume_run)."
+            ),
+            input_schema=RESUME_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _halt_live_trading_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None
+    ) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            live = self._require_live_channel(channel, "halt_live_trading")
+            if live.halted:
+                note = live.halt_note
+                detail = f" ({note})" if note else ""
+                raise ValueError(
+                    f"LIVE trading is already halted{detail} —"
+                    " resume_live_trading lifts it"
+                )
+            reason = str(args.get("reason") or "").strip()
+            note = reason or f"halted from Slack thread {thread_ts}"
+            live.halt(note)
+            say(text=format_live_trading_halted(note, live.halt_file), thread_ts=thread_ts)
+            if self._recorder is not None:
+                self._recorder.record_decision(
+                    title="LIVE trading halted",
+                    decision_type="halt_live",
+                    details=f"Reason: {note}. Halt file: {live.halt_file}.",
+                    thread_ts=thread_ts,
+                )
+            logger.info("LIVE trading halted from thread %s: %s", thread_ts, note)
+            return (
+                "The LIVE breaker halt file was written: every live rebalance"
+                " run now exits with a halted notice and submits no orders"
+                " until resume_live_trading. Paper trading is unaffected. The"
+                " halt notice was posted. Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="halt_live_trading",
+            description=(
+                "HALT all LIVE (real-money) trading immediately by writing the"
+                " live circuit-breaker halt file — the live rebalancer submits"
+                " no orders while it exists. Paper trading is untouched"
+                " (halt_trading is the paper kill switch). Call it only when"
+                " the operator explicitly asks to halt or stop live trading,"
+                " and only from the live-trading channel."
+            ),
+            input_schema=HALT_TRADING_SCHEMA,
+            handler=handler,
+        )
+
+    def _resume_live_trading_tool(
+        self, thread_ts: str, say: SayFn, channel: str | None
+    ) -> ToolSpec:
+        def handler(args: dict[str, Any]) -> str:
+            del args  # no inputs — removes the live halt file
+            live = self._require_live_channel(channel, "resume_live_trading")
+            if not live.halted:
+                raise ValueError(
+                    "LIVE trading is not halted — there is no live halt file to remove"
+                )
+            note = live.halt_note
+            live.clear_halt()
+            say(text=format_live_trading_resumed(live.halt_file), thread_ts=thread_ts)
+            if self._recorder is not None:
+                was = f" (was: {note})" if note else ""
+                self._recorder.record_decision(
+                    title="LIVE trading resumed",
+                    decision_type="resume_live",
+                    details=f"Live halt lifted{was}. Halt file {live.halt_file} removed.",
+                    thread_ts=thread_ts,
+                )
+            logger.info(
+                "LIVE trading resumed from thread %s (halt note was: %s)", thread_ts, note
+            )
+            return (
+                "The LIVE breaker halt file was removed: the next live"
+                " rebalance will trade the real-money account again. Paper"
+                " trading is unaffected. The resume notice was posted."
+                " Confirm briefly to the operator."
+            )
+
+        return ToolSpec(
+            name="resume_live_trading",
+            description=(
+                "RESUME LIVE (real-money) trading by removing the live"
+                " circuit-breaker halt file written by halt_live_trading."
+                " Paper trading is untouched (resume_trading is the paper"
+                " kill switch). Call it only when the operator explicitly"
+                " asks to resume live trading, and only from the live-trading"
+                " channel."
             ),
             input_schema=RESUME_TRADING_SCHEMA,
             handler=handler,

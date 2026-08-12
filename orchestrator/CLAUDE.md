@@ -251,6 +251,20 @@
   halted) so the model relays state instead of clobbering the existing halt
   note, and both write a Decision Log row via
   `NotionRecorder.record_decision` (types `halt`/`resume`).
+- Live halt/resume (US-008): `halt_live_trading`/`resume_live_trading` are
+  registered ONLY when the core's `live_channel_id` is set (the model never
+  sees them in a paper-only deployment) and flip a SECOND breaker on the
+  live paths (`breaker.LIVE_HALT_FILE` etc.; the core default-constructs it
+  only when the live channel is armed — tests inject one over tmp paths via
+  `live_breaker=`). Channel gating is asymmetric BY DESIGN: the live tools
+  require positive identification (`channel == live_channel_id`; an unknown
+  channel from a fake/mock refuses too), while paper
+  halt_trading/resume_trading refuse only a POSITIVELY-identified live
+  channel (unknown stays permissive — the paper-freeze rule). Decision Log
+  types are `halt_live`/`resume_live`; formatters must say LIVE
+  unmistakably. Follow this shape (registration gate +
+  `_require_live_channel` + `_refuse_paper_tool_in_live_channel`) for every
+  future live-only tool (US-010's promote_to_live/demote_live).
 
 - Run-completion output lives in `orchestrator/summary.py`: `load_metrics`
   (qlib_res.csv is a pandas Series csv — metric name index, one value

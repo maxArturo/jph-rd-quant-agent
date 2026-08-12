@@ -119,3 +119,18 @@ Started: (not yet started)
   - test_poller.py's dispatch_action now takes `channel=`; test_slack_app exports CONFIG_LIVE/LIVE_CHANNEL for dual-channel tests (import them, don't redefine).
   - US-010 wiring note: LIVE_PROMOTABLE_NOTE names the spoken phrase "promote to live" — keep the promote_to_live tool's trigger phrasing consistent with it.
 ---
+## 2026-08-12 20:40 - US-008
+- halt_live_trading / resume_live_trading on the live breaker paths:
+  - ConversationCore ctor gains `live_channel_id` + `live_breaker` (TradingBreaker); the live breaker is default-constructed on breaker.LIVE_* paths ONLY when the live channel is armed, so paper-only deployments never touch ~/rdq-data/breaker-live/. app.py wires config.live_channel_id.
+  - Tools registered only when live_channel_id is set (paper-only cores never expose them). Channel gating asymmetric: `_require_live_channel` demands channel == live_channel_id (unknown/say-without-channel refuses — real money needs positive ID); `_refuse_paper_tool_in_live_channel` makes paper halt_trading/resume_trading refuse ONLY a positively-identified live channel (unknown stays permissive = paper freeze). Refusal messages point at the other channel/tool pair in both directions.
+  - format_live_trading_halted/format_live_trading_resumed say "LIVE ... real-money account" (:rotating_light:), distinct from paper's wording; handlers mirror paper semantics (already-halted keeps note, not-halted resume errors) + Decision Log rows (types halt_live/resume_live).
+  - prompts.py halt bullet extended: live tools are the real-money account's SEPARATE kill switch, each pair channel-bound.
+- Files changed: orchestrator/{conversation.py,app.py,prompts.py,CLAUDE.md}, tests/test_trading_halt.py.
+- Verified: make check fully green (ruff, pyright, 1134 passed / 3 skipped, +14 new); manual smoke drove live halt from live channel (live halt file written, paper's absent), live halt refused from paper channel AND from unknown channel, paper halt refused from live channel, live resume (paper halt untouched), and a paper-only core exposing no live tools.
+- **Learnings for future iterations:**
+  - Live-only tools pattern is now established in conversation.py: registration gate on self._live_channel_id + _require_live_channel(channel, tool) (returns the live breaker) + _refuse_paper_tool_in_live_channel for the paper twin. US-010's promote_to_live/demote_live should reuse all three.
+  - Paper tool builders now take `channel` (_halt_trading_tool/_resume_trading_tool are 3-arg) — any new paper tool with a live twin needs the channel param threaded the same way.
+  - tests/test_trading_halt.py has make_live_core/make_live_breaker/live_halt_script/live_resume_script + tool_names()/tool_error() helpers; ChannelSay lives in tests.test_conversation, CHANNEL/LIVE_CHANNEL in tests.test_slack_app.
+  - HALT_TRADING_SCHEMA/RESUME_TRADING_SCHEMA are reused verbatim by the live tools (same reason-string / no-input shapes) — don't fork schemas that don't differ.
+  - Notion Decision Log "Type" select auto-creates new options (halt_live/resume_live needed no schema change); recorder tests assert the exact select name.
+---

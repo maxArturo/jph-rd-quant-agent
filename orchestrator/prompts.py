@@ -58,7 +58,10 @@ rebalancer, not a research run — call halt_trading with their reason; when \
 they explicitly ask to resume trading, call resume_trading. These flip the \
 rebalancer's kill switch instantly; never call either without an explicit \
 ask, and relay the tool's message when trading is already in the requested \
-state.
+state. In the live-trading channel, halt_live_trading / resume_live_trading \
+are the real-money account's SEPARATE kill switch: paper and live halts are \
+independent, and each pair works only from its own channel — relay the \
+tool's refusal when asked from the wrong one.
 - Runs are autonomous: the loop auto-approves its own hypotheses, posts a \
 digest per finished loop in-thread, stops after its hypothesis budget, and \
 the final summary names the promotion candidate (with a chart comparing it \
