@@ -114,6 +114,10 @@ class TestPaperOnlyGuard:
         client, _, _ = make_client([], base_url="http://127.0.0.1:8123/")
         assert client.base_url == "http://127.0.0.1:8123"
 
+    def test_live_host_refused_with_explicit_false_flag(self) -> None:
+        with pytest.raises(ValueError, match="allow_live=True"):
+            AlpacaClient(base_url="https://api.alpaca.markets", allow_live=False)
+
     def test_no_apca_headers_in_source(self) -> None:
         source = (
             pathlib.Path(__file__).resolve().parents[1] / "execution" / "alpaca_client.py"
@@ -122,6 +126,47 @@ class TestPaperOnlyGuard:
             "APCA-API-KEY-ID / APCA-API-SECRET-KEY header", ""
         )
         assert "headers=" not in source  # proxy injects credentials; client sends none
+
+
+class TestLiveOptIn:
+    def test_live_host_accepted_with_allow_live(self) -> None:
+        client, _, _ = make_client(
+            [], base_url="https://api.alpaca.markets", allow_live=True
+        )
+        assert client.base_url == "https://api.alpaca.markets"
+
+    def test_paper_host_works_with_allow_live_flag(self) -> None:
+        client, _, _ = make_client([], allow_live=True)
+        assert client.base_url == "https://paper-api.alpaca.markets"
+
+    def test_default_construction_is_unchanged_paper(self) -> None:
+        client, _, _ = make_client([])
+        assert client.base_url == "https://paper-api.alpaca.markets"
+
+    def test_live_client_requests_hit_the_live_host(self) -> None:
+        client, session, _ = make_client(
+            [FakeResponse(200, ACCOUNT_ROW)],
+            base_url="https://api.alpaca.markets",
+            allow_live=True,
+        )
+        client.get_account()
+        assert session.calls[0]["url"] == "https://api.alpaca.markets/v2/account"
+
+    def test_auth_error_on_live_host_names_live_identity(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(401, {"code": 40110000, "message": "access key verification failed"})],
+            base_url="https://api.alpaca.markets",
+            allow_live=True,
+        )
+        with pytest.raises(AlpacaAuthError) as excinfo:
+            client.get_account()
+        message = str(excinfo.value)
+        assert "rdq-exec-live" in message
+        assert "api.alpaca.markets" in message
+        assert "ops/setup_onecli.sh" in message
+        # Live guidance must never point the operator at anything paper.
+        assert "paper" not in message
+        assert "rdq-exec-paper" not in message
 
 
 class TestAccount:

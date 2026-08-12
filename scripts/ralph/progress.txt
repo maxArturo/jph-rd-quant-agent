@@ -13,3 +13,19 @@ Started: (not yet started)
 - LLM calls go through LiteLLM under `onecli run` (placeholder keys OK — proxy overrides headers). claude-sonnet-5 rejects temperature!=1; JSON mode may return ```json fences. See research/CLAUDE.md.
 - PRD source for this run: tasks/prd-live-trading.md (US-050..US-060 there map onto the finer-grained stories in prd.json).
 - NEVER run the real test-suite path that provisions GPU droplets: ConversationCore.gpu stays None-default; only app.py wires the real GpuBackend (2026-08-06 incident).
+
+## 2026-08-12 12:45 - US-001
+- AlpacaClient live-host support behind explicit `allow_live` opt-in:
+  - `allow_live: bool = False` keyword added to `AlpacaClient.__init__`; live host (api.alpaca.markets) still raises ValueError without it (message keeps the "paper-only" phrase the existing test greps for, and now names allow_live=True + who may pass it).
+  - AlpacaAuthError guidance is host-aware: `_onecli_identity`/`_secrets_host` chosen at construction (live host -> rdq-exec-live + api.alpaca.markets; everything else incl. test stubs -> rdq-exec-paper + paper host). No hardcoded "paper" in the message f-string.
+  - Module + class docstrings rewritten for opt-in semantics; execution/CLAUDE.md first bullet rewritten (LIVE IS OPT-IN, only live rebalance/reconcile/flatten may pass the flag, orchestrator never).
+  - New tests: TestLiveOptIn (live accepted with flag, paper works with/without flag, default unchanged, live requests hit live host, live auth error names rdq-exec-live and contains no "paper" substring) + explicit allow_live=False refusal test. All existing tests pass unmodified.
+- Files changed: execution/alpaca_client.py, execution/CLAUDE.md, tests/test_alpaca_client.py; plus two pre-existing gate breakages fixed: execution/pred_refresh.py:511 (E501 from the US-049 merge) and execution/pred_refresh_predict.py:60 (torch is docker-only -> pyright: ignore[reportMissingImports]).
+- Verified: `make check` fully green (ruff, pyright, 1054 passed / 3 skipped); manually drove refusal, allow_live construction, and identity selection via a python snippet (observed refusal message, live base_url + rdq-exec-live, paper default + rdq-exec-paper).
+- **Learnings for future iterations:**
+  - This worktree's .venv was bootstrapped incomplete: rdagent missing (run `bash research/install.sh` — installs pinned commit + pydantic-ai-slim 1.107.0) and git-ignored env files absent. Copy `/home/nanoclaw/rd-agent-q/research/.env` and `/home/nanoclaw/rd-agent-q/.env` into the worktree or tests/test_run_us_quant.py --check tests fail.
+  - `make check` was ALREADY red on the merge base (E501 in pred_refresh.py, missing torch import for pyright) — don't assume a clean gate at iteration start; both are fixed as of this commit.
+  - tests/test_alpaca_client.py greps source: no "APCA-API-KEY-ID" (outside the one docstring phrase) and no "headers=" anywhere in execution/alpaca_client.py — never add either.
+  - test_live_host_is_refused matches "paper-only" in the ValueError — keep that phrase if the refusal message changes again.
+  - Client auth guidance derives identity/secrets-host at construction time (self._onecli_identity / self._secrets_host) — reuse those fields if later stories need host-aware wording.
+---

@@ -19,8 +19,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-12: allow_live kwarg (default False); host-aware AlpacaAuthError guidance (rdq-exec-live/paper); docstrings + execution/CLAUDE.md rewritten; TestLiveOptIn added."
     },
     {
       "id": "US-002",

@@ -1,11 +1,15 @@
 # execution/ — module notes
 
-- PAPER ONLY. All broker traffic goes through `execution/alpaca_client.py`
+- LIVE IS OPT-IN. All broker traffic goes through `execution/alpaca_client.py`
   (`AlpacaClient`, default base `https://paper-api.alpaca.markets`) as bare
   HTTPS — no APCA headers anywhere in code (a source-grep test enforces it;
-  the OneCLI proxy injects BOTH paper secrets when running under
-  `onecli run --agent rdq-exec-paper`). The constructor hard-refuses the live
-  host; never add a code path that targets it.
+  the OneCLI proxy injects the secrets of whichever identity the process runs
+  under: `rdq-exec-paper` for the paper host, `rdq-exec-live` for the live
+  host). The constructor refuses `api.alpaca.markets` unless the caller
+  passes `allow_live=True` — ONLY the live rebalance/reconcile/flatten paths
+  may pass that flag; the orchestrator must never construct a live client.
+  `AlpacaAuthError` guidance is host-aware (it names the identity matching
+  the host — don't hardcode 'paper' in that message path).
 - Retry policy is deliberate: only 429 is retried (Retry-After honored,
   exponential fallback). 5xx is NEVER retried — a 500/timeout on
   POST /v2/orders is ambiguous (the order may have been accepted) and a blind

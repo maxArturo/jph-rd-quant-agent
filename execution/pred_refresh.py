@@ -508,7 +508,9 @@ def run_pred_refresh(
         env["test_end"] = as_of.isoformat()
         # Fresh copy every run: the script deploys with this repo, the
         # snapshot files deploy with promotions.
-        shutil.copyfile(Path(__file__).with_name(PREDICT_SCRIPT_NAME), workspace / PREDICT_SCRIPT_NAME)
+        shutil.copyfile(
+            Path(__file__).with_name(PREDICT_SCRIPT_NAME), workspace / PREDICT_SCRIPT_NAME
+        )
         log_path = workspace / "logs" / f"pred_refresh_{as_of:%Y%m%d}.log"
         log_path.parent.mkdir(exist_ok=True)
         command = docker_command(

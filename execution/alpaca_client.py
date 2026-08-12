@@ -1,14 +1,15 @@
-"""Typed Alpaca paper-trading client for account, positions, and orders.
+"""Typed Alpaca trading client for account, positions, and orders.
 
 All requests are bare HTTPS: no APCA-API-KEY-ID / APCA-API-SECRET-KEY header
 appears anywhere in this module (a test greps for it). The OneCLI proxy
-injects both paper credentials when the process runs under
-`onecli run --agent rdq-exec-paper` (the identity with the two
-paper-api.alpaca.markets secret assignments).
+injects the credentials of whichever identity the process runs under:
+`onecli run --agent rdq-exec-paper` for the paper host (the default),
+`onecli run --agent rdq-exec-live` for the live host.
 
-PAPER ONLY: the base URL defaults to the paper host and the constructor
-refuses the live host outright — live trading is out of scope for this repo
-(PLAN.md; there is no rdq-exec-live identity).
+LIVE IS OPT-IN: the base URL defaults to the paper host, and the
+constructor refuses api.alpaca.markets unless the caller passes
+allow_live=True. Only the live rebalance/reconcile/flatten paths may pass
+that flag; the orchestrator must never construct a live client.
 
 Retry policy: only 429 is retried (Retry-After honored, exponential
 fallback) — a 429 means the request was not processed. 5xx responses are
@@ -29,7 +30,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 BASE_URL = "https://paper-api.alpaca.markets"
-_LIVE_HOST = "api.alpaca.markets"  # refused: live trading is out of scope
+_LIVE_HOST = "api.alpaca.markets"  # refused unless the caller passes allow_live=True
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_RETRIES = 4
@@ -255,7 +256,9 @@ class AlpacaClient:
     """Minimal typed client for the Alpaca v2 trading API through the OneCLI proxy.
 
     The base URL is configurable (e.g. for test stubs) but defaults to the
-    paper host; the live host is refused at construction time.
+    paper host; the live host is refused at construction time unless the
+    caller passes allow_live=True. Only the live rebalance/reconcile/flatten
+    paths may pass that flag — the orchestrator never does.
     """
 
     def __init__(
@@ -265,18 +268,26 @@ class AlpacaClient:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_MAX_RETRIES,
         sleep: Callable[[float], None] = time.sleep,
+        allow_live: bool = False,
     ) -> None:
         host = urlparse(base_url).hostname or ""
-        if host == _LIVE_HOST:
+        is_live = host == _LIVE_HOST
+        if is_live and not allow_live:
             raise ValueError(
-                f"refusing live trading host {_LIVE_HOST}: this repo is paper-only "
-                "(PLAN.md; no rdq-exec-live identity exists)"
+                f"refusing live trading host {_LIVE_HOST}: AlpacaClient is paper-only "
+                "unless constructed with allow_live=True (reserved for the live "
+                "rebalance/reconcile/flatten paths; the orchestrator must never pass it)"
             )
         self.base_url = base_url.rstrip("/")
         self.session = session if session is not None else requests.Session()
         self.timeout = timeout
         self.max_retries = max_retries
         self._sleep = sleep
+        # Auth-failure guidance is host-aware: the live host maps to the
+        # rdq-exec-live identity, everything else (paper, test stubs) to
+        # rdq-exec-paper.
+        self._onecli_identity = "rdq-exec-live" if is_live else "rdq-exec-paper"
+        self._secrets_host = host if is_live else (urlparse(BASE_URL).hostname or "")
 
     def get_account(self) -> Account:
         """GET /v2/account: current paper account snapshot."""
@@ -463,12 +474,13 @@ class AlpacaClient:
                 continue
             if status in (401, 403) and _auth_failure(status, response):
                 raise AlpacaAuthError(
-                    f"Alpaca returned {status} for {method} {path}: no valid paper "
-                    "credentials were injected. Run this process under `onecli run "
-                    "--agent rdq-exec-paper` and make sure BOTH "
-                    "paper-api.alpaca.markets secrets (key id + secret key) are "
-                    "vaulted and assigned (ops/setup_onecli.sh, then verify with "
-                    f"ops/check_onecli.sh). Body: {_error_detail(response)}"
+                    f"Alpaca returned {status} for {method} {path}: no valid "
+                    f"credentials were injected for {self._secrets_host}. Run this "
+                    f"process under `onecli run --agent {self._onecli_identity}` "
+                    f"and make sure BOTH {self._secrets_host} secrets (key id + "
+                    "secret key) are vaulted and assigned (ops/setup_onecli.sh, "
+                    "then verify with ops/check_onecli.sh). Body: "
+                    f"{_error_detail(response)}"
                 )
             if status is None or not 200 <= int(status) < 300:
                 raise AlpacaError(
