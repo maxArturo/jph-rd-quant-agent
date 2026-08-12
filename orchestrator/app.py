@@ -59,15 +59,44 @@ class ApprovalsHandler(Protocol):
     def deny(self, request_id: str, say: Say) -> None: ...
 
 
-def _is_actionable_user_message(event: dict[str, Any], channel_id: str) -> bool:
-    """True for plain user messages in the target channel (top-level or in-thread)."""
+def _mentions(text: str, user_id: str) -> bool:
+    """True when the raw Slack text @mentions the given user id."""
+    return f"<@{user_id}>" in text or f"<@{user_id}|" in text
+
+
+def _is_actionable_user_message(
+    event: dict[str, Any],
+    channel_id: str,
+    trusted_bot_ids: frozenset[str] = frozenset(),
+    bot_user_id: str | None = None,
+) -> bool:
+    """True for plain user messages in the target channel (top-level or in-thread).
+
+    Bot-authored messages are ignored — except messages from a trusted bot id
+    (RDQ_TRUSTED_BOT_IDS, e.g. Claude in Slack) that explicitly @mention our
+    bot user. The mention gate is the loop brake: trusted bots post status
+    digests and relayed notes in this channel all day, and answering anything
+    they didn't address to us risks two bots talking to each other forever.
+    Trusted-bot posts arrive in two shapes — as their app user with bot_id
+    set, or as subtype "bot_message" with a username override — so only those
+    two subtypes pass.
+    """
     if event.get("channel") != channel_id:
         return False
+    if not (event.get("text") and event.get("ts")):
+        return False
+    bot_id = event.get("bot_id")
+    if bot_id and bot_id in trusted_bot_ids:
+        if event.get("subtype") not in (None, "bot_message"):
+            return False
+        if bot_user_id is None or event.get("user") == bot_user_id:
+            return False  # never answer ourselves, whatever the allowlist says
+        return _mentions(event["text"], bot_user_id)
     if event.get("subtype"):  # message_changed, bot_message, channel_join, ...
         return False
-    if event.get("bot_id"):  # never reply to ourselves or other bots
+    if bot_id:  # never reply to ourselves or other bots
         return False
-    return bool(event.get("text") and event.get("ts"))
+    return True
 
 
 def handle_message(
@@ -76,6 +105,8 @@ def handle_message(
     channel_id: str,
     conversation: MessageResponder,
     interactions: InteractionHandler | None = None,
+    trusted_bot_ids: frozenset[str] = frozenset(),
+    bot_user_id: str | None = None,
 ) -> bool:
     """Route one message event to the conversational core. Returns True if handled.
 
@@ -87,7 +118,7 @@ def handle_message(
     the operator's edit text and is consumed by the poller instead of the
     conversational core.
     """
-    if not _is_actionable_user_message(event, channel_id):
+    if not _is_actionable_user_message(event, channel_id, trusted_bot_ids, bot_user_id):
         return False
     thread_ts = event.get("thread_ts") or event["ts"]
     if interactions is not None and interactions.consume_edit_reply(
@@ -107,6 +138,8 @@ def create_app(
     client: WebClient | None = None,
     token_verification_enabled: bool = True,
     process_before_response: bool = False,
+    trusted_bot_ids: frozenset[str] = frozenset(),
+    bot_user_id: str | None = None,
 ) -> App:
     """Build the Bolt app with the message handler registered.
 
@@ -127,7 +160,15 @@ def create_app(
 
     @app.event("message")
     def _on_message(event: dict[str, Any], say: Say) -> None:
-        handle_message(event, say, config.channel_id, conversation, interactions)
+        handle_message(
+            event,
+            say,
+            config.channel_id,
+            conversation,
+            interactions,
+            trusted_bot_ids=trusted_bot_ids,
+            bot_user_id=bot_user_id,
+        )
 
     if interactions is not None:
         # Local alias: pyright does not carry the None-narrowing into closures.
@@ -196,7 +237,7 @@ def create_app(
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
-    from orchestrator.config import load_max_hypotheses, load_onecli_url
+    from orchestrator.config import load_max_hypotheses, load_onecli_url, load_trusted_bot_ids
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
     from orchestrator.notion_client import NotionClient
@@ -216,7 +257,21 @@ def main() -> None:
     rdagent = RdAgentClient()
     # One WebClient shared by Bolt and the background poller (which posts
     # outside any Bolt request context, so it needs the client directly).
+    # proxy=None immediately: slack_sdk loads HTTPS_PROXY from the env and
+    # ignores NO_PROXY, and the auth.test below runs before handler setup.
     web_client = WebClient(token=config.bot_token)
+    web_client.proxy = None
+
+    # Our own bot user id, for the trusted-bot mention gate (a trusted bot
+    # message only counts as a directive when it @mentions this user).
+    bot_user_id = web_client.auth_test().get("user_id")
+    trusted_bot_ids = load_trusted_bot_ids()
+    if trusted_bot_ids:
+        logger.info(
+            "trusted bot ids %s may address the bot (user id %s)",
+            sorted(trusted_bot_ids),
+            bot_user_id,
+        )
 
     recorder = None
     try:
@@ -268,6 +323,8 @@ def main() -> None:
         promotions=promotions,
         approvals=approvals,
         client=web_client,
+        trusted_bot_ids=trusted_bot_ids,
+        bot_user_id=bot_user_id,
     )
     poller.start()
     approvals.start()
@@ -277,9 +334,8 @@ def main() -> None:
     # 2026-07-08), but slack_sdk loads HTTPS_PROXY from the env and ignores
     # NO_PROXY — under `onecli run` the websocket tunnels through the proxy,
     # which drops long-lived connections and leaves the bot deaf. Force
-    # direct connections for both the websocket and the Web API client.
+    # direct connections for the websocket too (web_client is already direct).
     handler.client.proxy = None
-    web_client.proxy = None
     handler.start()
 
 

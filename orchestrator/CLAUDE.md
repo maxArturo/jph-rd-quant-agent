@@ -132,7 +132,13 @@
   `BoltRequest(body=json.dumps({"type": "event_callback", "event": {...}, ...}), mode="socket_mode")`.
 - Handlers must ignore `subtype` messages (message_changed, channel_join, ...)
   and anything with `bot_id`, or the bot replies to its own replies (loop).
-  In-thread reply target: `event.get("thread_ts") or event["ts"]`.
+  ONE exception: bot ids listed in `RDQ_TRUSTED_BOT_IDS` (e.g. Claude in
+  Slack) pass when the text @mentions our bot user (`bot_user_id` from
+  auth.test, threaded through create_app). The mention gate is the loop
+  brake — trusted bots post digests all day; only messages addressed to us
+  are directives. Trusted-bot posts come in two shapes (app user + bot_id,
+  or subtype `bot_message` + username override); both pass, other subtypes
+  never. In-thread reply target: `event.get("thread_ts") or event["ts"]`.
 
 - Custom universes live in `orchestrator/universe.py` (`UniverseService`):
   `propose()` is validation-only (refusals: built-in/reserved names, all-US

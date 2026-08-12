@@ -9,6 +9,11 @@ Required variables:
 - ``SLACK_OAUTH_TOKEN``  — xoxb- bot token (Web API calls)
 - ``SLACK_SOCKET_TOKEN`` — xapp- app-level token (Socket Mode websocket)
 - ``SLACK_CHANNEL_ID``   — channel id of #quant-research (e.g. C0123456789)
+
+Optional:
+- ``RDQ_TRUSTED_BOT_IDS`` — comma-separated Slack bot ids (B...) whose
+  messages count as operator input when they @mention the bot (e.g. Claude
+  in Slack). Empty by default.
 """
 
 from __future__ import annotations
@@ -117,6 +122,23 @@ def load_onecli_url(
     env = os.environ if environ is None else environ
     file_values = parse_env_file(env_file)
     return env.get("ONECLI_URL") or file_values.get("ONECLI_URL") or DEFAULT_ONECLI_URL
+
+
+def load_trusted_bot_ids(
+    env_file: Path = DEFAULT_ENV_FILE,
+    environ: Mapping[str, str] | None = None,
+) -> frozenset[str]:
+    """RDQ_TRUSTED_BOT_IDS: comma-separated Slack bot ids allowed to address us.
+
+    Messages from these bot ids (e.g. Claude in Slack, B...) are treated as
+    operator messages when they explicitly @mention our bot user. Default is
+    empty: no foreign bot can drive the orchestrator unless listed here.
+    Never list our own bot id — that would let the bot answer itself.
+    """
+    env = os.environ if environ is None else environ
+    file_values = parse_env_file(env_file)
+    raw = env.get("RDQ_TRUSTED_BOT_IDS") or file_values.get("RDQ_TRUSTED_BOT_IDS") or ""
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 # Autonomous-run hypothesis budget (US-045). Kept here (not in poller.py) so

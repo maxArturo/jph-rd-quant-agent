@@ -23,11 +23,14 @@ from orchestrator.config import (
     ConfigError,
     SlackConfig,
     load_slack_config,
+    load_trusted_bot_ids,
     parse_env_file,
 )
 
 CHANNEL = "C0TESTCHAN"
 CONFIG = SlackConfig(bot_token="xoxb-test", app_token="xapp-test", channel_id=CHANNEL)
+BOT_USER = "U0TRADING"
+TRUSTED_BOT = "B0CLAUDE"
 
 
 class FakeConversation:
@@ -109,6 +112,8 @@ def make_app(
     monkeypatch: pytest.MonkeyPatch,
     interactions: Any | None = None,
     promotions: Any | None = None,
+    trusted_bot_ids: frozenset[str] = frozenset(),
+    bot_user_id: str | None = None,
 ) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
@@ -132,6 +137,8 @@ def make_app(
         client=client,
         token_verification_enabled=False,
         process_before_response=True,
+        trusted_bot_ids=trusted_bot_ids,
+        bot_user_id=bot_user_id,
     )
     # Bolt >=1.15 constructs a NEW WebClient per request in _init_context, so
     # say()/context.client would bypass an injected mock and hit the network.
@@ -219,6 +226,111 @@ def test_bot_and_subtype_messages_are_ignored(
     dispatch_message(app, user_message("noise", ts="1751900030.000400", **extra))
     assert conversation.calls == []
     client.chat_postMessage.assert_not_called()
+
+
+# --- trusted bots (RDQ_TRUSTED_BOT_IDS, e.g. Claude in Slack) ---------------
+
+
+def trusted_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock, FakeConversation]:
+    return make_app(
+        monkeypatch, trusted_bot_ids=frozenset({TRUSTED_BOT}), bot_user_id=BOT_USER
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # Claude posts either as its app user with bot_id set...
+        {"bot_id": TRUSTED_BOT, "user": "U0CLAUDE"},
+        # ...or as subtype bot_message with a username override and no user.
+        {"bot_id": TRUSTED_BOT, "subtype": "bot_message", "username": "Claude [run]"},
+    ],
+)
+def test_trusted_bot_mentioning_us_is_handled(
+    extra: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, client, conversation = make_app(
+        monkeypatch, trusted_bot_ids=frozenset({TRUSTED_BOT}), bot_user_id=BOT_USER
+    )
+    event = user_message(f"<@{BOT_USER}> today's directive", ts="1751900040.000500")
+    event.pop("user")
+    event.update(extra)
+    dispatch_message(app, event)
+    assert conversation.calls == [("1751900040.000500", f"<@{BOT_USER}> today's directive")]
+    client.chat_postMessage.assert_called_once()
+
+
+def test_trusted_bot_without_mention_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The loop brake: never answer a trusted bot's status chatter unprompted.
+    app, client, conversation = trusted_app(monkeypatch)
+    event = user_message("nightly digest: all fine", ts="1751900050.000600")
+    event.pop("user")
+    event.update({"bot_id": TRUSTED_BOT, "subtype": "bot_message"})
+    dispatch_message(app, event)
+    assert conversation.calls == []
+    client.chat_postMessage.assert_not_called()
+
+
+def test_trusted_bot_pipe_style_mention_is_handled(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, client, conversation = trusted_app(monkeypatch)
+    event = user_message(f"<@{BOT_USER}|trading_agent> start", ts="1751900060.000700")
+    event.pop("user")
+    event.update({"bot_id": TRUSTED_BOT, "subtype": "bot_message"})
+    dispatch_message(app, event)
+    assert conversation.calls == [("1751900060.000700", f"<@{BOT_USER}|trading_agent> start")]
+
+
+def test_trusted_bot_edited_message_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, client, conversation = trusted_app(monkeypatch)
+    event = user_message(f"<@{BOT_USER}> edited", ts="1751900070.000800")
+    event.pop("user")
+    event.update({"bot_id": TRUSTED_BOT, "subtype": "message_changed"})
+    dispatch_message(app, event)
+    assert conversation.calls == []
+
+
+def test_trusted_bot_ignored_without_known_bot_user_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No bot_user_id (misconfigured startup) — fail closed, no bot passes.
+    app, client, conversation = make_app(
+        monkeypatch, trusted_bot_ids=frozenset({TRUSTED_BOT}), bot_user_id=None
+    )
+    event = user_message("<@U0ANY> hello", ts="1751900080.000900")
+    event.pop("user")
+    event["bot_id"] = TRUSTED_BOT
+    dispatch_message(app, event)
+    assert conversation.calls == []
+
+
+def test_own_messages_ignored_even_if_own_bot_id_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Misconfiguration guard: our own bot_id on the allowlist must not let
+    # the bot converse with itself (its posts carry user == bot_user_id).
+    app, client, conversation = make_app(
+        monkeypatch, trusted_bot_ids=frozenset({"B0SELF"}), bot_user_id=BOT_USER
+    )
+    event = user_message(f"<@{BOT_USER}> echo", ts="1751900090.001000")
+    event.update({"bot_id": "B0SELF", "user": BOT_USER})
+    dispatch_message(app, event)
+    assert conversation.calls == []
+
+
+def test_load_trusted_bot_ids_default_empty(tmp_path: Path) -> None:
+    assert load_trusted_bot_ids(tmp_path / "nope.env", environ={}) == frozenset()
+
+
+def test_load_trusted_bot_ids_parses_csv_with_whitespace(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, "RDQ_TRUSTED_BOT_IDS=B0AAA, B0BBB ,,\n")
+    assert load_trusted_bot_ids(env_file, environ={}) == frozenset({"B0AAA", "B0BBB"})
+
+
+def test_load_trusted_bot_ids_environ_overrides_file(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, "RDQ_TRUSTED_BOT_IDS=B0FILE\n")
+    assert load_trusted_bot_ids(env_file, environ={"RDQ_TRUSTED_BOT_IDS": "B0ENV"}) == frozenset(
+        {"B0ENV"}
+    )
 
 
 # --- handler unit behavior (no Bolt machinery) ----------------------------
