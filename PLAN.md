@@ -197,6 +197,19 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 
 ### Phase 6 — Guardrails & live gating
 
+> **Status (2026-08-13): shipped as US-050..US-060 (tasks/prd-live-trading.md),
+> revised by the operator's 2026-08-10 decisions** (docs/decisions.md entry
+> 2026-08-13/US-020; they supersede 2026-08-05's paper-first/two-step draft):
+> full research parity in the live channel (#live-trading-quant-research),
+> **direct-to-live** promotion of any promotable run, **no confirmation
+> step** (one Slack message arms live), and conservative guardrails (10%
+> equity allocation, $500/order, $5,000 daily notional, 5% drawdown) instead
+> of a per-order human gate. Step 2 below (OneCLI approval rule + approvals
+> bridge) was deliberately **dropped**: an approval rule on the live host
+> would deadlock the unattended 08:10 ET rebalancer (orchestrator/CLAUDE.md
+> warning). Steps 1, 3, and 4 shipped as planned; go-live procedure:
+> ops/runbook.md §8.
+
 1. **Identity isolation (primary control):** the rebalancer runs as `rdq-exec-paper` by default; live keys exist only on `rdq-exec-live`. Going live = a deliberate config change *and* secret assignment — hitting `api.alpaca.markets` without the live identity just 401s.
 2. **Human approval for live orders:** configure a OneCLI approval rule on the live Alpaca host pattern (web UI at `:10254`; the CLI can't create approval rules as of onecli 1.3.0). Build our own small **approvals bridge** in the orchestrator: long-poll `GET {ONECLI_URL}/api/approvals/pending` and post approve/deny buttons to Slack (pattern from nanoclaw's `onecli-approvals.ts`, re-implemented in Python). Every live order then requires a human tap even if all our software gates fail. If the pending-approvals API surface differs from expectations, fall back to approving via the OneCLI web UI (still a hard human gate) and keep Slack notification only.
 3. `breaker.py`: max daily notional, max position count, drawdown kill-switch (halt + Slack alert if live equity drops X% below high-water mark). Breaker state is a file; the orchestrator gets a "halt trading" tool that writes it.

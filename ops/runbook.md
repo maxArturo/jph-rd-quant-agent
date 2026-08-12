@@ -1,9 +1,15 @@
 # Operator runbook — rd-agent-q emergency procedures
 
-Audience: the human operator of this box. Everything here is **paper
-trading** (there is no live identity, and `execution/alpaca_client.py`
-refuses the live host), but treat the procedures as if it were real money —
-that is the point of the paper milestone.
+Audience: the human operator of this box. Sections 1–6 cover the **paper**
+account (`rdq-exec-paper`, #quant-research). Section 7 covers the
+**real-money LIVE** account (`rdq-exec-live`,
+#live-trading-quant-research); section 8 is the go-live checklist.
+
+**Paper and live are fully disjoint — a paper incident must not touch live
+(and vice versa).** Halt files, breaker state, limits/breaker configs,
+promotion slots, OneCLI identities, Slack channels, and Notion databases
+are all separate. Halting, flattening, or demoting one account does nothing
+to the other; only act on both when the incident genuinely spans both.
 
 For a full emergency stop, run the sections in order: **halt trading first**
 (it is one file write and stops the next rebalance instantly), then pause
@@ -11,7 +17,9 @@ research, then flatten if the book itself must go to zero. Record what you
 did and why in the Decision Log (the Slack tools do this automatically;
 manual actions need a manual note).
 
-## 1. Halt the rebalancer (stop new orders)
+## 1. Halt the rebalancer (paper — stop new orders)
+
+For the live account, see §7.1 — this section halts **paper only**.
 
 Preferred — in Slack (#quant-research), any thread:
 
@@ -58,7 +66,9 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop rdq-research.service
 Research runs cost LLM tokens and disk, not money — pausing them is never
 urgent the way halting trading is.
 
-## 3. Flatten positions (go to zero)
+## 3. Flatten positions (paper — go to zero)
+
+For the live account, see §7.2 — this section flattens **paper only**.
 
 Cancels every open order, liquidates every position, and confirms
 `GET /v2/positions` is empty:
@@ -232,7 +242,7 @@ tail -n 5 ~/rdq-runs/server_ui/traces/*/*.log
 # promoted_strategy):
 .venv/bin/python -c "import sqlite3; con=sqlite3.connect('orchestrator/state.sqlite'); \
   [print(t, con.execute(f'select count(*) from {t}').fetchone()[0]) for t in \
-  ('directives','runs','pending_interactions','promoted_strategy')]"
+  ('directives','runs','pending_interactions','promoted_strategy','promoted_strategy_live')]"
 
 # ledger vs broker (read-only both sides):
 onecli run --agent rdq-exec-paper -- .venv/bin/python -m ops.reconcile
@@ -266,3 +276,190 @@ tunneled through the OneCLI proxy, which drops long-lived connections.
 deafness recurs, verify that override is still in place before hunting
 elsewhere. Messages sent while the bot was deaf are **not replayed** —
 resend them.
+
+## 7. LIVE account — real-money emergency procedures
+
+Everything in this section moves (or stops) **real money**. The live
+rebalancer (`rdq-rebalance-live.timer`, Mon–Fri 08:10 America/New_York)
+trades `live_equity_allocation_pct` of live equity under
+`execution/limits.live.json` and `execution/breaker.live.json`. All live
+controls are independent of paper's (see the note at the top): a paper
+incident must not touch live, and a live incident needs the live
+procedures below — the paper ones (§1–§3) have no effect on the live
+account.
+
+### 7.1 Halt LIVE trading (stop new live orders)
+
+Preferred — in Slack (**#live-trading-quant-research**, any thread):
+
+> halt live trading, reason: <why>
+
+The `halt_live_trading` tool writes the LIVE breaker halt file, confirms
+in-thread (the reply says LIVE unmistakably), and writes a Decision Log
+row. While the file exists, `execution/rebalance.py --live` exits 0 with a
+halted notice and submits nothing. The tool is refused from
+#quant-research — live controls only work in the live channel (and vice
+versa for the paper tools).
+
+Manual fallback (Slack down) — exact live halt file path:
+
+```sh
+echo "manual halt: <why>" > ~/rdq-data/breaker-live/halt
+```
+
+Belt-and-braces (also stops the timer from even starting the pipeline):
+
+```sh
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user disable --now rdq-rebalance-live.timer
+```
+
+Resume with `resume_live_trading` in the live channel (removes the file,
+logs the decision) or `rm ~/rdq-data/breaker-live/halt`, and re-enable the
+timer if you disabled it. A present live (or paper) halt file shows as a
+`WARN breaker` line in `ops/health.sh` — deliberate operator state, never
+a failed check.
+
+### 7.2 Flatten LIVE positions (go to zero)
+
+One-liner, under the live identity:
+
+```sh
+onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.flatten --live
+```
+
+Exit codes are the same contract as paper (§3): 0 confirmed flat, 1
+submitted-but-not-confirmed (usually a closed market — rerun after the
+open; halt live first so the 08:10 rebalance cannot re-enter), 2
+operational failure (check `ops/check_onecli.sh`). Liquidation orders have
+no Trade Ledger (Live) rows, so `ops/reconcile.py --live` will flag them
+for the flatten date — that is the audit trail working. Note the flatten
+in the Decision Log.
+
+### 7.3 Demote the live strategy (stop trading it, keep the account)
+
+In the live channel:
+
+> demote live
+
+The `demote_live` tool clears the live promotion slot (a single message,
+no confirmation — same contract as promote) and posts what was demoted.
+The next live rebalance aborts with "no promoted strategy" and trades
+nothing; existing positions stay on the book (flatten separately if the
+book itself must go to zero). The paper slot is never touched.
+
+### 7.4 Rotate LIVE keys in OneCLI
+
+Same procedure as §4, live edition: regenerate the **live** API keys in
+the Alpaca dashboard (top-left toggle on Live), then update both vaulted
+live secrets **in place** — never delete + recreate (that drops the
+per-agent assignment):
+
+```sh
+onecli secrets list                              # find the live key id + secret ids
+onecli secrets update --id <id> --value <new>    # both live secrets
+ops/check_onecli.sh                              # rdq-exec-live -> live host must PASS again
+```
+
+`ops/check_onecli.sh` proves the four isolation directions on every run:
+only `rdq-exec-live` authenticates to `api.alpaca.markets`, and it cannot
+reach the paper host.
+
+## 8. Go-live checklist — the operator's FINAL manual step
+
+All code for live trading ships and verifies against fakes **before** any
+of this; funding the account and vaulting live keys is deliberately the
+last thing that happens. Run the order of operations exactly:
+
+1. **Deploy all live-trading stories** (merge to main, pull on the box).
+2. **Install + restart** — deployed code is not running code:
+
+   ```sh
+   ops/install_services.sh          # links rdq-rebalance-live.{service,timer}
+   XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload
+   XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart rdq-orchestrator.service
+   XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now rdq-rebalance-live.timer
+   ```
+
+   (`install_services.sh` links but never enables — the timer must be
+   enabled explicitly.)
+3. **Operator tasks A–D** below.
+4. **Review the live guardrail configs**: `execution/limits.live.json`
+   ($500/order, 10% position, 60 orders/day, 60 positions),
+   `execution/breaker.live.json` ($5,000 daily notional, 5% drawdown),
+   `execution/allocation.live.json` (`live_equity_allocation_pct`: 10).
+5. **Send the one promotion message** in #live-trading-quant-research
+   (e.g. "promote to live" for the paper-promoted strategy, or name a
+   run). There is no confirmation step — the armed summary it posts IS the
+   after-the-fact confirmation; read it.
+6. **Observe the first live rebalance** (08:10 ET): fill summary in the
+   live channel, rows in Trade Ledger (Live).
+7. **Reconcile**:
+
+   ```sh
+   onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.reconcile --live
+   ```
+
+   Exit 0 = ledger matches the live account.
+
+### Operator tasks (from tasks/prd-live-trading.md §6)
+
+**A. Alpaca (live account)**
+
+1. Log in at https://app.alpaca.markets, switch the top-left toggle from
+   Paper to **Live**, and complete live brokerage onboarding (identity,
+   funding source) if not already done.
+2. Fund the account. Only `live_equity_allocation_pct` (10%) of equity is
+   traded; the breaker caps daily notional at $5,000.
+3. Wait for account status **ACTIVE** (dashboard header; verifiable via
+   `GET /v2/account` once task B is done).
+4. With the Live toggle selected, generate **live** API keys (right-hand
+   panel → API Keys). They are distinct from paper keys; the secret shows
+   once — paste both straight into OneCLI (task B) and store them nowhere
+   else.
+5. Recommended account configuration (settable via
+   `PATCH /v2/account/configurations` after task B): `no_shorting: true`,
+   `max_margin_multiplier: "1"` (cash-like), fractional trading OFF (the
+   pipeline trades whole shares).
+6. Optional but recommended: enable Alpaca's email trade confirmations as
+   an independent audit stream.
+
+**B. OneCLI (live identity)**
+
+1. Run `ops/setup_onecli.sh` — it creates `rdq-exec-live` with host
+   allowlist `api.alpaca.markets api.notion.com financialmodelingprep.com`
+   (no paper host; no other identity may hold the live host).
+2. Vault the live key id + secret in the OneCLI web UI
+   (`https://nanoclaw-prod.tail05c9bf.ts.net/`), host pattern
+   `api.alpaca.markets`, mirroring the paper assignment shape — then
+   **rerun `ops/setup_onecli.sh`** so the new secrets are assigned to
+   `rdq-exec-live`.
+3. Run `ops/check_onecli.sh`: the live-auth probe flips from
+   SKIP-with-WARN to PASS, and all three must-fail directions
+   (paper→live, orchestrator→live, live→paper) must PASS as refusals.
+
+**C. Slack**
+
+1. Invite the bot to **#live-trading-quant-research**: `/invite @<bot>`
+   (channel already exists).
+2. Copy the channel id (channel details → About → bottom) into the
+   repo-root `.env` as `SLACK_LIVE_CHANNEL_ID` — setting it is what arms
+   the live features.
+3. After deploy: `systemctl --user restart rdq-orchestrator` — deployed
+   code is not running code.
+
+**D. Notion**
+
+1. Ensure the integration used by the orchestrator can create a sibling of
+   "Automated AI Quant Investment" — or create an empty page titled exactly
+   "Automated AI Quant Investment — LIVE 🔴" and share it with the
+   integration; `ops/bootstrap_notion.py --live` adopts it by exact title.
+2. Grant the Notion app connection to `rdq-exec-live` in the gateway web
+   UI (per-agent grant, no CLI) — the live rebalancer writes the live
+   ledger, and `ops/reconcile.py --live` reads it, under that identity.
+
+**E. First week**
+
+1. Be around for the first 08:10 ET rebalance (order-of-operations steps
+   6–7 above).
+2. Deliberately halt live from Slack once (§7.1), confirm the next
+   rebalance exits 0 without trading, then resume.

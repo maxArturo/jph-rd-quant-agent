@@ -268,6 +268,28 @@ class TestRunbook:
         assert "Rotate keys via OneCLI" in runbook
         assert "tailscale serve status" in runbook
 
+    def test_runbook_covers_live_procedures(self) -> None:
+        """US-020: real-money procedures + go-live checklist live in the runbook."""
+        runbook = (pathlib.Path(__file__).resolve().parents[1] / "ops" / "runbook.md").read_text()
+        # Live emergency procedures.
+        assert "Halt LIVE trading" in runbook
+        assert "halt_live_trading" in runbook
+        assert "~/rdq-data/breaker-live/halt" in runbook  # exact shell halt path
+        live_flatten = "onecli run --agent rdq-exec-live -- .venv/bin/python -m ops.flatten --live"
+        assert live_flatten in runbook
+        assert "demote_live" in runbook
+        assert "Rotate LIVE keys" in runbook
+        assert "paper incident must not touch live" in runbook
+        # Go-live checklist (operator's final manual step) + order of operations.
+        assert "Go-live checklist" in runbook
+        assert "SLACK_LIVE_CHANNEL_ID" in runbook
+        assert "ops/install_services.sh" in runbook
+        assert "enable --now rdq-rebalance-live.timer" in runbook
+        assert "limits.live.json" in runbook
+        assert "breaker.live.json" in runbook
+        assert "ops.reconcile --live" in runbook
+        assert "Automated AI Quant Investment — LIVE 🔴" in runbook
+
 
 @pytest.mark.live
 @pytest.mark.skipif(

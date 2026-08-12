@@ -339,8 +339,8 @@
         "Tests pass"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: runbook §7 (LIVE emergencies: halt_live_trading + ~/rdq-data/breaker-live/halt shell path + timer disable, flatten --live one-liner under rdq-exec-live, demote_live, live key rotation, disjointness note in header) + §8 (go-live order of operations: deploy -> install/daemon-reload/restart + enable rdq-rebalance-live.timer -> operator tasks A-E copied from PRD §6 with US-018 rerun-setup/check flow -> guardrail review -> one promote message -> observe 08:10 -> reconcile --live); §1/§3 marked paper-only, sqlite peek lists promoted_strategy_live; README de-scoped live-out-of-scope + documents live PRD; PLAN.md Phase 6 status blockquote (approval rule deliberately dropped); decisions.md 2026-08-13/US-020 entry (2026-08-10 supersedes 2026-08-05); test_runbook_covers_live_procedures added."
     },
     {
       "id": "US-021",

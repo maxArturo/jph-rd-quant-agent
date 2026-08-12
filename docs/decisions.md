@@ -935,3 +935,52 @@ live breaker). The orchestrator identity gains NO live broker access:
 Consequence: intraday broker truth (unrecorded fills, exact current equity)
 is not visible from the live channel — reconciliation stays with the
 `rdq-exec-live`-side reconcile path (US-015), by design.
+
+## 2026-08-13 — US-020 (PRD US-060): 2026-08-10 live-trading decisions — direct-to-live, no confirmation, full parity, conservative guardrails
+
+**Decision (operator, 2026-08-10):** live trading on the real-money Alpaca
+account (`api.alpaca.markets`) ships with:
+
+1. **Full research parity in the live channel.**
+   #live-trading-quant-research can start, steer, and stop research runs —
+   it is a full conversational peer of #quant-research, not an
+   account-management console.
+2. **Direct-to-live promotion.** Any promotable run
+   (`completed`/`stopped`) can be promoted straight to live from the live
+   channel; a paper track record is not a prerequisite. Promoting the
+   current paper-promoted strategy remains the default when no run is
+   named.
+3. **No confirmation step.** A single "promote to live" message arms live
+   trading immediately; the armed summary the tool posts is the
+   after-the-fact confirmation. The remaining gates are software:
+   promotable status, valid config, breaker/halt clear, order gate,
+   allocation cap.
+4. **Conservative starter guardrails**, independent of paper's: live
+   trades 10% of live equity (`execution/allocation.live.json`), max
+   $500/order (`execution/limits.live.json`), breaker at $5,000 daily
+   notional and 5% drawdown (`execution/breaker.live.json`) — all
+   operator-editable config, reviewed before go-live (ops/runbook.md §8).
+
+**These supersede the 2026-08-05 decisions** in the earlier PRD draft (on
+`worktree-prd-live-trading`), which required paper-first promotion and a
+two-step confirm. They also finalize dropping PLAN.md Phase 6 step 2's
+per-order OneCLI approval rule: a human-approval rule on the live host
+would deadlock the unattended 08:10 ET pre-open rebalancer (the
+orchestrator/CLAUDE.md warning), so the human act is the single deliberate
+promotion message plus the always-available brakes (`halt_live_trading`,
+`demote_live`, the live halt file, `ops/flatten.py --live`).
+
+**Why:** automation is the point — after one promotion message the system
+trades daily with no human in the loop, exactly like paper. Safety comes
+from structural isolation (only `rdq-exec-live` holds live secrets; four
+isolation directions proven by ops/check_onecli.sh) and tight, independent
+guardrails, not from ceremony that would either block the pipeline or be
+rubber-stamped.
+
+Carried forward from 2026-08-05 (still in force): promotion copies, never
+moves (live slot independent of paper's); sizing is a percentage of live
+equity; one live strategy at a time (re-promoting overwrites).
+
+Consequence: real-money emergency procedures and the operator's go-live
+checklist (the FINAL manual step — funding + vaulting live keys happens
+only after all code ships) live in ops/runbook.md §7–§8.
