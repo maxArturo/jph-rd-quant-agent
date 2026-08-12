@@ -140,6 +140,11 @@ class LiveStatusReader:
     the matching reads return nothing instead of raising, which the tools
     report as "no live data yet". Notion outages DO raise — the tool loop
     surfaces them as error tool results, exactly like paper broker errors.
+
+    The row schemas are shared with the paper databases, so the reader is
+    schema-generic: the live rebalancer reuses it pointed at the PAPER
+    Account Snapshots database for its same-day paper-vs-live summary line
+    (US-014, read-only — the one-writer-per-DB rule is about writes).
     """
 
     def __init__(

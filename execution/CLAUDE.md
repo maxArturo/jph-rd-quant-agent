@@ -121,8 +121,22 @@
   `breaker_mod.LIVE_*`, `allocation_mod.ALLOCATION_PATH`) so tests
   monkeypatch the constants; injected `limits`/`breaker`/`allocation` params
   skip the file loads entirely. `AllocationConfigError` is in
-  `_ABORT_ERRORS`. Live Notion routing is US-014 — until then main() records
-  NO Notion rows in live mode (never the paper ledger).
+  `_ABORT_ERRORS`.
+- Live Notion routing (US-014): `--live` wires the SAME `TradeLedger`/
+  `AccountSnapshotLog` classes at the `notion.databases.trade_ledger_live` /
+  `account_snapshots_live` ids (config.yaml, written by `bootstrap_notion
+  --live`) — never the paper ids — and main() REFUSES `--live` when either
+  live id is missing, and refuses `--live --no-notion` outright (live fills
+  must record; `--no-notion` is paper-only). Live daily summaries say
+  `daily LIVE rebalance summary`, carry a `live allocation: N% of equity`
+  line (format_daily_summary's `allocation_pct` param — None on every paper
+  call keeps paper output byte-identical), and append
+  `paper_vs_live_pnl_line()`'s same-day comparison when the PAPER Account
+  Snapshots database has a row for as_of (read via
+  `orchestrator.live_status.LiveStatusReader` pointed at the paper db —
+  reads don't violate one-writer-per-DB). The comparison is advisory and
+  best-effort: paper-read failures and live portfolio-history outages
+  degrade (omit / n/a), never abort; keep it that way.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.

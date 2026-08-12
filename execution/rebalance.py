@@ -18,9 +18,17 @@ live Slack channel for every notice, and client_order_id prefix
 account trades only its allocation slice; the buying-power cap and the order
 gate keep seeing the REAL account snapshot. Everything else — abort
 contract, halt semantics, exit codes — is identical to paper, and without
-``--live`` behavior is byte-for-byte unchanged. (Live Notion routing arrives
-with US-014; until then ``--live`` records no Notion rows rather than
-writing live fills into the paper ledger.)
+``--live`` behavior is byte-for-byte unchanged.
+
+Live Notion routing (US-014): ``--live`` writes each order to Trade Ledger
+(Live) and the daily row to Account Snapshots (Live) — never the paper
+databases — and REFUSES to run when the live database ids are missing from
+orchestrator/config.yaml (run ``ops/bootstrap_notion.py --live``); there is
+no ``--no-notion`` escape hatch in live mode. The live daily summary names
+LIVE in its header, states the allocation pct in force, and — when the paper
+account also wrote its snapshot row for the same day — appends a one-line
+paper-vs-live day-P/L comparison (advisory and best-effort: absent paper
+data simply omits the line).
 
 The buying-power cap (cap_buys_to_buying_power) defers buys the account
 snapshot's buying_power cannot fund — Alpaca reserves qty * limit_price when
@@ -74,13 +82,13 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from execution import allocation as allocation_mod
 from execution import breaker as breaker_mod
 from execution import order_gate as order_gate_mod
-from execution.account_log import AccountSnapshotLog
+from execution.account_log import AccountSnapshotLog, previous_day_pnl
 from execution.allocation import AllocationConfigError, LiveAllocation, load_live_allocation
 from execution.alpaca_client import (
     LIVE_BASE_URL,
@@ -119,6 +127,7 @@ from execution.promoted import (
     load_promoted_strategy_live,
 )
 from execution.signal import SignalError, StrategyParams, extract_targets
+from orchestrator.live_status import LiveSnapshot
 from orchestrator.state import DEFAULT_DB_PATH
 
 MARKET_TZ = ZoneInfo("America/New_York")
@@ -443,6 +452,66 @@ def breaker_state_line(breaker: Breaker) -> str:
     return f"breaker: normal (high-water mark ${high_water_mark:,.2f})"
 
 
+class PaperSnapshotSource(Protocol):
+    """Latest paper Account Snapshots row, for the paper-vs-live comparison.
+
+    Satisfied by ``orchestrator.live_status.LiveStatusReader`` pointed at the
+    PAPER Account Snapshots database (the row schemas are identical).
+    """
+
+    def latest_snapshot(self) -> LiveSnapshot | None: ...
+
+
+def _pnl_text(profit_loss: float | None, pct: float | None) -> str:
+    """`$+1,250.50 (+1.25%)` — or `n/a` when the P/L figure is missing."""
+    if profit_loss is None:
+        return "n/a"
+    text = f"${profit_loss:+,.2f}"
+    if pct is not None:
+        text += f" ({pct * 100:+.2f}%)"
+    return text
+
+
+def paper_vs_live_pnl_line(
+    paper_snapshots: PaperSnapshotSource | None,
+    client: AlpacaClient,
+    as_of: dt.date,
+) -> str | None:
+    """Same-day paper-vs-live day-P/L line for the live summary (US-014).
+
+    Present only when the paper account also wrote its Account Snapshots row
+    for ``as_of`` (both accounts traded the same morning). Advisory and
+    best-effort end to end: a missing/stale paper row omits the line, a
+    Notion read failure omits it with a stderr warning, and a live
+    portfolio-history outage degrades the live side to n/a — nothing here
+    may ever block or fail a live summary.
+    """
+    if paper_snapshots is None:
+        return None
+    try:
+        paper = paper_snapshots.latest_snapshot()
+    except Exception as exc:  # noqa: BLE001 - advisory; a Notion outage must not block
+        print(f"WARNING: paper snapshot read failed: {exc}", file=sys.stderr)
+        return None
+    if paper is None or paper.date != as_of.isoformat():
+        return None
+    live_day = None
+    try:
+        live_day = previous_day_pnl(
+            client.get_portfolio_history(period="1M", timeframe="1D"), as_of
+        )
+    except AlpacaError as exc:
+        print(f"WARNING: live portfolio history fetch failed: {exc}", file=sys.stderr)
+    live_pl, live_pct = (
+        (live_day.profit_loss, live_day.profit_loss_pct) if live_day else (None, None)
+    )
+    return (
+        f"paper vs live ({as_of} snapshots): paper day P/L "
+        f"{_pnl_text(paper.day_pl, paper.day_pl_pct)}, live day P/L "
+        f"{_pnl_text(live_pl, live_pct)}"
+    )
+
+
 def format_daily_summary(
     as_of: dt.date,
     equity: float,
@@ -453,6 +522,8 @@ def format_daily_summary(
     ledger_failures: Sequence[str] = (),
     breaker_state: str | None = None,
     warnings: Sequence[str] = (),
+    allocation_pct: float | None = None,
+    paper_vs_live: str | None = None,
 ) -> str:
     """The daily Slack digest: orders placed, fills, rejections, equity.
 
@@ -460,12 +531,23 @@ def format_daily_summary(
     fill report, no-trade days say why, and gate/breaker-rejection days list
     each rejection (those days still exit nonzero; this is the notice).
     ``breaker_state`` is breaker_state_line()'s output (US-038).
+
+    ``allocation_pct`` marks a LIVE summary (US-014): the header says LIVE
+    and an allocation line states the slice sizing was computed against;
+    ``paper_vs_live`` is paper_vs_live_pnl_line()'s output, appended last.
+    With both None (every paper call) the output is byte-for-byte today's.
     """
+    live_tag = "LIVE " if allocation_pct is not None else ""
     lines = [
-        f"daily rebalance summary ({as_of})",
+        f"daily {live_tag}rebalance summary ({as_of})",
         f"account equity: ${equity:,.2f}",
-        f"orders placed: {len(submitted)}",
     ]
+    if allocation_pct is not None:
+        lines.append(
+            f"live allocation: {allocation_pct:g}% of equity"
+            f" (sizing against ${equity * allocation_pct / 100.0:,.2f})"
+        )
+    lines.append(f"orders placed: {len(submitted)}")
     if submitted:
         lines.append(fill_summary(submitted, final))
     elif no_trade_note:
@@ -481,6 +563,8 @@ def format_daily_summary(
         lines.append(f"WARNING: Trade Ledger write failed — {failure}")
     for warning in warnings:
         lines.append(f"WARNING: {warning}")
+    if paper_vs_live:
+        lines.append(paper_vs_live)
     return "\n".join(lines)
 
 
@@ -575,6 +659,7 @@ def run_rebalance(
     snapshots: AccountSnapshotLog | None = None,
     live: bool = False,
     allocation: LiveAllocation | None = None,
+    paper_snapshots: PaperSnapshotSource | None = None,
 ) -> int:
     """Run the full rebalance chain; returns the process exit code.
 
@@ -585,7 +670,10 @@ def run_rebalance(
     ``breaker`` to the live guardrail files and live breaker state paths,
     scales the diff's equity by the live allocation pct (``allocation``, or
     allocation.live.json when None), and stamps ``rdq-live-`` order ids. The
-    caller supplies a live-host client and a live-channel ``notify``.
+    caller supplies a live-host client, a live-channel ``notify``, LIVE-
+    database ``ledger``/``snapshots`` recorders, and ``paper_snapshots`` (a
+    reader over the PAPER Account Snapshots database) for the same-day
+    paper-vs-live comparison line (US-014).
     """
     if as_of is None:
         as_of = dt.datetime.now(MARKET_TZ).date()
@@ -639,6 +727,22 @@ def run_rebalance(
             )
         else:
             diff_account = account
+
+        # US-014: live summaries add the allocation pct in force and, when
+        # the paper account also wrote a same-day snapshot row, a one-line
+        # paper-vs-live day-P/L comparison. Resolved lazily at post time —
+        # exactly one summary path runs per invocation, and dry runs (which
+        # post no summary) never touch Notion or portfolio history.
+        summary_day = as_of
+
+        def _live_summary_kwargs() -> dict[str, Any]:
+            if not live or allocation is None:
+                return {}
+            return {
+                "allocation_pct": allocation.live_equity_allocation_pct,
+                "paper_vs_live": paper_vs_live_pnl_line(paper_snapshots, client, summary_day),
+            }
+
         diff = compute_orders(
             book.weights,
             diff_account,
@@ -696,6 +800,7 @@ def run_rebalance(
                     breaker,
                     note="; ".join(rejection_messages),
                 ),
+                **_live_summary_kwargs(),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
@@ -727,6 +832,7 @@ def run_rebalance(
                     snapshots, client, as_of, account, positions, "breaker_tripped",
                     breaker, note=trip.message,
                 ),
+                **_live_summary_kwargs(),
             )
             _safe_notify(notify, summary)
             print(summary, file=sys.stderr)
@@ -754,6 +860,7 @@ def run_rebalance(
                     snapshots, client, as_of, account, positions, "no_trade", breaker,
                     note=no_trade_note,
                 ),
+                **_live_summary_kwargs(),
             )
             _safe_notify(notify, summary)
             return 0
@@ -798,6 +905,7 @@ def run_rebalance(
                 orders_placed=len(submitted),
                 orders_filled=sum(1 for order in final if order.status == "filled"),
             ),
+            **_live_summary_kwargs(),
         )
         _safe_notify(notify, summary)
         print(summary)
@@ -892,6 +1000,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from orchestrator.config import ConfigError
 
+    if args.live and args.no_notion:
+        print(
+            "ERROR: --live requires Notion recording — every live fill must land in "
+            "Trade Ledger (Live); --no-notion is a paper-only escape hatch.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.no_slack:
         notify = stderr_notifier()
     else:
@@ -907,25 +1023,49 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ledger: TradeLedger | None = None
     snapshots: AccountSnapshotLog | None = None
-    # Live Notion routing (Trade Ledger (Live) / Account Snapshots (Live))
-    # arrives with US-014 — until then --live records no Notion rows rather
-    # than writing live fills into the PAPER ledger.
-    if not args.no_notion and not args.live:
+    paper_snapshots: PaperSnapshotSource | None = None
+    if not args.no_notion:
         from orchestrator.notion_client import NotionClient
         from orchestrator.notion_recorder import RecorderConfigError, load_notion_databases
 
         try:
             databases = load_notion_databases()
         except RecorderConfigError as exc:
+            hint = (
+                "run ops/bootstrap_notion.py first — live runs must record"
+                if args.live
+                else "pass --no-notion for a supervised local run"
+            )
             print(
                 f"ERROR: {exc}\nRefusing to trade without a Trade Ledger to record "
-                "orders; pass --no-notion for a supervised local run.",
+                f"orders; {hint}.",
                 file=sys.stderr,
             )
             return 1
         notion = NotionClient()
-        ledger = TradeLedger(notion, databases.trade_ledger)
-        snapshots = AccountSnapshotLog(notion, databases.account_snapshots)
+        if args.live:
+            # US-014: live fills/snapshots go ONLY to the (Live) databases.
+            # Missing live ids refuse outright — no --no-notion escape hatch.
+            if not databases.trade_ledger_live or not databases.account_snapshots_live:
+                print(
+                    "ERROR: live Notion database ids are missing from "
+                    "orchestrator/config.yaml (notion.databases.trade_ledger_live / "
+                    "account_snapshots_live).\nRefusing to trade live without "
+                    "Trade Ledger (Live) to record orders; run "
+                    "ops/bootstrap_notion.py --live first.",
+                    file=sys.stderr,
+                )
+                return 1
+            from orchestrator.live_status import LiveStatusReader
+
+            ledger = TradeLedger(notion, databases.trade_ledger_live)
+            snapshots = AccountSnapshotLog(notion, databases.account_snapshots_live)
+            # The same-day paper-vs-live summary line reads the PAPER
+            # snapshots database (identical row schema; read-only).
+            paper_snapshots = LiveStatusReader(notion, snapshots_db=databases.account_snapshots)
+        else:
+            ledger = TradeLedger(notion, databases.trade_ledger)
+            snapshots = AccountSnapshotLog(notion, databases.account_snapshots)
 
     client = AlpacaClient(LIVE_BASE_URL, allow_live=True) if args.live else AlpacaClient()
     return run_rebalance(
@@ -940,6 +1080,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ledger=ledger,
         snapshots=snapshots,
         live=args.live,
+        paper_snapshots=paper_snapshots,
     )
 
 

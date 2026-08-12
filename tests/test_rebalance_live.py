@@ -1,9 +1,12 @@
-"""US-013: rebalance --live — live slot, live guardrails, scaled equity, live ids.
+"""US-013/US-014: rebalance --live — live slot, guardrails, ids, Notion routing.
 
 Drives run_rebalance(live=True) end-to-end through the REAL AlpacaClient over
 tests/test_rebalance.py's FakeBroker (fake HTTP session), plus the main()/
-slack_notifier() wiring that picks the live host and the live Slack channel.
-Paper behavior is regression-frozen: nothing here touches the paper tests.
+slack_notifier() wiring that picks the live host, the live Slack channel and
+the (Live) Notion databases. US-014 adds the live summary content (LIVE
+header, allocation pct, same-day paper-vs-live comparison line) and the
+missing-live-database refusals. Paper behavior is regression-frozen: nothing
+here touches the paper tests.
 """
 
 from __future__ import annotations
@@ -23,7 +26,11 @@ from execution.breaker import Breaker, BreakerConfig
 from execution.order_gate import Limits
 from execution.rebalance import run_rebalance, slack_notifier
 from orchestrator.config import ConfigError, SlackConfig
+from orchestrator.live_status import LiveSnapshot
+from orchestrator.notion_recorder import NotionDatabases
 from orchestrator.state import StateStore
+from tests.test_account_log import route_history
+from tests.test_alpaca_client import FakeResponse
 from tests.test_rebalance import AS_OF, STORE_DAYS, FakeBroker, write_bins
 from tests.test_signal import write_calendar, write_conf, write_pred
 
@@ -267,12 +274,144 @@ def test_slack_notifier_live_refuses_without_live_channel(
         slack_notifier(live=True)
 
 
+# ------------------------------------------- live summary content (US-014)
+
+
+def live_paper_snapshot(
+    date: str,
+    day_pl: float | None = -321.0,
+    day_pl_pct: float | None = -0.0032,
+) -> LiveSnapshot:
+    """A parsed paper Account Snapshots row, as the reader would return it."""
+    return LiveSnapshot(
+        date=date, equity=100_321.0, cash=40_000.0, positions=2.0,
+        orders_placed=2.0, orders_filled=2.0, outcome="traded",
+        day_pl=day_pl, day_pl_pct=day_pl_pct, pl_day="2026-07-08",
+        breaker="", notes="",
+    )
+
+
+class StubPaperSnapshots:
+    def __init__(
+        self, snapshot: LiveSnapshot | None = None, error: Exception | None = None
+    ) -> None:
+        self.snapshot = snapshot
+        self.error = error
+
+    def latest_snapshot(self) -> LiveSnapshot | None:
+        if self.error is not None:
+            raise self.error
+        return self.snapshot
+
+
+def test_live_summary_names_live_and_states_the_allocation_pct(
+    live_env: SimpleNamespace,
+) -> None:
+    broker = FakeBroker()
+    notes: list[str] = []
+    assert run_live(live_env, broker, notes) == 0
+    assert "daily LIVE rebalance summary" in notes[0]
+    assert "live allocation: 10% of equity (sizing against $10,000.00)" in notes[0]
+    assert "breaker:" in notes[0]
+
+
+def test_live_summary_appends_same_day_paper_vs_live_comparison(
+    live_env: SimpleNamespace,
+) -> None:
+    broker = FakeBroker()
+    route_history(broker)  # live side: +1,250.50 (+1.25%) on 2026-07-08
+    notes: list[str] = []
+    source = StubPaperSnapshots(live_paper_snapshot(AS_OF.isoformat()))
+    assert run_live(live_env, broker, notes, paper_snapshots=source) == 0
+    assert (
+        "paper vs live (2026-07-09 snapshots): paper day P/L $-321.00 (-0.32%), "
+        "live day P/L $+1,250.50 (+1.25%)"
+    ) in notes[0]
+
+
+def test_comparison_omitted_when_paper_snapshot_is_not_same_day(
+    live_env: SimpleNamespace,
+) -> None:
+    # A stale paper row omits the line BEFORE any portfolio-history fetch —
+    # no history route on the broker proves the fetch never happens.
+    broker = FakeBroker()
+    notes: list[str] = []
+    source = StubPaperSnapshots(live_paper_snapshot("2026-07-08"))
+    assert run_live(live_env, broker, notes, paper_snapshots=source) == 0
+    assert "paper vs live" not in notes[0]
+
+
+def test_comparison_omitted_without_error_when_paper_read_fails(
+    live_env: SimpleNamespace,
+) -> None:
+    broker = FakeBroker()
+    notes: list[str] = []
+    source = StubPaperSnapshots(error=RuntimeError("notion outage"))
+    assert run_live(live_env, broker, notes, paper_snapshots=source) == 0
+    assert "paper vs live" not in notes[0]
+    assert "2/2 orders filled" in notes[0]  # the trade itself is unaffected
+
+
+def test_comparison_live_history_outage_degrades_to_na(
+    live_env: SimpleNamespace,
+) -> None:
+    broker = FakeBroker()
+    broker.session.route(
+        "GET",
+        "/v2/account/portfolio/history",
+        lambda _p, _j: FakeResponse(500, {"message": "boom"}, text="boom"),
+    )
+    notes: list[str] = []
+    source = StubPaperSnapshots(live_paper_snapshot(AS_OF.isoformat()))
+    assert run_live(live_env, broker, notes, paper_snapshots=source) == 0
+    assert "paper day P/L $-321.00 (-0.32%), live day P/L n/a" in notes[0]
+
+
 # ------------------------------------------------------------------ main() wiring
 
 
-def test_main_live_wires_live_client_flag_and_no_paper_notion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+class RecordingRecorder:
+    """Stands in for TradeLedger / AccountSnapshotLog in main()-wiring tests."""
+
+    def __init__(self, notion: Any, database_id: str) -> None:
+        self.notion = notion
+        self.database_id = database_id
+        self.failures: list[str] = []
+
+
+class RecordingReader:
+    """Stands in for LiveStatusReader in main()-wiring tests."""
+
+    def __init__(self, notion: Any, snapshots_db: str | None = None) -> None:
+        self.notion = notion
+        self.snapshots_db = snapshots_db
+
+    def latest_snapshot(self) -> LiveSnapshot | None:
+        return None
+
+
+def all_databases(**overrides: Any) -> NotionDatabases:
+    kwargs: dict[str, Any] = dict(
+        research_ideas="db-ideas",
+        hypothesis_log="db-hypo",
+        backtest_results="db-results",
+        decision_log="db-decisions",
+        trade_ledger="db-ledger",
+        account_snapshots="db-snap",
+        strategy_notes="db-notes",
+        trade_ledger_live="db-ledger-live",
+        account_snapshots_live="db-snap-live",
+    )
+    kwargs.update(overrides)
+    return NotionDatabases(**kwargs)
+
+
+@pytest.fixture
+def main_wiring(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """run_rebalance capture + fake recorders/reader for main() tests."""
+    import orchestrator.live_status as live_status_mod
+    import orchestrator.notion_recorder as recorder_mod
+
     captured: dict[str, Any] = {}
 
     def fake_run(client: AlpacaClient, notify: Any, **kwargs: Any) -> int:
@@ -281,13 +420,61 @@ def test_main_live_wires_live_client_flag_and_no_paper_notion(
         return 0
 
     monkeypatch.setattr(rebalance_mod, "run_rebalance", fake_run)
+    monkeypatch.setattr(rebalance_mod, "TradeLedger", RecordingRecorder)
+    monkeypatch.setattr(rebalance_mod, "AccountSnapshotLog", RecordingRecorder)
+    monkeypatch.setattr(live_status_mod, "LiveStatusReader", RecordingReader)
+    monkeypatch.setattr(recorder_mod, "load_notion_databases", all_databases)
+    return captured
+
+
+def test_main_live_routes_notion_to_the_live_databases(
+    main_wiring: dict[str, Any],
+) -> None:
     assert rebalance_mod.main(["--live", "--no-slack"]) == 0
-    assert captured["client"].base_url == LIVE_BASE_URL
-    assert captured["live"] is True
-    # Live Notion routing lands with US-014 — until then --live must not
-    # write live fills into the PAPER ledger/snapshots.
-    assert captured["ledger"] is None
-    assert captured["snapshots"] is None
+    assert main_wiring["client"].base_url == LIVE_BASE_URL
+    assert main_wiring["live"] is True
+    assert main_wiring["ledger"].database_id == "db-ledger-live"
+    assert main_wiring["snapshots"].database_id == "db-snap-live"
+    # The comparison reader points at the PAPER snapshots database.
+    assert main_wiring["paper_snapshots"].snapshots_db == "db-snap"
+
+
+def test_main_paper_keeps_the_paper_databases_and_no_comparison_reader(
+    main_wiring: dict[str, Any],
+) -> None:
+    assert rebalance_mod.main(["--no-slack"]) == 0
+    assert main_wiring["client"].base_url == BASE_URL
+    assert main_wiring["live"] is False
+    assert main_wiring["ledger"].database_id == "db-ledger"
+    assert main_wiring["snapshots"].database_id == "db-snap"
+    assert main_wiring["paper_snapshots"] is None
+
+
+def test_main_live_refuses_when_live_database_ids_are_missing(
+    main_wiring: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import orchestrator.notion_recorder as recorder_mod
+
+    monkeypatch.setattr(
+        recorder_mod,
+        "load_notion_databases",
+        lambda: all_databases(trade_ledger_live=None, account_snapshots_live=None),
+    )
+    assert rebalance_mod.main(["--live", "--no-slack"]) == 1
+    assert main_wiring == {}  # run_rebalance never called — nothing traded
+    err = capsys.readouterr().err
+    assert "trade_ledger_live" in err
+    assert "bootstrap_notion" in err
+
+
+def test_main_live_refuses_the_no_notion_escape_hatch(
+    main_wiring: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert rebalance_mod.main(["--live", "--no-slack", "--no-notion"]) == 1
+    assert main_wiring == {}
+    assert "Trade Ledger (Live)" in capsys.readouterr().err
 
 
 def test_main_paper_default_keeps_the_paper_client(
