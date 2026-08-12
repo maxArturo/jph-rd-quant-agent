@@ -26,6 +26,7 @@ TIMERS = [
     "rdq-data-refresh.timer",
     "rdq-pred-refresh.timer",
     "rdq-rebalance.timer",
+    "rdq-rebalance-live.timer",
     "rdq-sweep.timer",
     "rdq-gpu-watchdog.timer",
 ]
@@ -33,6 +34,7 @@ ONESHOTS = [
     "rdq-data-refresh.service",
     "rdq-pred-refresh.service",
     "rdq-rebalance.service",
+    "rdq-rebalance-live.service",
     "rdq-sweep.service",
     "rdq-gpu-watchdog.service",
 ]
@@ -178,6 +180,46 @@ class TestHealthyBox:
         )
         result = run_health(env)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestBreakerState:
+    """US-019: health output reports paper AND live halt state, side by side.
+
+    A halt file is a deliberate operator/breaker act (the rebalance exits 0
+    without trading), so it WARNs but never fails the health check.
+    """
+
+    def test_healthy_box_reports_both_breakers_enabled(self, tmp_path: Path) -> None:
+        _, env = make_stub_box(tmp_path)
+        result = run_health(env)
+        assert result.returncode == 0
+        assert "PASS  breaker paper  (no halt file (paper trading enabled))" in result.stdout
+        assert "PASS  breaker live  (no halt file (live trading enabled))" in result.stdout
+
+    def test_live_halt_warns_with_path_but_stays_healthy(self, tmp_path: Path) -> None:
+        _, env = make_stub_box(tmp_path)
+        halt = tmp_path / "rdq-data" / "breaker-live" / "halt"
+        halt.parent.mkdir(parents=True)
+        halt.write_text("manual halt: test\n")
+        result = run_health(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARN  breaker live" in result.stdout
+        assert "HALTED" in result.stdout
+        assert str(halt) in result.stdout
+        # the paper breaker is independent and still reads enabled
+        assert "PASS  breaker paper" in result.stdout
+        assert "HEALTHY" in result.stdout
+
+    def test_paper_halt_warns_independently_of_live(self, tmp_path: Path) -> None:
+        _, env = make_stub_box(tmp_path)
+        halt = tmp_path / "rdq-data" / "breaker" / "halt"
+        halt.parent.mkdir(parents=True)
+        halt.write_text("manual halt: test\n")
+        result = run_health(env)
+        assert result.returncode == 0
+        assert "WARN  breaker paper" in result.stdout
+        assert str(halt) in result.stdout
+        assert "PASS  breaker live" in result.stdout
 
 
 class TestFailureModes:

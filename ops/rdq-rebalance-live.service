@@ -1,0 +1,34 @@
+# RD-Agent(Q) weekday LIVE rebalance — systemd user unit (US-019).
+#
+# REAL MONEY. Runs `python -m execution.rebalance --live` under the
+# rdq-exec-live OneCLI identity: the proxy injects the LIVE Alpaca secrets
+# (api.alpaca.markets — vaulted by the operator as their final go-live step)
+# and the Notion app connection (Trade Ledger (Live)). Until those keys are
+# vaulted, a scheduled run fails auth loudly instead of trading. The --live
+# pipeline guards every unsafe state independently of paper — live promotion
+# slot empty, market closed, stale predictions, live gate/breaker rejections,
+# operator halt (~/rdq-data/breaker-live/halt) — and posts abort notices to
+# the LIVE Slack channel.
+#
+# Slack notices must NOT transit the OneCLI proxy (docs/decisions.md
+# 2026-07-08); onecli preserves a pre-set NO_PROXY and urllib suffix-matches
+# it, covering *.slack.com.
+#
+# Started by rdq-rebalance-live.timer (weekday 08:10 America/New_York, after
+# the 08:00 paper rebalance); no [Install] section on purpose — enable the
+# TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-rebalance-live.timer
+# Logs:     journalctl --user -u rdq-rebalance-live.service
+
+[Unit]
+Description=RD-Agent(Q) weekday LIVE rebalance (real-money Alpaca via rdq-exec-live OneCLI identity)
+After=network-online.target rdq-data-refresh.service rdq-pred-refresh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+ExecStart=%h/.local/bin/onecli run --agent rdq-exec-live -- %h/rd-agent-q/.venv/bin/python -m execution.rebalance --live

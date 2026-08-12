@@ -1,0 +1,22 @@
+# Weekday pre-open trigger for rdq-rebalance-live.service (US-019).
+#
+# 08:10 America/New_York — ten minutes after the 08:00 paper rebalance so
+# both accounts trade off the same 04:30/04:45 data/pred refreshes but never
+# contend for the box at once; explicitly timezone-qualified so US DST shifts
+# never drift the run relative to the 09:30 ET open.
+#
+# Persistent=false ON PURPOSE (same rationale as paper): a live rebalance
+# missed while the box was down must be skipped, not fired at an arbitrary
+# later time of day — trading is a scheduled pre-open act, and the next
+# weekday run picks up naturally.
+
+[Unit]
+Description=Weekday 08:10 America/New_York trigger for the LIVE rebalance
+
+[Timer]
+OnCalendar=Mon..Fri 08:10 America/New_York
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

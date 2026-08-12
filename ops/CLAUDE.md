@@ -151,6 +151,11 @@
   when a missed run is harmless to catch up (data refresh: idempotent);
   trading jobs use Persistent=false so a boot mid-day doesn't fire a stale
   pre-open rebalance.
+- `rdq-rebalance-live.{service,timer}` (US-019) mirrors the paper rebalance
+  pair at 08:10 ET (paper is 08:00) under rdq-exec-live with
+  `execution.rebalance --live`. The 08:10 time is load-bearing: pred_refresh's
+  slot wording names "the 08:10 ET live rebalance" and
+  tests/test_services.py asserts the exact time — change all three together.
 - `ops/flatten.py` (US-040) is the emergency go-to-zero script (cancel all →
   close all → poll /v2/positions empty). Paper by default (rdq-exec-paper);
   `--live` (US-015) flattens the REAL-MONEY account instead and must run as
@@ -184,7 +189,10 @@
   there is sanctioned, not a leak — 19899 has no allowed mapping and fails
   everywhere. Scripts calling systemctl/ss/tailscale by bare name are testable
   end-to-end with PATH-shimmed stub binaries (tests/test_health.py pattern) —
-  both exit paths get real coverage without touching box state.
+  both exit paths get real coverage without touching box state. health.sh also
+  reports the paper AND live breaker halt files (~/rdq-data/breaker{,-live}/halt)
+  — a present halt file is a deliberate operator/breaker act, so it prints a
+  WARN line and never fails the check (exit stays 0).
 - `ops/sweep.py` (US-041) derives SOTA **offline from the trace logs**: the
   FileStorage layout is `<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl`, and a
   loop's `feedback` pkl (`.decision` attr) pairs with its `runner result` pkl

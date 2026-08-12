@@ -19,6 +19,8 @@ PRED_REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-pred-refresh.service"
 PRED_REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-pred-refresh.timer"
 REBALANCE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance.service"
 REBALANCE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance.timer"
+REBALANCE_LIVE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance-live.service"
+REBALANCE_LIVE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance-live.timer"
 SWEEP_UNIT = REPO_ROOT / "ops" / "rdq-sweep.service"
 SWEEP_TIMER = REPO_ROOT / "ops" / "rdq-sweep.timer"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
@@ -316,6 +318,75 @@ class TestRebalanceUnits:
         _systemd_analyze_verify(REBALANCE_TIMER)
 
 
+class TestRebalanceLiveUnits:
+    """US-019: the live rebalance is scheduled like paper's, ten minutes later,
+    under the rdq-exec-live identity with the --live pipeline switch."""
+
+    def test_exist(self) -> None:
+        assert REBALANCE_LIVE_UNIT.is_file()
+        assert REBALANCE_LIVE_TIMER.is_file()
+
+    def test_runs_live_rebalance_under_exec_live_identity(self) -> None:
+        text = REBALANCE_LIVE_UNIT.read_text()
+        assert "onecli run --agent rdq-exec-live" in text
+        assert "python -m execution.rebalance --live" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+
+    def test_never_runs_under_paper_or_orchestrator_identity(self) -> None:
+        """The live host is reachable only via rdq-exec-live (ops/CLAUDE.md);
+        no other identity may appear anywhere in this unit."""
+        text = REBALANCE_LIVE_UNIT.read_text()
+        assert "rdq-exec-paper" not in text
+        assert "rdq-orchestrator" not in text
+
+    def test_ordered_after_data_and_pred_refresh(self) -> None:
+        after = re.search(r"^After=(.+)$", REBALANCE_LIVE_UNIT.read_text(), re.MULTILINE)
+        assert after is not None
+        for dep in (
+            "network-online.target",
+            "rdq-data-refresh.service",
+            "rdq-pred-refresh.service",
+        ):
+            assert dep in after.group(1)
+
+    def test_slack_bypasses_onecli_proxy(self) -> None:
+        """Live abort notices + the daily summary post to the live Slack
+        channel, which must never transit the OneCLI proxy."""
+        text = REBALANCE_LIVE_UNIT.read_text()
+        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+
+    def test_no_install_section_on_service(self) -> None:
+        """Timer-driven oneshot convention: enable the TIMER, not the service."""
+        text = REBALANCE_LIVE_UNIT.read_text()
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_timer_weekday_0810_new_york(self) -> None:
+        """AC: Mon..Fri 08:10 America/New_York — the exact time is asserted
+        because pred_refresh's slot wording names 'the 08:10 ET live
+        rebalance'; changing one without the other must trip a test."""
+        days, hhmm = timer_schedule(REBALANCE_LIVE_TIMER)
+        assert days == "Mon..Fri"
+        assert hhmm == "08:10"
+        text = REBALANCE_LIVE_TIMER.read_text()
+        # a live rebalance missed while the box was down must be skipped,
+        # never fired at an arbitrary later time of day
+        assert "Persistent=false" in text
+        assert "WantedBy=timers.target" in text
+
+    def test_scheduled_after_paper_rebalance_before_open(self) -> None:
+        _, paper_time = timer_schedule(REBALANCE_TIMER)
+        _, live_time = timer_schedule(REBALANCE_LIVE_TIMER)
+        assert paper_time < live_time < "09:30"
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(REBALANCE_LIVE_UNIT)
+        _systemd_analyze_verify(REBALANCE_LIVE_TIMER)
+
+
 class TestSweepUnits:
     def test_exist(self) -> None:
         assert SWEEP_UNIT.is_file()
@@ -364,6 +435,8 @@ class TestInstallScript:
         assert "rdq-pred-refresh.timer" in text
         assert "rdq-rebalance.service" in text
         assert "rdq-rebalance.timer" in text
+        assert "rdq-rebalance-live.service" in text
+        assert "rdq-rebalance-live.timer" in text
         assert "rdq-sweep.service" in text
         assert "rdq-sweep.timer" in text
         assert ".config/systemd/user" in text

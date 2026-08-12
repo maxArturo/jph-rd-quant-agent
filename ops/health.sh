@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # health.sh — one-shot health check + exposure audit for rd-agent-q (US-042).
 #
-# Proves three things about this box:
+# Proves four things about this box:
 #   1. Every rdq-* systemd user unit is in its expected state: long-running
 #      services active, timers active/waiting, timer-driven oneshot services
 #      not in the "failed" state (inactive/dead is their healthy resting state).
+#      Alongside the timers it reports the paper and live circuit-breaker halt
+#      state (~/rdq-data/breaker{,-live}/halt) — a halt file is a deliberate
+#      operator/breaker act, so it WARNs loudly but never fails the check.
 #   2. No repo-owned process listens on a non-loopback interface (ss audit of
 #      the PIDs inside each rdq-* service cgroup), and the repo's reserved
 #      ports (19899 server_ui, 19900 trace viewer) are loopback-only no matter
@@ -27,6 +30,7 @@ TIMERS=(
   rdq-data-refresh.timer
   rdq-pred-refresh.timer
   rdq-rebalance.timer
+  rdq-rebalance-live.timer
   rdq-sweep.timer
   rdq-gpu-watchdog.timer
 )
@@ -35,6 +39,7 @@ ONESHOTS=(
   rdq-data-refresh.service
   rdq-pred-refresh.service
   rdq-rebalance.service
+  rdq-rebalance-live.service
   rdq-sweep.service
   rdq-gpu-watchdog.service
 )
@@ -66,6 +71,7 @@ command -v tailscale >/dev/null || die "tailscale not found on PATH"
 fails=0
 failed_checks=()
 pass() { echo "PASS  $1  ($2)"; }
+warn() { echo "WARN  $1  ($2)"; }
 fail() {
   echo "FAIL  $1  ($2)"
   fails=$((fails + 1))
@@ -97,6 +103,23 @@ for unit in "${ONESHOTS[@]}"; do
     fail "oneshot $unit" "last run failed — journalctl --user -u $unit"
   else
     pass "oneshot $unit" "${state:-unknown}"
+  fi
+done
+
+# Circuit-breaker halt state, paper and live (US-019). A halt file is a
+# deliberate operator/breaker decision — the scheduled rebalance exits 0
+# without trading — so it is surfaced as a WARN, never a failed check.
+PAPER_HALT_FILE="${HOME}/rdq-data/breaker/halt"
+LIVE_HALT_FILE="${HOME}/rdq-data/breaker-live/halt"
+for scope in paper live; do
+  case "$scope" in
+    paper) halt_file="$PAPER_HALT_FILE" ;;
+    live) halt_file="$LIVE_HALT_FILE" ;;
+  esac
+  if [[ -e "$halt_file" ]]; then
+    warn "breaker $scope" "HALTED — $halt_file present; $scope trading disabled until removed"
+  else
+    pass "breaker $scope" "no halt file ($scope trading enabled)"
   fi
 done
 

@@ -18,6 +18,8 @@ UNITS=(
   rdq-pred-refresh.timer
   rdq-rebalance.service
   rdq-rebalance.timer
+  rdq-rebalance-live.service
+  rdq-rebalance-live.timer
   rdq-sweep.service
   rdq-sweep.timer
   rdq-gpu-watchdog.service
