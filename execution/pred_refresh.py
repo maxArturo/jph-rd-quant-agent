@@ -14,15 +14,20 @@ Two halves, both promoted-workspace-local:
   promotion flow (orchestrator/promotion.py); a failure there warns the
   operator instead of blocking the promotion.
 
-* **Refresh (every trading morning).** ``run_pred_refresh()`` re-predicts
-  from the snapshotted weights: it copies ``pred_refresh_predict.py`` into
-  the workspace and runs it in the local_qlib docker image with
-  ``test_end=<today NY>`` (same mounts as QTDockerEnv), self-checks that the
-  newest pred.pkl now passes the rebalancer's freshness gate, prunes old
-  refresh runs, and posts the outcome to Slack. Exit codes: 0 = refreshed /
-  already fresh / nothing promoted (clean skip); 1 = failed (the rebalancer's
-  stale-pred abort is the backstop). Wired to rdq-pred-refresh.timer between
-  the 04:30 data refresh and the 08:00 rebalance.
+* **Refresh (every trading morning).** ``run_pred_refresh()`` enumerates
+  BOTH promotion slots (paper + live, US-016), dedupes by workspace path —
+  when both pin the same workspace exactly one refresh runs — and
+  re-predicts each distinct workspace sequentially from its snapshotted
+  weights: it copies ``pred_refresh_predict.py`` into the workspace and runs
+  it in the local_qlib docker image with ``test_end=<today NY>`` (same
+  mounts as QTDockerEnv), self-checks that the newest pred.pkl now passes
+  the rebalancer's freshness gate, prunes old refresh runs, and posts the
+  outcome to Slack — paper-slot notices to #quant-research, live-slot
+  notices to the live channel. Exit codes: 0 = refreshed / already fresh /
+  nothing promoted (either slot may be empty; both empty is the clean skip);
+  1 = any workspace failed (the rebalancer's stale-pred abort is the
+  backstop). Wired to rdq-pred-refresh.timer between the 04:30 data refresh
+  and the morning rebalances.
 
 Deliberate semantics (task doc "design decisions"):
 
@@ -57,7 +62,11 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from execution import signal
-from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
+from execution.promoted import (
+    NoPromotedStrategyError,
+    load_promoted_strategy,
+    load_promoted_strategy_live,
+)
 from execution.rebalance import DEFAULT_STORE_PATH, MARKET_TZ, Notify, _safe_notify
 from orchestrator.state import DEFAULT_DB_PATH, PromotedStrategy
 
@@ -452,34 +461,40 @@ def prune_refresh_runs(workspace: Path, keep: int = DEFAULT_KEEP_REFRESH_RUNS) -
     return removed
 
 
-def run_pred_refresh(
-    notify: Notify,
-    as_of: dt.date | None = None,
-    db_path: Path = DEFAULT_DB_PATH,
-    store_path: Path = DEFAULT_STORE_PATH,
-    qlib_dir: Path = DEFAULT_QLIB_DIR,
-    image: str = DEFAULT_IMAGE,
-    timeout_minutes: float = DEFAULT_TIMEOUT_MINUTES,
-    keep_runs: int = DEFAULT_KEEP_REFRESH_RUNS,
-    runner: Runner = _docker_runner,
-) -> int:
-    """Refresh the promoted workspace's predictions for as_of; exit code.
+# Slot -> the rebalance its refreshed predictions feed (Slack recall only;
+# the live timer fires at 08:10 ET, after paper's 08:00).
+_SLOT_REBALANCE = {
+    "paper": "08:00 ET paper rebalance",
+    "live": "08:10 ET live rebalance",
+}
 
-    0 = refreshed (self-check passed), already fresh, or nothing promoted
-    (clean skip); 1 = failed — posted to Slack, and the rebalancer's own
-    stale-pred abort remains the backstop.
+
+def _refresh_workspace(
+    promoted: PromotedStrategy,
+    slots: Sequence[str],
+    channels: Sequence[Notify],
+    as_of: dt.date,
+    calendar_path: Path,
+    qlib_dir: Path,
+    image: str,
+    timeout_minutes: float,
+    keep_runs: int,
+    runner: Runner,
+) -> int:
+    """Refresh one promoted workspace; 0 = refreshed / already fresh, 1 = failed.
+
+    ``slots`` names the promotion slot(s) pinning this workspace (a workspace
+    shared by both slots refreshes once, for both); every notice posts to
+    each channel in ``channels`` — that is how live-workspace failures reach
+    the live channel while paper failures keep landing in #quant-research.
     """
-    if as_of is None:
-        as_of = dt.datetime.now(MARKET_TZ).date()
-    calendar_path = store_path.expanduser() / "calendars" / "day.txt"
+
+    def post(message: str) -> None:
+        for channel in channels:
+            _safe_notify(channel, message)
+
+    rebalances = " and the ".join(_SLOT_REBALANCE[slot] for slot in slots)
     try:
-        try:
-            promoted = load_promoted_strategy(db_path)
-        except NoPromotedStrategyError as exc:
-            message = f"pred refresh skipped ({as_of}): {exc}"
-            _safe_notify(notify, message)
-            print(message)
-            return 0
         workspace = Path(promoted.workspace_path).expanduser()
         conf_path = workspace / SNAPSHOT_CONF_NAME
         env_path = workspace / SNAPSHOT_ENV_NAME
@@ -499,7 +514,7 @@ def run_pred_refresh(
                 f"\n• {describe_promoted(promoted)}"
                 f"\n• {describe_cross_section(pred_date, scores)}"
             )
-            _safe_notify(notify, message)
+            post(message)
             print(message)
             return 0
 
@@ -530,23 +545,105 @@ def run_pred_refresh(
         minutes = (time.monotonic() - started) / 60
         message = (
             f"pred refresh ({as_of}): re-predicted from the promoted run's exact "
-            f"weights for the 08:00 ET paper rebalance — {minutes:.0f} min"
+            f"weights for the {rebalances} — {minutes:.0f} min"
             f"\n• {describe_promoted(promoted)}"
             f"\n• {describe_cross_section(pred_date, scores)}"
         )
         if pruned:
             message += f"\n• pruned {pruned} old refresh run(s)"
-        _safe_notify(notify, message)
+        post(message)
         print(message)
         return 0
     except (PredRefreshError, signal.SignalError) as exc:
         message = f"pred refresh FAILED ({as_of}): {exc}"
-        _safe_notify(notify, message)
+        post(message)
         print(message, file=sys.stderr)
         return 1
     except Exception as exc:  # unexpected bug: tell the operator, then crash loudly
+        post(f"pred refresh CRASHED ({as_of}): {exc!r}")
+        raise
+
+
+def run_pred_refresh(
+    notify: Notify,
+    as_of: dt.date | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+    store_path: Path = DEFAULT_STORE_PATH,
+    qlib_dir: Path = DEFAULT_QLIB_DIR,
+    image: str = DEFAULT_IMAGE,
+    timeout_minutes: float = DEFAULT_TIMEOUT_MINUTES,
+    keep_runs: int = DEFAULT_KEEP_REFRESH_RUNS,
+    runner: Runner = _docker_runner,
+    live_notify: Notify | None = None,
+) -> int:
+    """Refresh every promoted workspace's predictions for as_of; exit code.
+
+    Enumerates BOTH promotion slots (paper + live, US-016) and dedupes by
+    workspace path: a workspace shared by both slots refreshes exactly once;
+    distinct workspaces refresh sequentially (paper's first). ``notify``
+    carries paper-slot notices; ``live_notify`` carries live-slot notices
+    and falls back to ``notify`` when None (--no-slack runs, or a live
+    channel not yet configured). 0 = every pinned workspace refreshed
+    (self-check passed) or already fresh, or nothing promoted (either slot
+    may be empty; both empty is the clean skip); 1 = any workspace failed —
+    posted to its slot's channel, and the rebalancer's own stale-pred abort
+    remains the backstop.
+    """
+    if as_of is None:
+        as_of = dt.datetime.now(MARKET_TZ).date()
+    calendar_path = store_path.expanduser() / "calendars" / "day.txt"
+    slot_channel: dict[str, Notify] = {
+        "paper": notify,
+        "live": live_notify if live_notify is not None else notify,
+    }
+    try:
+        # Insertion order makes refresh order deterministic: paper first.
+        grouped: dict[str, tuple[PromotedStrategy, list[str]]] = {}
+        empty: list[NoPromotedStrategyError] = []
+        loaders: Sequence[tuple[str, Callable[[Path], PromotedStrategy]]] = (
+            ("paper", load_promoted_strategy),
+            ("live", load_promoted_strategy_live),
+        )
+        for slot, loader in loaders:
+            try:
+                promoted = loader(db_path)
+            except NoPromotedStrategyError as exc:
+                empty.append(exc)
+                continue
+            key = str(Path(promoted.workspace_path).expanduser())
+            grouped.setdefault(key, (promoted, []))[1].append(slot)
+        if not grouped:
+            message = f"pred refresh skipped ({as_of}): {empty[0]}"
+            _safe_notify(notify, message)
+            print(message)
+            return 0
+    except Exception as exc:  # unexpected bug: tell the operator, then crash loudly
         _safe_notify(notify, f"pred refresh CRASHED ({as_of}): {exc!r}")
         raise
+
+    rc = 0
+    for promoted, slots in grouped.values():
+        channels: list[Notify] = []
+        for slot in slots:
+            channel = slot_channel[slot]
+            if not any(channel is existing for existing in channels):
+                channels.append(channel)
+        rc = max(
+            rc,
+            _refresh_workspace(
+                promoted,
+                slots,
+                channels,
+                as_of=as_of,
+                calendar_path=calendar_path,
+                qlib_dir=qlib_dir,
+                image=image,
+                timeout_minutes=timeout_minutes,
+                keep_runs=keep_runs,
+                runner=runner,
+            ),
+        )
+    return rc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -578,6 +675,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from execution.rebalance import slack_notifier, stderr_notifier
     from orchestrator.config import ConfigError
 
+    live_notify: Notify | None = None
     if args.no_slack:
         notify = stderr_notifier()
     else:
@@ -590,9 +688,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        try:
+            live_notify = slack_notifier(live=True)
+        except ConfigError:
+            # SLACK_LIVE_CHANNEL_ID unset (live features unarmed): live-slot
+            # notices fall back to the paper research channel rather than
+            # silently vanishing.
+            live_notify = None
 
     return run_pred_refresh(
         notify,
+        live_notify=live_notify,
         as_of=args.as_of,
         db_path=args.db_path,
         store_path=args.store,

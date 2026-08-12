@@ -464,6 +464,160 @@ def test_refresh_crash_notifies_then_raises(tmp_path: Path) -> None:
     assert "pred refresh CRASHED" in notices[0]
 
 
+# --- US-016: both promotion slots -------------------------------------------------
+
+
+LIVE_CONFIG = {
+    "universe": "ai_deployers",
+    "universe_tickers": ["AAPL", "MSFT", "NVDA"],
+    "topk": 50,
+    "n_drop": 5,
+    "live_equity_allocation_pct": 10,
+}
+
+
+def mounted_workspace(command: Sequence[str]) -> Path:
+    """The host workspace a docker command mounts (= which slot is refreshing)."""
+    for arg in command:
+        if arg.endswith(":/workspace/qlib_workspace"):
+            return Path(arg.rsplit(":", 1)[0])
+    raise AssertionError(f"no workspace mount in {command}")
+
+
+def routing_runner(commands: list[list[str]], day: str = FRESH_DAY):
+    """fresh_writer that writes the pred into whichever workspace is mounted."""
+
+    def runner(command: Sequence[str], log_path: Path, timeout_seconds: float) -> int:
+        commands.append(list(command))
+        log_path.write_text("qrun ok\n")
+        write_pred(mounted_workspace(command), {day: {"AAPL": 1.0, "MSFT": 0.5}}, run="refresh1")
+        return 0
+
+    return runner
+
+
+def test_refresh_shared_workspace_runs_exactly_once(tmp_path: Path) -> None:
+    """Paper and live slots pinning the SAME workspace -> one docker run; the
+    single notice reaches both channels and names both rebalances."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    StateStore(db_path).set_promoted_strategy_live(str(workspace), LIVE_CONFIG)
+    paper_notices: list[str] = []
+    live_notices: list[str] = []
+    commands: list[list[str]] = []
+    rc = run_pred_refresh(
+        paper_notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=routing_runner(commands),
+        live_notify=live_notices.append,
+    )
+    assert rc == 0
+    assert len(commands) == 1
+    (paper_notice,) = paper_notices
+    (live_notice,) = live_notices
+    assert paper_notice == live_notice
+    assert "the 08:00 ET paper rebalance and the 08:10 ET live rebalance" in paper_notice
+
+
+def test_refresh_distinct_workspaces_refresh_sequentially(tmp_path: Path) -> None:
+    """Different workspaces per slot -> two refreshes (paper's first), each
+    notice slot-labeled and posted to its own channel."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    live_workspace = make_workspace(tmp_path / "live")
+    snapshot_pred_refresh(live_workspace)
+    StateStore(db_path).set_promoted_strategy_live(str(live_workspace), LIVE_CONFIG)
+    paper_notices: list[str] = []
+    live_notices: list[str] = []
+    commands: list[list[str]] = []
+    rc = run_pred_refresh(
+        paper_notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=routing_runner(commands),
+        live_notify=live_notices.append,
+    )
+    assert rc == 0
+    assert [mounted_workspace(command) for command in commands] == [workspace, live_workspace]
+    (paper_notice,) = paper_notices
+    (live_notice,) = live_notices
+    # The staleness/success notice no longer hardcodes 'paper rebalance'.
+    assert "the 08:00 ET paper rebalance" in paper_notice
+    assert "live rebalance" not in paper_notice
+    assert "the 08:10 ET live rebalance" in live_notice
+    assert "paper rebalance" not in live_notice
+
+
+def test_live_workspace_failure_routes_to_live_channel_only(tmp_path: Path) -> None:
+    """A live-workspace failure posts to the live channel; the paper channel
+    only sees its own (successful) refresh. Exit 1 overall."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    live_workspace = make_workspace(tmp_path / "live")  # no snapshot -> refresh fails
+    StateStore(db_path).set_promoted_strategy_live(str(live_workspace), LIVE_CONFIG)
+    paper_notices: list[str] = []
+    live_notices: list[str] = []
+    rc = run_pred_refresh(
+        paper_notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=routing_runner([]),
+        live_notify=live_notices.append,
+    )
+    assert rc == 1
+    (paper_notice,) = paper_notices
+    assert "FAILED" not in paper_notice
+    assert "re-predicted" in paper_notice
+    (live_notice,) = live_notices
+    assert "pred refresh FAILED" in live_notice
+    assert "snapshot missing" in live_notice
+
+
+def test_refresh_runs_with_only_the_live_slot_promoted(tmp_path: Path) -> None:
+    """Paper slot empty is fine (no skip): the live workspace still refreshes
+    and reports to the live channel."""
+    workspace = make_workspace(tmp_path)
+    snapshot_pred_refresh(workspace)
+    db_path = tmp_path / "state.sqlite"
+    StateStore(db_path).set_promoted_strategy_live(str(workspace), LIVE_CONFIG)
+    store_path = tmp_path / "us_data"
+    write_calendar(store_path / "calendars" / "day.txt", CALENDAR)
+    paper_notices: list[str] = []
+    live_notices: list[str] = []
+    commands: list[list[str]] = []
+    rc = run_pred_refresh(
+        paper_notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=routing_runner(commands),
+        live_notify=live_notices.append,
+    )
+    assert rc == 0
+    assert len(commands) == 1
+    assert paper_notices == []
+    (live_notice,) = live_notices
+    assert "the 08:10 ET live rebalance" in live_notice
+
+
+def test_live_notify_falls_back_to_paper_channel_without_duplicates(tmp_path: Path) -> None:
+    """No live_notify (--no-slack, or live channel unarmed): live-slot notices
+    fall back to the paper notifier, deduped for a shared workspace."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    StateStore(db_path).set_promoted_strategy_live(str(workspace), LIVE_CONFIG)
+    notices: list[str] = []
+    rc = run_pred_refresh(
+        notices.append,
+        as_of=AS_OF,
+        db_path=db_path,
+        store_path=store_path,
+        runner=fresh_writer(workspace),
+    )
+    assert rc == 0
+    assert len(notices) == 1
+
+
 # --- Slack recall context ---------------------------------------------------------
 
 

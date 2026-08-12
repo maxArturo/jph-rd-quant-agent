@@ -137,6 +137,18 @@
   reads don't violate one-writer-per-DB). The comparison is advisory and
   best-effort: paper-read failures and live portfolio-history outages
   degrade (omit / n/a), never abort; keep it that way.
+- Pred refresh (US-016) serves BOTH promotion slots:
+  `run_pred_refresh(notify, ..., live_notify=)` enumerates the paper and live
+  slots, dedupes by workspace path (a shared workspace refreshes exactly
+  once) and refreshes each distinct workspace sequentially, paper's first.
+  Notices route per slot — paper -> `notify` (#quant-research), live ->
+  `live_notify` (the live channel), falling back to `notify` when None
+  (--no-slack, or SLACK_LIVE_CHANNEL_ID unset) with identity-dedupe so a
+  shared workspace never double-posts. Exit 0 needs every pinned workspace
+  refreshed/fresh (either slot may be empty; both empty = clean skip);
+  any workspace failure exits 1. Success notices name the slot's rebalance
+  ("08:00 ET paper rebalance" / "08:10 ET live rebalance") — don't hardcode
+  paper wording in refresh messages.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.

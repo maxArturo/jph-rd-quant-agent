@@ -274,8 +274,8 @@
         "Tests pass"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done 2026-08-13: run_pred_refresh enumerates paper+live slots (live_notify= param, main() wires slack_notifier(live=True) with unarmed-channel fallback), dedupes by workspace path (shared ws refreshes once, notice to both channels), refreshes distinct workspaces sequentially paper-first via new _refresh_workspace; failures route to the owning slot's channel; exit 0 either-slot-empty / both-empty skip preserved; success notice slot-aware (no 'paper rebalance' hardcode); 5 new tests."
     },
     {
       "id": "US-017",
