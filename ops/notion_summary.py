@@ -51,7 +51,10 @@ lists, no jargon) covering:
    yearly return the strategy would have earned ABOVE the market after trading
    costs; MDD is the worst peak-to-trough loss along the way; IC measures how
    often its daily stock rankings pointed the right way (small positive numbers
-   are normal and useful).
+   are normal and useful). When the facts include the currently live
+   (incumbent) strategy's results, say plainly whether the new approach beat
+   it and by how much — and if the facts say the test windows differ, say the
+   comparison is not apples-to-apples.
 4. Honest caveats: this is a simulation on past data; past results do not
    guarantee future ones; the strategy trades paper money until explicitly
    promoted, and even then it trades a paper account.
@@ -76,10 +79,37 @@ def build_facts(context: dict) -> str:
         f" {candidate.get('hypothesis', 'n/a')}",
         f"Why the system kept it: {candidate.get('feedback_reason') or 'n/a'}",
     ]
+    if candidate.get("factors"):
+        lines.append(f"Signals the winning strategy uses: {', '.join(candidate['factors'])}")
+    window = candidate.get("window")
+    if window:
+        lines.append(f"Historical test window: {window[0]} to {window[1]}")
     for label, key in (("IC", "IC"), ("ARR", "ARR"), ("MDD", "MDD"), ("Sharpe", "Sharpe")):
         if key in metrics:
             lines.append(f"{label}: {metrics[key]:.4f}")
+    lines.extend(_incumbent_facts(context.get("incumbent"), window))
     return "\n".join(lines)
+
+
+def _incumbent_facts(incumbent: dict | None, candidate_window: list | None) -> list[str]:
+    """Baseline facts — what the new result must beat to matter (2026-08-12 gap)."""
+    if incumbent is None:
+        return ["Currently live (incumbent) strategy: none — nothing is promoted yet"]
+    metrics = incumbent.get("metrics") or {}
+    parts = ", ".join(f"{k} {metrics[k]:.4f}" for k in ("IC", "ARR", "MDD") if k in metrics)
+    if not parts:
+        return ["Currently live (incumbent) strategy: metrics unavailable"]
+    window = incumbent.get("window")
+    if window and candidate_window and window == candidate_window:
+        note = " on the SAME test window as the new result"
+    elif window and candidate_window:
+        note = (
+            f" on a DIFFERENT test window ({window[0]} to {window[1]}) — "
+            "not directly comparable with the new result"
+        )
+    else:
+        note = ""
+    return [f"Currently live (incumbent) strategy's results{note}: {parts}"]
 
 
 def generate_summary(context: dict) -> str:

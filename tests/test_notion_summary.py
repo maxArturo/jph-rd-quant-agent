@@ -26,6 +26,13 @@ CONTEXT = {
         "hypothesis": "Bounded intraday factors add orthogonal alpha",
         "feedback_reason": "beat the previous best",
         "metrics": {"IC": 0.0186, "ARR": 0.7128, "MDD": -0.14},
+        "factors": ["intraday_range_z", "downside_share_60"],
+        "window": ["2025-01-02", "2026-07-10"],
+    },
+    "incumbent": {
+        "workspace": "/y/e05ad9b46f4d",
+        "metrics": {"IC": 0.0217, "ARR": 0.5936, "MDD": -0.2665},
+        "window": ["2025-01-02", "2026-07-10"],
     },
 }
 
@@ -38,10 +45,35 @@ class TestFactsAndPrompt:
         assert "ARR: 0.7128" in facts
         assert "Hypotheses tested: 10" in facts
 
+    def test_facts_include_factors_window_and_incumbent(self) -> None:
+        facts = build_facts(CONTEXT)
+        assert "intraday_range_z, downside_share_60" in facts
+        assert "Historical test window: 2025-01-02 to 2026-07-10" in facts
+        assert "incumbent" in facts
+        assert "ARR 0.5936" in facts
+        assert "SAME test window" in facts
+
+    def test_facts_flag_incumbent_window_mismatch(self) -> None:
+        context = dict(CONTEXT)
+        context["incumbent"] = {
+            "metrics": {"ARR": 0.5936},
+            "window": ["2025-01-02", "2026-08-11"],
+        }
+        facts = build_facts(context)
+        assert "DIFFERENT test window" in facts
+        assert "not directly comparable" in facts
+
+    def test_facts_without_incumbent_say_none_promoted(self) -> None:
+        context = {k: v for k, v in CONTEXT.items() if k != "incumbent"}
+        context["incumbent"] = None
+        facts = build_facts(context)
+        assert "none — nothing is promoted yet" in facts
+
     def test_prompt_demands_nontechnical_prose_and_caveats(self) -> None:
         assert "NO trading or machine-learning" in SUMMARY_PROMPT
         assert "caveats" in SUMMARY_PROMPT.lower()
         assert "paper" in SUMMARY_PROMPT
+        assert "incumbent" in SUMMARY_PROMPT
 
 
 class TestBlocks:
@@ -54,9 +86,7 @@ class TestBlocks:
     def test_long_paragraph_is_chunked_under_notion_cap(self) -> None:
         blocks = text_to_blocks("x" * 4000)
         assert len(blocks) == 3
-        assert all(
-            len(b["paragraph"]["rich_text"][0]["text"]["content"]) <= 1900 for b in blocks
-        )
+        assert all(len(b["paragraph"]["rich_text"][0]["text"]["content"]) <= 1900 for b in blocks)
 
 
 class TestNoteProperties:

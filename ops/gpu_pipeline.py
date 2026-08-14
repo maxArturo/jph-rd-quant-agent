@@ -12,7 +12,9 @@ ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
    --poll seconds; each completed loop is posted to Slack as a digest
    (hypothesis, SOTA verdict, IC/ARR/MDD).
 4. On run exit: fetch results, pick the promotion candidate (last SOTA loop),
-   post the final summary with the exact promote command, and DESTROY the
+   post the final summary — candidate metrics + factor list + backtest window
+   and the incumbent (promoted) strategy's own numbers, with a warning when
+   the windows differ — with the exact promote command, and DESTROY the
    droplet (billing guard: also destroys on pipeline failure and on the
    --max-hours abort; --keep-worker opts out).
 
@@ -93,7 +95,7 @@ class StatusFile:
 
 
 def parse_size_plan(raw: str) -> list[tuple[str, str]]:
-    """"size:region,size:region" -> [(size, region), ...]; rejects junk."""
+    """ "size:region,size:region" -> [(size, region), ...]; rejects junk."""
     plan: list[tuple[str, str]] = []
     for entry in filter(None, (e.strip() for e in raw.split(","))):
         size, sep, region = entry.partition(":")
@@ -244,6 +246,57 @@ def reportable(loop: dict) -> bool:
     return loop.get("decision") is not None
 
 
+def incumbent_report(db_path: Path | None = None) -> dict | None:
+    """The promoted strategy's own backtest numbers — the baseline a candidate
+    must beat (2026-08-12: a promotion stalled because these never reached the
+    digests or the write-up). None when nothing is promoted; metrics/window
+    each degrade to None independently.
+    """
+    try:
+        from execution.promoted import load_promoted_strategy
+
+        promoted = load_promoted_strategy(db_path) if db_path else load_promoted_strategy()
+    except Exception:  # noqa: BLE001 — nothing promoted yet is a normal state
+        return None
+    from ops.gpu_trace import workspace_metrics, workspace_window
+
+    workspace = str(Path(promoted.workspace_path).expanduser())
+    return {
+        "workspace": workspace,
+        "metrics": workspace_metrics(workspace),
+        "window": workspace_window(workspace),
+    }
+
+
+def _metric_parts(metrics: dict) -> str:
+    return " · ".join(f"{k} {metrics[k]:.4f}" for k in ("IC", "ARR", "MDD") if k in metrics)
+
+
+def _incumbent_lines(incumbent: dict | None, candidate_window: list | None) -> list[str]:
+    """Baseline lines for the final summary — the numbers a promotion call needs."""
+    if not incumbent:
+        return ["No promoted strategy on record — nothing to compare the candidate against."]
+    tag = Path(incumbent.get("workspace") or "").name[:8] or "unknown"
+    metrics = incumbent.get("metrics")
+    if not metrics:
+        return [
+            f":warning: promoted workspace `{tag}` has no readable qlib_res.csv — "
+            "incumbent baseline unavailable"
+        ]
+    window = incumbent.get("window")
+    if window and candidate_window and window == candidate_window:
+        note = f" — same backtest window ({window[0]} → {window[1]})"
+    elif window and candidate_window:
+        note = (
+            f" — :warning: windows differ (incumbent {window[0]} → {window[1]}, "
+            f"candidate {candidate_window[0]} → {candidate_window[1]}); "
+            "metrics are not directly comparable"
+        )
+    else:
+        note = ""
+    return [f"Incumbent (promoted `{tag}`): {_metric_parts(metrics)}{note}"]
+
+
 def format_final_summary(
     status: dict, exit_code: int | None, elapsed_hours: float, size: str
 ) -> str:
@@ -260,11 +313,16 @@ def format_final_summary(
     ]
     if candidate and candidate.get("workspace"):
         metrics = candidate.get("metrics") or {}
-        parts = [f"{k} {metrics[k]:.4f}" for k in ("IC", "ARR", "MDD") if k in metrics]
+        window = status.get("candidate_window")
+        window_text = f", backtest {window[0]} → {window[1]}" if window else ""
         lines.append(
             f"Promotion candidate: loop {candidate_loop}, workspace "
-            f"`{Path(candidate['workspace']).name}` ({' · '.join(parts)})"
+            f"`{Path(candidate['workspace']).name}` ({_metric_parts(metrics)}{window_text})"
         )
+        factors = status.get("candidate_factors")
+        if factors:
+            lines.append(f"Candidate factors: {', '.join(factors)}")
+        lines.extend(_incumbent_lines(status.get("incumbent"), window))
         lines.append(
             "Promote with: `.venv/bin/python -m ops.promote_fetched --workspace "
             f"{candidate['workspace']}` (run from ~/rd-agent-q)"
@@ -323,16 +381,26 @@ def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict
             "hypothesis": candidate.get("hypothesis"),
             "feedback_reason": candidate.get("feedback_reason"),
             "metrics": candidate.get("metrics") or {},
+            "factors": final_status.get("candidate_factors"),
+            "window": final_status.get("candidate_window"),
         },
+        "incumbent": final_status.get("incumbent"),
     }
     context_path = Path.home() / "rdq-runs" / "gpu_worker" / "notion_context.json"
     context_path.parent.mkdir(parents=True, exist_ok=True)
     context_path.write_text(json.dumps(context))
     result = subprocess.run(
         [
-            "onecli", "run", "--agent", "rdq-orchestrator", "--",
+            "onecli",
+            "run",
+            "--agent",
+            "rdq-orchestrator",
+            "--",
             str(REPO_ROOT / ".venv" / "bin" / "python"),
-            "-m", "ops.notion_summary", "--context", str(context_path),
+            "-m",
+            "ops.notion_summary",
+            "--context",
+            str(context_path),
         ],
         capture_output=True,
         text=True,
@@ -449,7 +517,13 @@ def run_pipeline(options: PipelineOptions) -> int:
         status_file.update(stage="fetching")
         worker_sh("fetch")
         results_root = Path.home() / "rdq-runs" / "gpu_worker" / "results"
-        from ops.gpu_trace import latest_trace_dir, loop_reports, promotion_candidate
+        from ops.gpu_trace import (
+            latest_trace_dir,
+            loop_reports,
+            promotion_candidate,
+            workspace_factors,
+            workspace_window,
+        )
 
         trace_dir = latest_trace_dir(results_root / "us_quant" / "log")
         remap = (WORKER_WS_PREFIX, str(results_root / "us_quant"))
@@ -458,6 +532,9 @@ def run_pipeline(options: PipelineOptions) -> int:
         final_status = {
             "loops": [r.to_dict() for r in reports],
             "candidate_loop": candidate.loop if candidate else None,
+            "candidate_window": workspace_window(candidate.workspace) if candidate else None,
+            "candidate_factors": workspace_factors(candidate.workspace) if candidate else None,
+            "incumbent": incumbent_report(),
         }
         elapsed_hours = (time.monotonic() - started) / 3600
         slack.post(format_final_summary(final_status, exit_code, elapsed_hours, size))
@@ -466,6 +543,9 @@ def run_pipeline(options: PipelineOptions) -> int:
             loops=final_status["loops"],
             exit=exit_code,
             candidate_workspace=candidate.workspace if candidate else None,
+            candidate_window=final_status["candidate_window"],
+            candidate_factors=final_status["candidate_factors"],
+            incumbent=final_status["incumbent"],
         )
         if candidate is not None and candidate.workspace:
             post_comparison_chart(slack, candidate.workspace)

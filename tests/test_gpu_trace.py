@@ -16,6 +16,8 @@ from ops.gpu_trace import (
     promotion_candidate,
     remap_path,
     run_exit_code,
+    workspace_factors,
+    workspace_window,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +36,26 @@ def write_metrics(workspace: Path, ic: float = 0.02, arr: float = 0.5) -> None:
         f"1day.excess_return_with_cost.annualized_return,{arr}\n"
         "1day.excess_return_with_cost.max_drawdown,-0.15\n"
     )
+
+
+def write_ret(workspace: Path, first: str = "2025-01-02", last: str = "2026-07-10") -> None:
+    import pandas as pd
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(
+        {"return": [0.01, 0.02], "cost": [0.001, 0.001]},
+        index=pd.to_datetime([first, last]),
+    )
+    frame.to_pickle(workspace / "ret.pkl")
+
+
+def write_factors(workspace: Path, names: tuple[str, ...] = ("alpha_one", "beta_two")) -> None:
+    import pandas as pd
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    columns = pd.MultiIndex.from_tuples([("feature", name) for name in names])
+    frame = pd.DataFrame([[0.0] * len(names)], columns=columns)
+    frame.to_parquet(workspace / "combined_factors_df.parquet")
 
 
 def make_loop(
@@ -149,6 +171,37 @@ class TestCandidateAndHelpers:
         latest = latest_trace_dir(tmp_path)
         assert latest is not None
         assert latest.name == "2026-08-06_14-03-18"
+
+
+class TestWorkspaceWindow:
+    def test_reads_first_and_last_trading_day(self, tmp_path: Path) -> None:
+        write_ret(tmp_path / "ws", first="2025-01-02", last="2026-07-10")
+        assert workspace_window(str(tmp_path / "ws")) == ["2025-01-02", "2026-07-10"]
+
+    def test_degrades_to_none(self, tmp_path: Path) -> None:
+        assert workspace_window(None) is None
+        assert workspace_window(str(tmp_path / "missing")) is None
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "ret.pkl").write_bytes(b"not a pickle")
+        assert workspace_window(str(ws)) is None
+
+
+class TestWorkspaceFactors:
+    def test_reads_factor_names_from_multiindex_columns(self, tmp_path: Path) -> None:
+        write_factors(tmp_path / "ws", names=("extension_penalty", "downside_share_60"))
+        assert workspace_factors(str(tmp_path / "ws")) == [
+            "extension_penalty",
+            "downside_share_60",
+        ]
+
+    def test_degrades_to_none(self, tmp_path: Path) -> None:
+        assert workspace_factors(None) is None
+        assert workspace_factors(str(tmp_path / "missing")) is None
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "combined_factors_df.parquet").write_bytes(b"junk")
+        assert workspace_factors(str(ws)) is None
 
 
 class TestCli:

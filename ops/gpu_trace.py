@@ -96,6 +96,55 @@ def workspace_metrics(workspace: str | None) -> dict[str, float] | None:
     return labelled or None
 
 
+def workspace_window(workspace: str | None) -> list[str] | None:
+    """[first, last] backtest trading day (ISO dates) from a workspace's ret.pkl.
+
+    Metrics from two workspaces are only comparable when their windows match —
+    the 2026-08-12 promotion stalled because nothing surfaced this. JSON-friendly
+    list (rides the status file / Notion context); None on any missing/unreadable
+    artifact.
+    """
+    if not workspace:
+        return None
+    path = Path(workspace) / "ret.pkl"
+    if not path.is_file():
+        return None
+    import pandas as pd  # lazy: same reason as workspace_metrics
+
+    try:
+        frame = pd.read_pickle(path)
+        if not isinstance(frame, pd.DataFrame) or len(frame.index) == 0:
+            return None
+        return [
+            pd.Timestamp(frame.index[0]).date().isoformat(),
+            pd.Timestamp(frame.index[-1]).date().isoformat(),
+        ]
+    except Exception:  # noqa: BLE001 — window degrades, never breaks a summary
+        return None
+
+
+def workspace_factors(workspace: str | None) -> list[str] | None:
+    """Factor names from a workspace's combined_factors_df.parquet columns.
+
+    Columns round-trip as ('feature', '<name>') tuples — the promoted set is
+    the tuple tails. None when the artifact is absent/unreadable (model-only
+    workspaces have no combined-factors frame).
+    """
+    if not workspace:
+        return None
+    path = Path(workspace) / "combined_factors_df.parquet"
+    if not path.is_file():
+        return None
+    import pandas as pd  # lazy: same reason as workspace_metrics
+
+    try:
+        columns = pd.read_parquet(path).columns
+    except Exception:  # noqa: BLE001 — factor list degrades, never breaks a summary
+        return None
+    names = [str(col[-1]) if isinstance(col, tuple) else str(col) for col in columns]
+    return names or None
+
+
 def loop_reports(trace_dir: Path, remap: tuple[str, str] | None = None) -> list[LoopReport]:
     reports: list[LoopReport] = []
     loop_dirs: list[tuple[int, Path]] = []

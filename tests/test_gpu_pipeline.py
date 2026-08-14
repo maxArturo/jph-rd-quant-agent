@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ops.gpu_pipeline import (
     SlackThread,
     format_final_summary,
     format_loop_digest,
+    incumbent_report,
     parse_size_plan,
     reportable,
     worker_sh,
@@ -70,10 +73,93 @@ class TestFormatting:
         assert "2 loops, 1 SOTA" in text
         assert "ops.promote_fetched" in text
         assert "$2.3" in text  # 1.5h * $1.57/hr ≈ $2.35
+        # No incumbent in the status → the summary must say so, not go silent.
+        assert "No promoted strategy on record" in text
 
     def test_final_summary_without_candidate(self) -> None:
         text = format_final_summary({"loops": [], "candidate_loop": None}, 1, 0.5, "unknown-size")
         assert "nothing to promote" in text
+
+    def _candidate_status(self, **extra) -> dict:
+        return {
+            "loops": [
+                {
+                    "loop": 5,
+                    "decision": True,
+                    "workspace": "/x/fefa27ea8aa4",
+                    "metrics": {"IC": 0.0214, "ARR": 0.6435, "MDD": -0.2822},
+                }
+            ],
+            "candidate_loop": 5,
+            **extra,
+        }
+
+    def test_final_summary_incumbent_same_window(self) -> None:
+        status = self._candidate_status(
+            candidate_window=["2025-01-02", "2026-07-10"],
+            candidate_factors=["extension_penalty", "downside_share_60"],
+            incumbent={
+                "workspace": "/y/e05ad9b46f4d",
+                "metrics": {"IC": 0.0217, "ARR": 0.5936, "MDD": -0.2665},
+                "window": ["2025-01-02", "2026-07-10"],
+            },
+        )
+        text = format_final_summary(status, 0, 1.0, "gpu-4000adax1-20gb")
+        assert "backtest 2025-01-02 → 2026-07-10" in text
+        assert "Candidate factors: extension_penalty, downside_share_60" in text
+        assert "Incumbent (promoted `e05ad9b4`): IC 0.0217 · ARR 0.5936 · MDD -0.2665" in text
+        assert "same backtest window" in text
+        assert "not directly comparable" not in text
+
+    def test_final_summary_incumbent_window_mismatch_warns(self) -> None:
+        status = self._candidate_status(
+            candidate_window=["2025-01-02", "2026-08-11"],
+            incumbent={
+                "workspace": "/y/e05ad9b46f4d",
+                "metrics": {"IC": 0.0217},
+                "window": ["2025-01-02", "2026-07-10"],
+            },
+        )
+        text = format_final_summary(status, 0, 1.0, "gpu-4000adax1-20gb")
+        assert "windows differ" in text
+        assert "not directly comparable" in text
+
+    def test_final_summary_incumbent_metrics_unreadable(self) -> None:
+        status = self._candidate_status(
+            incumbent={"workspace": "/y/e05ad9b46f4d", "metrics": None, "window": None}
+        )
+        text = format_final_summary(status, 0, 1.0, "gpu-4000adax1-20gb")
+        assert "incumbent baseline unavailable" in text
+
+
+class TestIncumbentReport:
+    def test_none_when_nothing_promoted(self, tmp_path: Path) -> None:
+        assert incumbent_report(tmp_path / "state.sqlite") is None
+
+    def test_reads_promoted_metrics_and_window(self, tmp_path: Path) -> None:
+        import pandas as pd
+
+        from orchestrator.state import StateStore
+
+        workspace = tmp_path / "e05ad9b46f4d"
+        workspace.mkdir()
+        (workspace / "qlib_res.csv").write_text(
+            ",0\n"
+            "IC,0.0217\n"
+            "1day.excess_return_with_cost.annualized_return,0.5936\n"
+            "1day.excess_return_with_cost.max_drawdown,-0.2665\n"
+        )
+        pd.DataFrame(
+            {"return": [0.01, 0.02]}, index=pd.to_datetime(["2025-01-02", "2026-07-10"])
+        ).to_pickle(workspace / "ret.pkl")
+        db_path = tmp_path / "state.sqlite"
+        StateStore(db_path).set_promoted_strategy(str(workspace), {"universe": "us_liquid"})
+
+        report = incumbent_report(db_path)
+        assert report is not None
+        assert report["workspace"] == str(workspace)
+        assert report["metrics"] == pytest.approx({"IC": 0.0217, "ARR": 0.5936, "MDD": -0.2665})
+        assert report["window"] == ["2025-01-02", "2026-07-10"]
 
 
 class TestSlackFallback:
