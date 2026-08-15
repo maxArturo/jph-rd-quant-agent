@@ -180,7 +180,12 @@ class TestResearchUnit:
 
     def test_unit_dates_match_run_us_quant_defaults(self) -> None:
         """The unit duplicates wire_env's date defaults (all three prefixes);
-        this catches drift between ops/run_us_quant.sh and the unit."""
+        this catches drift between ops/run_us_quant.sh and the unit.
+
+        Since US-008 the hardcoded TEST_END is a FALLBACK only: GPU-path runs
+        get a launch-computed rolling RDQ_TEST_END from ops/gpu_pipeline.py,
+        and run_us_quant.sh refuses any test end more than 90 calendar days
+        behind the store calendar end (see test_stale_test_end_guard_present)."""
         script_defaults = dict(
             re.findall(r"RDQ_((?:TRAIN|VALID|TEST)_(?:START|END)):-(\d{4}-\d{2}-\d{2})",
                        RUN_US_QUANT.read_text())
@@ -193,6 +198,15 @@ class TestResearchUnit:
                     f"{prefix}_{segment} missing or out of sync with "
                     f"run_us_quant.sh default {date}"
                 )
+
+    def test_stale_test_end_guard_present(self) -> None:
+        """US-008: the fallback TEST_END rots as the store rolls forward —
+        run_us_quant.sh must carry the 90-day store-lag guard in both modes
+        so a stale window fails loud instead of backtesting ancient data."""
+        text = RUN_US_QUANT.read_text()
+        assert "MAX_TEST_END_LAG_DAYS=90" in text
+        assert "behind the store calendar end" in text
+        assert text.count("check_test_end_lag") >= 3  # definition + both modes
 
     @pytest.mark.skipif(
         shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"

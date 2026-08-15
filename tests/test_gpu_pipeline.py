@@ -7,12 +7,17 @@ from pathlib import Path
 import pytest
 
 from ops.gpu_pipeline import (
+    PipelineOptions,
     SlackThread,
+    build_run_args,
+    compute_run_dates,
     format_final_summary,
     format_loop_digest,
+    format_run_start,
     incumbent_report,
     parse_size_plan,
     reportable,
+    resolve_instrument_hash,
     worker_sh,
 )
 
@@ -29,6 +34,96 @@ class TestSizePlan:
     def test_rejects_empty(self) -> None:
         with pytest.raises(ValueError, match="empty"):
             parse_size_plan(" , ")
+
+
+def make_store(tmp_path: Path, *, periods: int = 60) -> tuple[Path, list[str]]:
+    """Fake qlib store: business-day calendar + a span-format universe file."""
+    import pandas as pd
+
+    store = tmp_path / "us_data"
+    (store / "calendars").mkdir(parents=True)
+    days = [d.date().isoformat() for d in pd.bdate_range("2026-01-01", periods=periods)]
+    (store / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
+    (store / "instruments").mkdir()
+    (store / "instruments" / "us_liquid.txt").write_text(
+        # Multiple spans per symbol (PIT format, US-023) — must dedup to one.
+        "MSFT\t2016-01-04\t2020-06-30\n"
+        "AAPL\t2016-01-04\t2026-06-30\n"
+        "MSFT\t2021-01-04\t2026-06-30\n"
+    )
+    return store, days
+
+
+class TestRunDates:
+    def test_test_end_rolls_back_confirm_days_trading_days(self, tmp_path: Path) -> None:
+        store, days = make_store(tmp_path)
+        dates = compute_run_dates(store)
+        assert dates.confirm_days == 42
+        assert dates.test_end == days[-43]
+        assert dates.confirm_start == days[-42]
+        assert dates.store_end == days[-1]
+
+    def test_confirm_days_configurable(self, tmp_path: Path) -> None:
+        store, days = make_store(tmp_path)
+        dates = compute_run_dates(store, confirm_days=5)
+        assert dates.test_end == days[-6]
+        assert dates.confirm_start == days[-5]
+        assert dates.store_end == days[-1]
+
+    def test_calendar_too_short_fails_loud(self, tmp_path: Path) -> None:
+        store, _ = make_store(tmp_path, periods=42)
+        with pytest.raises(RuntimeError, match="cannot reserve"):
+            compute_run_dates(store)
+
+    def test_missing_calendar_fails_loud(self, tmp_path: Path) -> None:
+        with pytest.raises(Exception, match="calendar"):
+            compute_run_dates(tmp_path / "nowhere")
+
+    def test_rejects_nonpositive_confirm_days(self, tmp_path: Path) -> None:
+        store, _ = make_store(tmp_path)
+        with pytest.raises(ValueError, match="confirm_days"):
+            compute_run_dates(store, confirm_days=0)
+
+
+class TestInstrumentHash:
+    def test_hashes_sorted_deduped_symbols(self, tmp_path: Path) -> None:
+        from ops.promotion_gate import hash_instruments
+
+        store, _ = make_store(tmp_path)
+        # Span rows collapse to the symbol set — same hash as the plain list.
+        assert resolve_instrument_hash("us_liquid", store) == hash_instruments(["AAPL", "MSFT"])
+
+    def test_missing_universe_file_fails_loud(self, tmp_path: Path) -> None:
+        store, _ = make_store(tmp_path)
+        with pytest.raises(RuntimeError, match="make_universe"):
+            resolve_instrument_hash("nonexistent", store)
+
+
+class TestLaunchComposition:
+    def test_run_args_always_carry_test_end(self, tmp_path: Path) -> None:
+        dates = compute_run_dates(make_store(tmp_path)[0], confirm_days=5)
+        args = build_run_args(PipelineOptions(loop_n=7), dates)
+        assert args[:3] == ["run", "--loop_n", "7"]
+        assert args[3:5] == ["--test-end", dates.test_end]
+
+    def test_run_args_optional_flags(self, tmp_path: Path) -> None:
+        dates = compute_run_dates(make_store(tmp_path)[0], confirm_days=5)
+        options = PipelineOptions(
+            loop_n=3, all_duration="12h", universe="my_universe", instruction="try momentum"
+        )
+        args = build_run_args(options, dates)
+        assert args[-6:] == [
+            "--all_duration", "12h", "--universe", "my_universe", "--instruction", "try momentum"
+        ]
+
+    def test_run_start_message_states_window_and_hash(self, tmp_path: Path) -> None:
+        dates = compute_run_dates(make_store(tmp_path)[0], confirm_days=5)
+        text = format_run_start(PipelineOptions(loop_n=10), dates, "abcd1234abcd1234")
+        assert "budget 10 hypotheses" in text
+        assert f"Test window ends {dates.test_end}" in text
+        assert f"{dates.confirm_start} → {dates.store_end}" in text
+        assert "5 trading days" in text
+        assert "`abcd1234abcd1234`" in text
 
 
 class TestFormatting:

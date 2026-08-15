@@ -13,7 +13,7 @@
 #   gpu_worker.sh bootstrap             # packages, docker image, data, venv (idempotent)
 #   gpu_worker.sh tunnel                # (re)start reverse tunnel + write proxy env
 #   gpu_worker.sh check                 # remote run_us_quant.sh --check (RDQ_LAUNCHER=direct)
-#   gpu_worker.sh run [--loop_n N] [--all_duration DUR]   # launch in remote tmux
+#   gpu_worker.sh run [--loop_n N] [--all_duration DUR] [--test-end YYYY-MM-DD]  # launch in remote tmux
 #   gpu_worker.sh snapshot              # bake worker into rdq-gpu-base-* image (fast boots)
 #   gpu_worker.sh ssh <cmd...>          # arbitrary remote command (worker SSH opts)
 #   gpu_worker.sh status                # droplet / tunnel / run / GPU utilization
@@ -352,12 +352,19 @@ cmd_check() {
 }
 
 cmd_run() {
-  local loop_n="1" all_duration="" instruction="" universe=""
+  local loop_n="1" all_duration="" instruction="" universe="" test_end=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --loop_n)
         [[ $# -ge 2 ]] || fail "--loop_n needs a value"
         loop_n="$2"; shift 2 ;;
+      --test-end)
+        # Launch-computed rolling TEST_END (US-008, ops/gpu_pipeline.py) —
+        # exported as RDQ_TEST_END so run_us_quant.sh skips its stale fallback.
+        [[ $# -ge 2 ]] || fail "--test-end needs a value"
+        [[ "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+          || fail "--test-end must be YYYY-MM-DD (got '$2')"
+        test_end="$2"; shift 2 ;;
       --all_duration)
         [[ $# -ge 2 ]] || fail "--all_duration needs a value"
         all_duration="$2"; shift 2 ;;
@@ -400,7 +407,12 @@ export RDQ_UNIVERSE_TEMPLATES='/root/rdq-data/templates/${universe}'"
     instr_line="export RDQ_USER_INSTRUCTION=\"\$(printf '%s' '${instr_b64}' | base64 -d)\""
   fi
 
-  note "writing launch script (loop_n=${loop_n}${all_duration:+, all_duration=${all_duration}}${universe:+, universe=${universe}}${instruction:+, directive-seeded})"
+  local test_end_line=""
+  if [[ -n "${test_end}" ]]; then
+    test_end_line="export RDQ_TEST_END='${test_end}'"
+  fi
+
+  note "writing launch script (loop_n=${loop_n}${all_duration:+, all_duration=${all_duration}}${universe:+, universe=${universe}}${instruction:+, directive-seeded}${test_end:+, test_end=${test_end}})"
   remote "umask 077 && cat > /root/rdq-launch.sh && chmod +x /root/rdq-launch.sh" <<EOF
 #!/usr/bin/env bash
 # Written by gpu_worker.sh run — executed inside tmux on the worker.
@@ -409,6 +421,7 @@ set -a; . ${PROXY_ENV_FILE}; set +a
 export RDQ_LAUNCHER=direct
 ${universe_exports}
 ${instr_line}
+${test_end_line}
 mkdir -p /root/rdq-runs
 {
   echo "=== run start \$(date -u +%FT%TZ) loop_n=${loop_n}${all_duration:+ all_duration=${all_duration}} ==="

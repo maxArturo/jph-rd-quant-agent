@@ -76,6 +76,24 @@ class TestScriptContract:
         assert "RDQ_LAUNCHER=direct" in text
         assert "run_us_quant.sh" in text
 
+    def test_run_test_end_rejects_non_iso_dates(self, tmp_path: Path) -> None:
+        """--test-end (US-008) is validated at parse time, before any state or
+        remote access — a malformed date must never reach the launch script."""
+        result = run_script(
+            "run", "--test-end", "07/10/2026", env={"RDQ_GPU_STATE_DIR": str(tmp_path)}
+        )
+        assert result.returncode != 0
+        assert "YYYY-MM-DD" in result.stderr
+
+    def test_run_exports_rdq_test_end_to_launch_script(self) -> None:
+        """The generated launch script must export RDQ_TEST_END so the worker's
+        run_us_quant.sh uses the launch-computed rolling window, not its
+        hardcoded fallback."""
+        text = SCRIPT.read_text()
+        assert "export RDQ_TEST_END='${test_end}'" in text
+        heredoc = text.split("cat > /root/rdq-launch.sh")[1].split("\nEOF")[0]
+        assert "${test_end_line}" in heredoc
+
     def test_tunnel_never_persists_token_locally(self) -> None:
         """The proxy URL (with auth token) may be written only to the worker;
         nothing should redirect it into the local state dir."""

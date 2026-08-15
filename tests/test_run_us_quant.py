@@ -140,6 +140,47 @@ class TestCheckMode:
         assert "not strictly ordered" in result.stderr
 
 
+class TestStoreLagGuard:
+    """US-008: the hardcoded fallback TEST_END must fail loud once it trails
+    the store calendar end by more than 90 calendar days. These run --check,
+    which hits the guard before any onecli/rdagent legs."""
+
+    def test_check_fails_when_test_end_over_90_days_behind_store(self, tmp_path: Path) -> None:
+        env = make_fake_layout(tmp_path)
+        calendar = Path(env["RDQ_QLIB_STORE"]) / "calendars" / "day.txt"
+        calendar.write_text("2026-01-02\n2026-04-02\n")  # store end 91 days past test end
+        env["RDQ_TEST_END"] = "2026-01-01"
+        result = run_script("--check", env=env)
+        assert result.returncode != 0
+        assert "behind the store calendar end" in result.stderr
+        assert "gpu_pipeline" in result.stderr  # message names the fresh-date path
+
+    def test_check_passes_at_exactly_90_days_behind(self, tmp_path: Path) -> None:
+        env = make_fake_layout(tmp_path)
+        calendar = Path(env["RDQ_QLIB_STORE"]) / "calendars" / "day.txt"
+        calendar.write_text("2026-01-02\n2026-04-01\n")  # store end exactly 90 days past
+        env["RDQ_TEST_END"] = "2026-01-01"
+        result = run_script("--check", env=env)
+        assert "behind the store calendar end" not in result.stderr
+        assert "PASS: TEST_END 2026-01-01 within 90 days" in result.stdout
+
+    @pytest.mark.skipif(
+        not (REPO_ROOT / "research" / ".env").exists(),
+        reason="research/.env not present on this checkout",
+    )
+    def test_run_mode_hits_the_guard_before_launching(self, tmp_path: Path) -> None:
+        """The guard must protect real launches (worker path), not just --check."""
+        env = make_fake_layout(tmp_path)
+        calendar = Path(env["RDQ_QLIB_STORE"]) / "calendars" / "day.txt"
+        calendar.write_text("2026-04-02\n")
+        env["RDQ_TEST_END"] = "2026-01-01"
+        env["RDQ_RUN_ROOT"] = str(tmp_path / "runs")
+        result = run_script("--loop_n", "1", env=env)
+        assert result.returncode != 0
+        assert "behind the store calendar end" in result.stderr
+        assert "Launching" not in result.stdout
+
+
 class TestDirectLauncher:
     """RDQ_LAUNCHER=direct — the GPU-worker path (ops/gpu_worker/), which runs
     without onecli and instead requires the OneCLI proxy env pre-exported."""

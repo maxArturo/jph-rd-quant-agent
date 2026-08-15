@@ -61,6 +61,19 @@
   with thread_ts (root post first). These runs never touch server_ui state —
   thread replies can't stop them (`gpu_worker.sh ssh tmux kill-session -t
   rdq-run` does).
+- Rolling TEST_END (US-008): `gpu_pipeline` computes RDQ_TEST_END at launch —
+  store calendar end minus `--confirm-days` (default 42, env RDQ_CONFIRM_DAYS)
+  TRADING days — BEFORE provisioning (a broken store must cost $0), and ships
+  it via `gpu_worker.sh run --test-end` into the worker launch script. The
+  reserved slice (TEST_END, store end] is the gate's confirmation window; the
+  status file (pipeline_status.json) records `test_end`,
+  `confirmation_window`, `confirm_days`, and `instrument_hash`
+  (promotion_gate.hash_instruments over the resolved store instrument list) —
+  US-010/US-011 must read parity inputs from there, not re-derive them.
+  run_us_quant.sh keeps a hardcoded fallback TEST_END for manual runs but
+  fails both modes when the resulting test end trails the store calendar end
+  by >90 calendar days (`check_test_end_lag`) — refresh the fallback when it
+  trips.
 - `python -m ops.promote_fetched --workspace <dir> [--yes]` promotes a fetched
   GPU workspace: same records as orchestrator/promotion.py confirm_promotion
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per

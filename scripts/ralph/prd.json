@@ -122,8 +122,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "gpu_pipeline computes RDQ_TEST_END = store end − confirm_days (42, --confirm-days/RDQ_CONFIRM_DAYS) trading days BEFORE provisioning; status file records test_end/confirmation_window/confirm_days/instrument_hash (hash_instruments over the store list); run-start Slack states the window+hash; gpu_worker.sh run --test-end exports RDQ_TEST_END; run_us_quant.sh check_test_end_lag fails both modes >90 days behind store end. Live-verified: test_end 2026-06-12, window 2026-06-15→2026-08-13, hash 6fbafedc13ed9a52."
     },
     {
       "id": "US-009",

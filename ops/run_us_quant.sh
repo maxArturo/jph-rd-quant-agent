@@ -110,6 +110,32 @@ wire_env() {
   export QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT="research.us_quant.USQlibModelHypothesis2Experiment"
 }
 
+# US-008: RDQ_TEST_END normally arrives launch-computed (ops/gpu_pipeline.py
+# rolls it with the store calendar); wire_env's hardcoded fallback exists only
+# for manual runs and ROTS as the store rolls forward. Refuse when the
+# resulting test end trails the store calendar end by more than 90 calendar
+# days — a run on that window would backtest ancient data and never be
+# gate-comparable.
+MAX_TEST_END_LAG_DAYS=90
+
+check_test_end_lag() {
+  local calendar="${STORE}/calendars/day.txt"
+  [[ -f "${calendar}" ]] || return 0  # store presence is checked elsewhere
+  local store_end
+  store_end="$(tail -n 1 "${calendar}" | tr -d '[:space:]' | cut -c1-10)"
+  [[ -n "${store_end}" ]] || return 0
+  local store_epoch test_epoch
+  store_epoch="$(date -d "${store_end}" +%s 2>/dev/null)" \
+    || fail "unparseable store calendar end '${store_end}' in ${calendar}"
+  test_epoch="$(date -d "${QLIB_QUANT_TEST_END}" +%s 2>/dev/null)" \
+    || fail "unparseable TEST_END '${QLIB_QUANT_TEST_END}'"
+  local lag_days=$(( (store_epoch - test_epoch) / 86400 ))
+  if (( lag_days > MAX_TEST_END_LAG_DAYS )); then
+    fail "TEST_END ${QLIB_QUANT_TEST_END} is ${lag_days} days behind the store calendar end ${store_end} (max ${MAX_TEST_END_LAG_DAYS}) — pass RDQ_TEST_END (ops/gpu_pipeline.py computes it at launch) or refresh wire_env's fallback"
+  fi
+  echo "PASS: TEST_END ${QLIB_QUANT_TEST_END} within ${MAX_TEST_END_LAG_DAYS} days of store end ${store_end}"
+}
+
 check_dates() {
   # ISO dates compare correctly as strings.
   local ok=1
@@ -150,6 +176,7 @@ check_direct_proxy_env() {
 check_mode() {
   wire_env
   check_dates
+  check_test_end_lag
 
   if [[ "${LAUNCHER}" == "direct" ]]; then
     check_direct_proxy_env
@@ -240,6 +267,7 @@ run_mode() {
 
   wire_env
   check_dates
+  check_test_end_lag
 
   local ts
   ts="$(date -u +%Y-%m-%d_%H-%M-%S)"

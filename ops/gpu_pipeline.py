@@ -5,12 +5,19 @@
 Stages (all driven from the control box, shelling out to
 ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
 
+0. dates (US-008) — RDQ_TEST_END rolls with the data store: the store
+   calendar end minus --confirm-days (default 42) trading days. The reserved
+   slice (TEST_END, store end] is the confirmation window the hypothesis
+   search never sees — the gate's out-of-sample leg. The resolved instrument
+   list is hashed at launch (promotion_gate.hash_instruments) as the gate's
+   universe-parity input. Both land in the status file and the run-start
+   Slack message. Computed BEFORE provisioning so a broken store costs $0.
 1. provision  — tries each (size, region) in RDQ_GPU_SIZE_PLAN until one has
    stock (GPU availability fluctuates; a sold-out size 422s otherwise).
 2. bootstrap + tunnel + check.
-3. run --loop_n N, then poll the worker (ops.gpu_trace over SSH) every
-   --poll seconds; each completed loop is posted to Slack as a digest
-   (hypothesis, SOTA verdict, IC/ARR/MDD).
+3. run --loop_n N --test-end <computed>, then poll the worker (ops.gpu_trace
+   over SSH) every --poll seconds; each completed loop is posted to Slack as
+   a digest (hypothesis, SOTA verdict, IC/ARR/MDD).
 4. On run exit: fetch results, pick the promotion candidate (last SOTA loop),
    post the final summary — candidate metrics + factor list + backtest window
    and the incumbent (promoted) strategy's own numbers, with a warning when
@@ -45,6 +52,7 @@ WORKER_RUN_LOG = "/root/rdq-runs/gpu-run.log"
 WORKER_WS_PREFIX = "/root/rdq-runs/us_quant"
 
 DEFAULT_SIZE_PLAN = "gpu-4000adax1-20gb:tor1,gpu-6000adax1-48gb:tor1,gpu-l40sx1-48gb:tor1"
+DEFAULT_CONFIRM_DAYS = 42
 PRICE_PER_HOUR = {
     "gpu-4000adax1-20gb": 0.76,
     "gpu-6000adax1-48gb": 1.57,
@@ -71,6 +79,69 @@ class PipelineOptions:
     status_file: Path | None = None  # live JSON the bot's check_research_status reads
     snapshot: bool = False  # bake an rdq-gpu-base image after check (fast future boots)
     no_notion: bool = False  # skip the plain-language Notion write-up
+    confirm_days: int = DEFAULT_CONFIRM_DAYS  # trading days reserved past TEST_END (US-008)
+
+
+@dataclass(frozen=True)
+class RunDates:
+    """Launch-computed run dates (US-008): the test window rolls with the
+    store instead of rotting on a hardcoded TEST_END, and the trailing
+    ``confirm_days`` trading days are reserved for the promotion gate's
+    confirmation window — the search never sees them."""
+
+    test_end: str  # RDQ_TEST_END shipped to the worker
+    confirm_start: str  # first reserved trading day (the one after test_end)
+    store_end: str  # store calendar end == last reserved day
+    confirm_days: int
+
+
+def qlib_store_path() -> Path:
+    import os
+
+    return Path(os.environ.get("RDQ_QLIB_STORE", "~/.qlib/qlib_data/us_data")).expanduser()
+
+
+def compute_run_dates(
+    store: Path | None = None, confirm_days: int = DEFAULT_CONFIRM_DAYS
+) -> RunDates:
+    """TEST_END = store calendar end minus confirm_days TRADING days."""
+    if confirm_days < 1:
+        raise ValueError(f"confirm_days must be >= 1, got {confirm_days}")
+    from execution.signal import _read_calendar
+
+    store = store if store is not None else qlib_store_path()
+    days = sorted(_read_calendar(store / "calendars" / "day.txt"))
+    if len(days) <= confirm_days:
+        raise RuntimeError(
+            f"store calendar has only {len(days)} trading days — cannot reserve a "
+            f"{confirm_days}-day confirmation window (is the store built?)"
+        )
+    return RunDates(
+        test_end=days[-(confirm_days + 1)].isoformat(),
+        confirm_start=days[-confirm_days].isoformat(),
+        store_end=days[-1].isoformat(),
+        confirm_days=confirm_days,
+    )
+
+
+def resolve_instrument_hash(universe: str, store: Path | None = None) -> str:
+    """Hash the resolved instrument list — the gate's universe-parity input.
+
+    Read from the control-box store the worker is bootstrapped from; the hash
+    is not derivable from a workspace later (conf names the market, not the
+    resolved list), so it MUST be recorded at launch.
+    """
+    store = store if store is not None else qlib_store_path()
+    path = store / "instruments" / f"{universe}.txt"
+    if not path.is_file():
+        raise RuntimeError(
+            f"instrument list for universe '{universe}' not found at {path} — "
+            "materialize it with data/make_universe.py before launching"
+        )
+    from ops.promotion_gate import hash_instruments
+
+    symbols = (line.split("\t", 1)[0] for line in path.read_text().splitlines())
+    return hash_instruments(symbols)
 
 
 class StatusFile:
@@ -415,6 +486,32 @@ def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict
     return None
 
 
+def build_run_args(options: PipelineOptions, dates: RunDates) -> list[str]:
+    """gpu_worker.sh run argv — always carries the launch-computed TEST_END."""
+    run_args = ["run", "--loop_n", str(options.loop_n), "--test-end", dates.test_end]
+    if options.all_duration:
+        run_args += ["--all_duration", options.all_duration]
+    if options.universe:
+        run_args += ["--universe", options.universe]
+    if options.instruction:
+        run_args += ["--instruction", options.instruction]
+    return run_args
+
+
+def format_run_start(options: PipelineOptions, dates: RunDates, instrument_hash: str) -> str:
+    """Run-start Slack message — states the rolling window the operator can't
+    otherwise see (TEST_END no longer lives in any file)."""
+    return (
+        f":microscope: research loop launched — budget {options.loop_n} hypotheses"
+        f"{', universe ' + options.universe if options.universe else ''}"
+        f"{', directive-seeded' if options.instruction else ''}\n"
+        f"Test window ends {dates.test_end} (rolls with the store); confirmation window "
+        f"{dates.confirm_start} → {dates.store_end} ({dates.confirm_days} trading days "
+        f"reserved, unseen by the search) · universe hash `{instrument_hash}`\n"
+        "Per-loop digests will follow in this thread"
+    )
+
+
 def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | None) -> None:
     """Point the orchestrator's run row at the fetched trace and close it out."""
     try:
@@ -442,6 +539,16 @@ def run_pipeline(options: PipelineOptions) -> int:
     trace_dir = None
     exit_code: int | None = None
     try:
+        # US-008: dates + universe hash come first — a stale store or missing
+        # instrument list must fail before any droplet starts billing.
+        dates = compute_run_dates(confirm_days=options.confirm_days)
+        instrument_hash = resolve_instrument_hash(options.universe or "us_liquid")
+        status_file.update(
+            test_end=dates.test_end,
+            confirmation_window=[dates.confirm_start, dates.store_end],
+            confirm_days=dates.confirm_days,
+            instrument_hash=instrument_hash,
+        )
         if options.reuse_worker:
             slack.post(":recycle: reusing the existing GPU worker")
         else:
@@ -460,21 +567,9 @@ def run_pipeline(options: PipelineOptions) -> int:
             slack.post(":camera: baking the worker into a base snapshot (future boots ~3 min)")
             status_file.update(stage="snapshot")
             worker_sh("snapshot")
-        run_args = ["run", "--loop_n", str(options.loop_n)]
-        if options.all_duration:
-            run_args += ["--all_duration", options.all_duration]
-        if options.universe:
-            run_args += ["--universe", options.universe]
-        if options.instruction:
-            run_args += ["--instruction", options.instruction]
-        worker_sh(*run_args)
+        worker_sh(*build_run_args(options, dates))
         status_file.update(stage="running")
-        slack.post(
-            f":microscope: research loop launched — budget {options.loop_n} hypotheses"
-            f"{', universe ' + options.universe if options.universe else ''}"
-            f"{', directive-seeded' if options.instruction else ''}; "
-            "per-loop digests will follow in this thread"
-        )
+        slack.post(format_run_start(options, dates, instrument_hash))
 
         posted: set[int] = set()
         status: dict = {}
@@ -595,6 +690,12 @@ def main(argv: list[str] | None = None) -> int:
         "--instruction", default=None, help="research directive (seeded into the loop)"
     )
     parser.add_argument("--status-file", type=Path, default=None, help="live status JSON path")
+    parser.add_argument(
+        "--confirm-days",
+        type=int,
+        default=int(os.environ.get("RDQ_CONFIRM_DAYS", DEFAULT_CONFIRM_DAYS)),
+        help="trading days reserved past TEST_END as the confirmation window",
+    )
     parser.add_argument("--snapshot", action="store_true", help="bake a base image after check")
     parser.add_argument("--no-notion", action="store_true", help="skip the Notion write-up")
     parser.add_argument("--keep-worker", action="store_true")
@@ -621,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
         status_file=args.status_file,
         snapshot=args.snapshot,
         no_notion=args.no_notion,
+        confirm_days=args.confirm_days,
     )
     return run_pipeline(options)
 
