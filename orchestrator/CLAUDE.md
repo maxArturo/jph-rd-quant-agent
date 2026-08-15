@@ -240,6 +240,15 @@
   injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
   synchronous. See dispatch_action in tests/test_poller.py.
 
+- Global GPU run lock (US-020): `GpuBackend.active_run_lock()` reads
+  `ops/run_lock.py`'s lock file (`(active, broken_stale)`; a stale lock —
+  owning unit inactive, pid gone — is removed and the caller posts the broom
+  note). start_research refuses while ANY thread holds the lock (runs are
+  never queued — don't reintroduce that fiction in status text); stop_run's
+  GPU branch refuses unless the requesting thread owns it, because cancel()
+  kills the single shared worker's tmux session. The unit-active probe rides
+  GpuBackend's injected runner, so tests stay hermetic (StubGpu in
+  tests/test_conversation.py carries `lock`/`broken_lock` fields).
 - Broker visibility (US-046): check_account/check_orders/check_pnl are
   READ-ONLY ToolSpecs in ConversationCore behind the `BrokerReader` protocol
   (default: the real `execution.alpaca_client.AlpacaClient` — the

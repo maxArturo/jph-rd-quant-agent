@@ -97,6 +97,41 @@ class TestGpuBackend:
         status_file.write_text("not json")
         assert backend.read_status() is None
 
+    def test_active_run_lock_probes_owner_unit_via_runner(self, tmp_path: Path) -> None:
+        """US-020: unit-active probe rides the injected runner (returncode 0 =
+        active), so a live owner's lock is reported, not broken."""
+        lock_file = tmp_path / "run.lock"
+        lock_file.write_text(json.dumps({"unit": "rdq-gpu-run-9-9", "thread_ts": "9.9"}))
+        runner = RecordingRunner(returncode=0)
+        backend = GpuBackend(
+            status_file=tmp_path / "s.json", runner=runner, lock_file=lock_file
+        )
+        active, broken = backend.active_run_lock()
+        assert broken is None
+        assert active is not None and active.thread_ts == "9.9"
+        assert ["systemctl", "--user", "is-active", "--quiet", "rdq-gpu-run-9-9"] in runner.calls
+        assert lock_file.exists()
+
+    def test_active_run_lock_breaks_stale_lock(self, tmp_path: Path) -> None:
+        lock_file = tmp_path / "run.lock"
+        # Unit inactive (returncode 1) and no pid -> dead owner.
+        lock_file.write_text(json.dumps({"unit": "rdq-gpu-run-9-9", "thread_ts": "9.9"}))
+        backend = GpuBackend(
+            status_file=tmp_path / "s.json", runner=RecordingRunner(1), lock_file=lock_file
+        )
+        active, broken = backend.active_run_lock()
+        assert active is None
+        assert broken is not None and broken.unit == "rdq-gpu-run-9-9"
+        assert not lock_file.exists()
+
+    def test_active_run_lock_without_lock_file(self, tmp_path: Path) -> None:
+        backend = GpuBackend(
+            status_file=tmp_path / "s.json",
+            runner=RecordingRunner(),
+            lock_file=tmp_path / "run.lock",
+        )
+        assert backend.active_run_lock() == (None, None)
+
 
 class TestFormatStatus:
     def test_running_status(self) -> None:

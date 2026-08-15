@@ -24,7 +24,9 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from ops import run_lock
 from ops.gpu_trace import loop_reports, promotion_candidate
+from ops.run_lock import RunLock
 from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, locate_artifacts
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,9 @@ class GpuLaunchError(RuntimeError):
     """The pipeline unit could not be started/stopped."""
 
 
-def _unit_name(thread_ts: str) -> str:
-    return "rdq-gpu-run-" + thread_ts.replace(".", "-")
+# The transient-unit naming convention lives in ops/run_lock.py (US-020) —
+# the pipeline derives its lock-owner unit from the same function.
+_unit_name = run_lock.unit_name
 
 
 class GpuBackend:
@@ -56,10 +59,12 @@ class GpuBackend:
         status_file: Path = STATUS_FILE,
         repo_root: Path = REPO_ROOT,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        lock_file: Path = run_lock.DEFAULT_LOCK_FILE,
     ) -> None:
         self.status_file = status_file
         self._repo_root = repo_root
         self._run = runner or subprocess.run
+        self._lock_file = lock_file
 
     def launch(
         self,
@@ -113,6 +118,25 @@ class GpuBackend:
             check=False,
         )
         return result.returncode == 0
+
+    def active_run_lock(self) -> tuple[RunLock | None, RunLock | None]:
+        """US-020: ``(active, broken_stale)`` from the global run lock.
+
+        A stale lock (owning unit inactive, pid gone) is removed here; the
+        caller reports the break. The is-active probe goes through the same
+        injected runner as the other systemctl calls, so tests stay hermetic.
+        """
+
+        def is_active(unit: str) -> bool:
+            result = self._run(
+                ["systemctl", "--user", "is-active", "--quiet", unit],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result.returncode == 0
+
+        return run_lock.check_lock(self._lock_file, is_active=is_active)
 
     def cancel(self) -> str:
         """Kill the remote research session; the pipeline finalizes on its own."""

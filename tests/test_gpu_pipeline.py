@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from ops import run_lock
 from ops.gpu_pipeline import (
     PipelineOptions,
     RunDates,
     SlackThread,
     StatusFile,
+    acquire_pipeline_lock,
     build_notion_context,
     build_run_args,
     compute_run_dates,
@@ -23,6 +25,7 @@ from ops.gpu_pipeline import (
     parse_size_plan,
     reportable,
     resolve_instrument_hash,
+    run_pipeline,
     run_status,
     worker_sh,
 )
@@ -616,3 +619,110 @@ class TestGateAndPromote:
         assert json.loads(status_path.read_text())["gate"] == {
             "error": "qlib_res parse exploded"
         }
+
+
+# --- US-020: global run mutual exclusion --------------------------------------
+
+
+class TestPipelineLock:
+    def options(self, tmp_path: Path, thread_ts: str | None = "1.2") -> PipelineOptions:
+        return PipelineOptions(
+            thread_ts=thread_ts,
+            no_slack=True,
+            lock_file=tmp_path / "run.lock",
+            status_file=tmp_path / "status.json",
+        )
+
+    def test_acquire_records_owner_unit_and_thread(self, tmp_path: Path) -> None:
+        import os
+
+        options = self.options(tmp_path)
+        slack = RecordingSlack()
+        unit = acquire_pipeline_lock(options, slack, StatusFile(None, "1.2"))
+        assert unit == "rdq-gpu-run-1-2"
+        lock = run_lock.read_lock(tmp_path / "run.lock")
+        assert lock is not None
+        assert (lock.unit, lock.thread_ts, lock.pid) == (unit, "1.2", os.getpid())
+        assert slack.posts == []
+
+    def test_manual_run_locks_under_its_pid(self, tmp_path: Path) -> None:
+        import os
+
+        options = self.options(tmp_path, thread_ts=None)
+        unit = acquire_pipeline_lock(options, RecordingSlack(), StatusFile(None, None))
+        assert unit == f"manual-{os.getpid()}"
+        lock = run_lock.read_lock(tmp_path / "run.lock")
+        assert lock is not None and lock.pid == os.getpid()
+
+    def test_refused_while_owner_lives(self, tmp_path: Path) -> None:
+        import os
+
+        # Live owner: this very process's pid keeps the lock non-stale.
+        run_lock.acquire_lock(
+            tmp_path / "run.lock",
+            unit="rdq-gpu-run-9-9",
+            thread_ts="9.9",
+            pid=os.getpid(),
+        )
+        options = self.options(tmp_path)
+        slack = RecordingSlack()
+        status = StatusFile(tmp_path / "status.json", "1.2")
+        assert acquire_pipeline_lock(options, slack, status) is None
+        assert "already active" in slack.posts[0] and "9.9" in slack.posts[0]
+        written = json.loads((tmp_path / "status.json").read_text())
+        assert written["stage"] == "refused"
+        # The active run's lock is untouched.
+        lock = run_lock.read_lock(tmp_path / "run.lock")
+        assert lock is not None and lock.thread_ts == "9.9"
+
+    def test_stale_lock_broken_with_note(self, tmp_path: Path) -> None:
+        (tmp_path / "run.lock").write_text(
+            json.dumps({"unit": "rdq-gpu-run-9-9", "thread_ts": "9.9", "pid": None})
+        )
+        options = self.options(tmp_path)
+        slack = RecordingSlack()
+        unit = acquire_pipeline_lock(options, slack, StatusFile(None, "1.2"))
+        assert unit == "rdq-gpu-run-1-2"
+        assert "stale" in slack.posts[0] and "9.9" in slack.posts[0]
+
+    def test_run_pipeline_refusal_never_touches_the_worker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        run_lock.acquire_lock(
+            tmp_path / "run.lock",
+            unit="rdq-gpu-run-9-9",
+            thread_ts="9.9",
+            pid=os.getpid(),
+        )
+
+        def forbidden(*args: object, **kwargs: object) -> object:
+            raise AssertionError("worker_sh must not run on a refused start")
+
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", forbidden)
+        # thread_ts=None: refusal must not consult the orchestrator DB either.
+        options = self.options(tmp_path, thread_ts=None)
+        assert run_pipeline(options) == 1
+        assert json.loads((tmp_path / "status.json").read_text())["stage"] == "refused"
+        lock = run_lock.read_lock(tmp_path / "run.lock")
+        assert lock is not None and lock.thread_ts == "9.9"  # holder keeps the lock
+
+    def test_run_pipeline_releases_lock_even_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        def exploding_dates(**kwargs: object) -> object:
+            raise RuntimeError("store on fire")
+
+        def fake_worker_sh(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=list(map(str, args)), returncode=0,
+                                               stdout="", stderr="")
+
+        monkeypatch.setattr("ops.gpu_pipeline.compute_run_dates", exploding_dates)
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", fake_worker_sh)
+        options = self.options(tmp_path, thread_ts=None)
+        assert run_pipeline(options) == 1
+        assert run_lock.read_lock(tmp_path / "run.lock") is None  # released in finally
+        assert json.loads((tmp_path / "status.json").read_text())["stage"] == "failed"

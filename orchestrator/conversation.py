@@ -33,6 +33,7 @@ from orchestrator.state import (
 
 if TYPE_CHECKING:
     from execution.alpaca_client import Account, Order, PortfolioHistory, Position
+    from ops.run_lock import RunLock
     from orchestrator.universe import MaterializedUniverse, UniverseProposal
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class GpuRunner(Protocol):
     def stop_unit(self, unit: str) -> None: ...
 
     def unit_active(self, thread_ts: str) -> bool: ...
+
+    def active_run_lock(self) -> tuple[RunLock | None, RunLock | None]: ...
 
     def cancel(self) -> str: ...
 
@@ -754,6 +757,26 @@ class ConversationCore:
             existing = self._store.get_run(thread_ts)
             if existing is not None:
                 raise ValueError(duplicate_run_message(existing))
+            # US-020: one GPU worker at a time, globally — another thread's
+            # active run must refuse this launch (its teardown would destroy
+            # the shared droplet). A stale lock is broken with a visible note.
+            active_lock, broken_lock = self._gpu.active_run_lock()
+            if broken_lock is not None:
+                say(
+                    text=(
+                        f":broom: cleared a stale GPU run lock left by"
+                        f" {broken_lock.describe()} — the owning unit is no"
+                        " longer active."
+                    ),
+                    thread_ts=thread_ts,
+                )
+            if active_lock is not None:
+                raise ValueError(
+                    f"a research run is already active for {active_lock.describe()}"
+                    " — only one GPU worker exists at a time, so a second run"
+                    " cannot start. Wait for that run to finish, or have the"
+                    " operator stop it from its own thread."
+                )
             universe = DEFAULT_UNIVERSE
             tickers: list[str] | None = None
             record = self._store.get_thread_universe(thread_ts)
@@ -846,8 +869,9 @@ class ConversationCore:
             if status is not None and status.get("thread_ts") not in (None, thread_ts):
                 return (
                     f"run status: {run.status}. The live pipeline status belongs to"
-                    " another thread's run (one GPU worker at a time) — this run is"
-                    " queued behind it or already finished."
+                    " another thread's run (one GPU worker at a time; runs are"
+                    " never queued) — this thread's run already finished; its"
+                    " summary is earlier in this thread."
                 )
             active = self._gpu.unit_active(thread_ts)
             return f"run status: {run.status} (GPU backend)\n" + format_gpu_status(
@@ -880,6 +904,25 @@ class ConversationCore:
             if run.backend == "gpu":
                 if self._gpu is None:
                     raise ValueError("the GPU research backend is not wired — cannot cancel")
+                # US-020: cancel kills THE worker's tmux session — only the
+                # lock-owning thread may do that, or a stop here would kill
+                # another thread's run.
+                active_lock, broken_lock = self._gpu.active_run_lock()
+                if broken_lock is not None:
+                    say(
+                        text=(
+                            f":broom: cleared a stale GPU run lock left by"
+                            f" {broken_lock.describe()} — the owning unit is no"
+                            " longer active."
+                        ),
+                        thread_ts=thread_ts,
+                    )
+                if active_lock is not None and active_lock.thread_ts != thread_ts:
+                    raise ValueError(
+                        f"the active GPU run belongs to {active_lock.describe()}"
+                        " — this thread's run is not the one running. Stop it"
+                        " from its own thread."
+                    )
                 message = self._gpu.cancel()
                 say(text=f":octagonal_sign: {message}", thread_ts=thread_ts)
                 logger.info("cancelled GPU research run for thread %s", thread_ts)

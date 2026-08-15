@@ -122,6 +122,20 @@
   `universe_tickers` via hash_instruments (both canonicalize identically —
   verified matching on the real pair 2026-08-15). Status file gains
   `gate` (verdict dict or {"error": ...}) + `auto_promoted` fields.
+- Global run mutual exclusion (US-020, `ops/run_lock.py`): exactly ONE GPU
+  run may exist at a time — gpu_worker.sh keys everything off a single
+  worker.env, so a second pipeline's teardown would DESTROY the first run's
+  droplet. `gpu_pipeline` acquires `~/rdq-runs/gpu_worker/run.lock` before
+  doing anything (`acquire_pipeline_lock`) and releases it in its finally; a
+  REFUSED start exits 1 without running teardown (that's the whole point —
+  never add worker_sh calls to the refusal path). The lock records
+  unit + thread_ts + pid; stale = unit inactive AND pid gone (manual CLI runs
+  have no real unit — the pid keeps their lock live), broken automatically
+  with a Slack note. `run_lock.unit_name` is THE transient-unit naming
+  convention (gpu_backend imports it — keep them shared). Orchestrator side:
+  `GpuBackend.active_run_lock()` → start_research refuses naming the owning
+  thread; stop_run only cancels when the requesting thread owns the lock
+  (cancel kills THE worker's tmux session, whoever's it is).
 - `ops/promotion_gate.py` (US-007) codifies "beats the incumbent":
   `evaluate_gate(candidate, incumbent, config)` is PURE — callers do IO via
   `load_metric_bundle(workspace, instrument_hash=...)` (every field degrades

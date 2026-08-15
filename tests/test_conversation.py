@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ops.run_lock import RunLock
 from orchestrator import prompts
 from orchestrator.conversation import (
     DEFAULT_UNIVERSE,
@@ -99,6 +100,9 @@ class StubGpu:
         self.cancels = 0
         self.status: dict[str, Any] | None = None
         self.active = False
+        # US-020 global run lock: (active holder, stale lock just broken).
+        self.lock: RunLock | None = None
+        self.broken_lock: RunLock | None = None
 
     def launch(
         self,
@@ -124,6 +128,10 @@ class StubGpu:
     def unit_active(self, thread_ts: str) -> bool:
         del thread_ts
         return self.active
+
+    def active_run_lock(self) -> tuple[RunLock | None, RunLock | None]:
+        broken, self.broken_lock = self.broken_lock, None
+        return self.lock, broken
 
     def cancel(self) -> str:
         self.cancels += 1
@@ -480,6 +488,41 @@ def test_start_research_without_digest_builder_launches_bare_directive(tmp_path:
     assert "not included (clean-slate run)" in say.calls[0]["text"]
 
 
+def test_start_research_refuses_while_another_thread_holds_the_lock(tmp_path: Path) -> None:
+    """US-020: the global lock, not just this thread's run row, gates launches."""
+    client = FakeClient(judgment_messages=start_research_script("Can't start yet."))
+    gpu = StubGpu()
+    gpu.lock = RunLock(unit="rdq-gpu-run-9999-0001", thread_ts="9999.0001")
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_directive(THREAD, objective="Test something")
+
+    core.handle_message(THREAD, "research it", RecordingSay())
+
+    assert gpu.launched == []
+    assert store.get_run(THREAD) is None
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "9999.0001" in tool_result["content"]  # names the active run's thread
+    assert "one GPU worker" in tool_result["content"]
+
+
+def test_start_research_breaks_stale_lock_with_note_then_launches(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    gpu.broken_lock = RunLock(unit="rdq-gpu-run-9999-0001", thread_ts="9999.0001")
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_directive(THREAD, objective="Test something")
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "research it", say)
+
+    assert len(gpu.launched) == 1
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "running"
+    assert ":broom:" in say.calls[0]["text"]
+    assert "rdq-gpu-run-9999-0001" in say.calls[0]["text"]
+
+
 def test_start_research_supervised_is_refused_on_gpu(tmp_path: Path) -> None:
     client = FakeClient(
         judgment_messages=start_research_script(
@@ -609,6 +652,36 @@ def test_stop_run_on_gpu_backend_sends_cancel_and_keeps_row_running(tmp_path: Pa
     assert "cancel signal sent" in say.calls[0]["text"]
 
 
+def test_stop_run_refuses_when_lock_owned_by_another_thread(tmp_path: Path) -> None:
+    """US-020: cancel kills THE shared worker — only the owning thread may."""
+    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Can't stop."))
+    gpu = StubGpu()
+    gpu.lock = RunLock(unit="rdq-gpu-run-9999-0001", thread_ts="9999.0001")
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_run(THREAD, str(gpu.status_file), universe="us_liquid", backend="gpu")
+
+    core.handle_message(THREAD, "cancel the run", RecordingSay())
+
+    assert gpu.cancels == 0
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "9999.0001" in tool_result["content"]  # names the owning thread
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "running"
+
+
+def test_stop_run_acts_when_this_thread_owns_the_lock(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Cancelling."))
+    gpu = StubGpu()
+    gpu.lock = RunLock(unit="rdq-gpu-run-" + THREAD.replace(".", "-"), thread_ts=THREAD)
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_run(THREAD, str(gpu.status_file), universe="us_liquid", backend="gpu")
+
+    core.handle_message(THREAD, "cancel the run", RecordingSay())
+
+    assert gpu.cancels == 1
+
+
 def test_resume_run_refused_for_gpu_backend(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=lifecycle_script("resume_run", "Can't resume."))
     gpu = StubGpu()
@@ -666,6 +739,8 @@ def test_check_research_status_flags_foreign_pipeline(tmp_path: Path) -> None:
 
     tool_result = client.stream_calls[1]["messages"][2]["content"][0]
     assert "another thread" in tool_result["content"]
+    # US-020: runs are never queued — the old text lied about that.
+    assert "queued" not in tool_result["content"] or "never queued" in tool_result["content"]
 
 
 def test_stop_run_stops_run_and_updates_status(tmp_path: Path) -> None:

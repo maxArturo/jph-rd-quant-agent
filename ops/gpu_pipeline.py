@@ -5,6 +5,11 @@
 Stages (all driven from the control box, shelling out to
 ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
 
+0a. lock (US-020) — the global run lock (ops/run_lock.py) is acquired before
+   anything else and released in the finally block. One GPU worker exists at
+   a time (shared worker.env), so a second concurrent pipeline would destroy
+   the first run's droplet at teardown; a refused start exits 1 WITHOUT
+   running teardown. A stale lock (dead owner) is broken with a Slack note.
 0. dates (US-008) — RDQ_TEST_END rolls with the data store: the store
    calendar end minus --confirm-days (default 42) trading days. The reserved
    slice (TEST_END, store end] is the confirmation window the hypothesis
@@ -45,12 +50,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ops import run_lock
 
 if TYPE_CHECKING:
     from ops.promotion_gate import GateVerdict
@@ -94,6 +102,7 @@ class PipelineOptions:
     snapshot: bool = False  # bake an rdq-gpu-base image after check (fast future boots)
     no_notion: bool = False  # skip the plain-language Notion write-up
     confirm_days: int = DEFAULT_CONFIRM_DAYS  # trading days reserved past TEST_END (US-008)
+    lock_file: Path | None = None  # global run lock (US-020); None = run_lock.DEFAULT_LOCK_FILE
 
 
 @dataclass(frozen=True)
@@ -758,9 +767,54 @@ def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | No
         print(f"run row finalization failed ({exc})", file=sys.stderr)
 
 
+def lock_path(options: PipelineOptions) -> Path:
+    return options.lock_file or run_lock.DEFAULT_LOCK_FILE
+
+
+def acquire_pipeline_lock(
+    options: PipelineOptions, slack: SlackThread, status_file: StatusFile
+) -> str | None:
+    """US-020: take the global run lock; None = refused (already reported).
+
+    A refusal must happen before ANY worker interaction — the shared
+    worker.env means this pipeline's teardown would destroy the active
+    run's droplet.
+    """
+    unit = (
+        run_lock.unit_name(options.thread_ts)
+        if options.thread_ts
+        else f"manual-{os.getpid()}"
+    )
+    try:
+        broken = run_lock.acquire_lock(
+            lock_path(options), unit=unit, thread_ts=options.thread_ts, pid=os.getpid()
+        )
+    except run_lock.LockHeldError as exc:
+        slack.post(
+            f":no_entry: refusing to start — a research run is already active for"
+            f" {exc.lock.describe()}; one GPU worker at a time. Wait for it to"
+            " finish or stop it from its own thread."
+        )
+        status_file.update(stage="refused", error=str(exc))
+        return None
+    if broken is not None:
+        slack.post(
+            f":broom: broke a stale GPU run lock left by {broken.describe()} —"
+            " the owning unit is no longer active"
+        )
+    return unit
+
+
 def run_pipeline(options: PipelineOptions) -> int:
     slack = SlackThread(enabled=not options.no_slack, thread_ts=options.thread_ts)
     status_file = StatusFile(options.status_file, options.thread_ts)
+    lock_unit = acquire_pipeline_lock(options, slack, status_file)
+    if lock_unit is None:
+        # Refused: close this thread's run row, touch NOTHING shared (no
+        # teardown — the finally below would destroy the active run's worker).
+        if options.thread_ts:
+            finalize_run_row(options.thread_ts, None, 1)
+        return 1
     size, region = "(reused)", "(reused)"
     started = time.monotonic()
     trace_dir = None
@@ -918,11 +972,10 @@ def run_pipeline(options: PipelineOptions) -> int:
                     ":rotating_light: DESTROY FAILED — droplet may still be billing! "
                     "Run: ops/gpu_worker/gpu_worker.sh destroy --force"
                 )
+        run_lock.release_lock(lock_path(options), lock_unit)
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loop_n", type=int, default=10)
     parser.add_argument("--all_duration", default=None, help="rdagent wall-clock budget, e.g. 12h")

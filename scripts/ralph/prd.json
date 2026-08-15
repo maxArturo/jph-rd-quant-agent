@@ -309,8 +309,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/run_lock.py (atomic O_EXCL acquire; owner = unit+thread_ts+pid; stale = unit inactive AND pid gone, broken with a note); gpu_pipeline acquires before anything and releases in finally — a refused start exits 1 WITHOUT teardown (would destroy the active run's droplet). start_research refuses naming the owning thread ('queued behind it' text removed); stop_run refuses unless the requesting thread owns the lock. E2E on-box: real pipeline refusal (exit 1, stage=refused, holder untouched), stale break + live-owner detection through the real GpuBackend/systemctl."
     },
     {
       "id": "US-021",
