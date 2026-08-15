@@ -17,6 +17,7 @@ import pytest
 from ops.promotion_gate import (
     FAIL_MARK,
     PASS_MARK,
+    SURVIVORSHIP_CAVEAT,
     ConfirmationEvidence,
     ConfirmationSide,
     GateConfig,
@@ -424,6 +425,19 @@ def test_slack_text_shows_parity_mismatches() -> None:
     assert f"{FAIL_MARK} FAIL" in text
     assert "parity: market mismatch" in text
     assert "us_all" in text and "us_liquid" in text
+
+
+def test_slack_text_always_carries_survivorship_caveat() -> None:
+    """US-025: the standing delisted-names caveat rides every verdict —
+    pass, fail, and parity-mismatch alike — and names the decisions entry."""
+    assert "docs/decisions.md" in SURVIVORSHIP_CAVEAT
+    assert "US-025" in SURVIVORSHIP_CAVEAT
+    for verdict in (
+        evaluate_gate(bundle(ir=2.0), incumbent_bundle(), GateConfig(), evidence()),
+        evaluate_gate(bundle(ir=0.5), incumbent_bundle(), GateConfig(), evidence()),
+        evaluate_gate(bundle(market="us_all"), incumbent_bundle(), GateConfig()),
+    ):
+        assert SURVIVORSHIP_CAVEAT in verdict.slack_text()
 
 
 # ------------------------------------------------------------------ config loading

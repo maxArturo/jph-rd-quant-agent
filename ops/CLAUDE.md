@@ -166,7 +166,11 @@
   canonical universe hash (sorted/deduped/sha256[:16]) — US-008's
   pipeline_status hash and anything else comparing universes MUST use it.
   The verdict's `to_json()` is the promotion_history.gate_verdict payload;
-  `slack_text()` is the operator block. The instrument hash cannot be
+  `slack_text()` is the operator block. `SURVIVORSHIP_CAVEAT` (US-025) is
+  the single source of the standing delisted-names caveat — `slack_text()`
+  appends it unconditionally and `ops/notion_summary.create_summary_page`
+  imports it into every page body; if the wording changes, keep the
+  docs/decisions.md US-025 entry it references in sync. The instrument hash cannot be
   derived from a workspace (conf names the market, not the resolved list) —
   it must be recorded at launch and passed in.
   Confirmation criterion (US-010): with an incumbent, `evaluate_gate`

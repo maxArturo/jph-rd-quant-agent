@@ -955,3 +955,47 @@ is repaired.
 candidates launched pre-rollout against post-rollout incumbents, by design.
 Delisted/acquired names are still absent entirely (survivorship remains; see
 US-025 follow-up).
+
+## 2026-08-15 — US-025: the delisted-names gap (standing survivorship caveat)
+
+**Decision:** until a delisted-names backfill lands, the remaining
+survivorship bias is documented here and surfaced as a one-line standing
+caveat everywhere promotion decisions are read: the promotion gate's Slack
+verdict block (`ops/promotion_gate.py` `SURVIVORSHIP_CAVEAT`, rendered by
+`GateVerdict.slack_text`) and the Notion strategy-note write-up
+(`ops/notion_summary.py` appends the same line to every page body).
+
+**What the PIT filter fixed (US-023/US-024):** retroactive liquidity
+admission. Membership in `us_liquid` is now decided per-date from trailing
+20-day ADV and price, so a name that only became liquid in 2021 no longer
+hands the backtest its illiquid 2015-2020 run-up. Measured on e05ad9b4:
+net ARR 83.1% → 67.2% over 2025-01-03 → 2026-08-13 (see the US-024 entry).
+
+**What remains:** the store is built from tickers that exist TODAY. Names
+that were delisted — acquired, merged, bankrupt, taken private,
+deregistered — have no price history and no membership spans at all, no
+matter how liquid they once were. And even if their spans existed, exits
+are not modeled: there is no terminal-return handling (acquisition premium
+paid on the last day, bankruptcy ≈ −100%, spin-off/exchange mechanics).
+
+**Expected bias direction:** backtest ARR is flattered. The universe holds
+only companies that survived to the present; blow-ups that would have been
+held into a −100% simply do not exist in the data, while a long-only topk
+strategy misses some acquisition premiums in exchange — empirically the
+survivor effect dominates. Every backtest number quoted anywhere in this
+system inherits this until the backfill lands.
+
+**Future fix (sketch, in order):**
+1. Validate FMP's delisted-companies endpoint: coverage vs a known list of
+   major delistings (symbols, delist dates, reasons), price availability up
+   to the terminal date.
+2. Add an expected-end ticker state to the store: each ticker carries
+   "known to end on date X (reason)" vs "still listed" so span ends are
+   deliberate, not just last-bar-seen.
+3. Terminal-return modeling: acquisitions exit at the deal price on the
+   effective date; bankruptcies exit at ≈ −100% (or last traded price);
+   the simulator must be forced OUT of a position at span end rather than
+   holding a frozen price.
+4. Symbol-reuse dedup: a delisted symbol later reused by a different
+   company must not splice two price histories together (key tickers by
+   symbol + listing era, dedup on FMP's company identifiers).

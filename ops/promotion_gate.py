@@ -52,6 +52,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "orchestrator" / 
 PASS_MARK = ":white_check_mark:"
 FAIL_MARK = ":x:"
 
+# Standing survivorship caveat (US-025): every gate verdict and Notion
+# write-up carries this line until the delisted-names backfill lands.
+SURVIVORSHIP_CAVEAT = (
+    "Caveat: the universe holds only never-delisted names, so backtest ARR is "
+    "flattered (survivorship — docs/decisions.md 2026-08-15 US-025)."
+)
+
 
 class GateConfigError(RuntimeError):
     """The promotion_gate: section of config.yaml is malformed."""
@@ -252,6 +259,7 @@ class GateVerdict:
             )
             if sides:
                 lines.append(f"• confirmation window {window[0]} → {window[1]}: {sides}")
+        lines.append(f"_{SURVIVORSHIP_CAVEAT}_")
         return "\n".join(lines)
 
 

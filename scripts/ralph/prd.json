@@ -383,8 +383,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "docs/decisions.md US-025 entry (what PIT fixed, what remains, ARR-flattering direction, 4-step future fix sketch). SURVIVORSHIP_CAVEAT constant in ops/promotion_gate.py is the single source: slack_text() appends it unconditionally (pass/fail/parity-mismatch), notion_summary.create_summary_page inserts it as a paragraph between prose and run_summary JSON (parse_run_summary unaffected). Verified with a real on-box gate render."
     },
     {
       "id": "US-026",

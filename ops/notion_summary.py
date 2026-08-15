@@ -302,12 +302,16 @@ def load_notes_database_id(config_path: Path = CONFIG_PATH) -> str:
 
 
 def create_summary_page(client, database_id: str, title: str, summary: str, context: dict) -> str:
-    """Create the Strategy Notes row (prose + run_summary JSON in the page
-    body); returns its URL."""
+    """Create the Strategy Notes row (prose + standing survivorship caveat +
+    run_summary JSON in the page body); returns its URL."""
+    from ops.promotion_gate import SURVIVORSHIP_CAVEAT
+
     page = client.create_page(
         {"type": "database_id", "database_id": database_id},
         note_properties(title, context),
-        children=text_to_blocks(summary) + run_summary_blocks(build_run_summary(context)),
+        children=text_to_blocks(summary)
+        + text_to_blocks(SURVIVORSHIP_CAVEAT)
+        + run_summary_blocks(build_run_summary(context)),
     )
     url = page.get("url")
     if not url:

@@ -264,6 +264,24 @@ class TestCreatePage:
         create_summary_page(client, "db", "t" * 300, "body", CONTEXT)
         assert len(client.pages[0][1]["Note"]["title"][0]["text"]["content"]) == 120
 
+    def test_page_body_carries_survivorship_caveat(self) -> None:
+        """US-025: the standing delisted-names caveat rides every write-up,
+        between the prose and the run_summary JSON — which must still parse."""
+        from ops.promotion_gate import SURVIVORSHIP_CAVEAT
+
+        client = StubNotion()
+        create_summary_page(client, "db", "t", "One.\n\nTwo.", CONTEXT)
+        children = client.pages[0][2]
+        assert children is not None
+        paragraphs = [
+            block["paragraph"]["rich_text"][0]["text"]["content"]
+            for block in children
+            if block["type"] == "paragraph"
+        ]
+        assert paragraphs[-1] == SURVIVORSHIP_CAVEAT
+        assert "docs/decisions.md" in SURVIVORSHIP_CAVEAT and "US-025" in SURVIVORSHIP_CAVEAT
+        assert parse_run_summary(children) == build_run_summary(CONTEXT)
+
 
 class TestConfig:
     def test_reads_notes_database_id(self, tmp_path: Path) -> None:
