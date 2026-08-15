@@ -519,6 +519,23 @@ def test_legacy_mode_flag_overrides_pit_config(tmp_path: Path) -> None:
     assert read_rows(store, "pit_liquid") == [("RISR", "2024-01-02", "2024-08-30")]
 
 
+def test_regenerating_universe_never_touches_other_instruments_files(
+    tmp_path: Path,
+) -> None:
+    """PIT regeneration of one universe leaves frozen promoted files byte-identical
+    (US-024: the promoted strategy's pinned universe must survive a us_liquid roll)."""
+    store = build_pit_store(
+        tmp_path, {"ALLG": var_bars("ALLG", lambda d: HIGH_VOL)}
+    )
+    promoted = store / "instruments" / "us_liquid_promoted_30.txt"
+    frozen = "ALLG\t2024-01-02\t2024-03-28\n"  # deliberately NOT the full span
+    promoted.write_text(frozen)
+    config_path = write_config(tmp_path, PIT_CONFIG)
+    make_universe("pit_liquid", store, config_path=config_path)
+    assert (store / "instruments" / "pit_liquid.txt").exists()
+    assert promoted.read_text() == frozen
+
+
 def test_pit_mode_requires_filters(tmp_path: Path) -> None:
     store = build_fixture_store(tmp_path, {"AAPL": (100.0, 1_000.0)})
     config_path = write_config(

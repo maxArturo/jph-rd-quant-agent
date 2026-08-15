@@ -215,7 +215,9 @@ def test_refresh_preserves_universes_with_refreshed_spans(tmp_path: Path) -> Non
     store = two_ticker_store(tmp_path)
     old_span = f"AAPL\t{DAYS[0].isoformat()}\t{LAST_OLD.isoformat()}\n"
     (store / "instruments" / "tech.txt").write_text(old_span)
-    assert read_universes(store) == {"tech": ["AAPL"]}
+    assert read_universes(store) == {
+        "tech": [("AAPL", DAYS[0].isoformat(), LAST_OLD.isoformat())]
+    }
 
     client = WindowedFakeFmp(
         bars={
@@ -228,12 +230,49 @@ def test_refresh_preserves_universes_with_refreshed_spans(tmp_path: Path) -> Non
     assert refreshed == f"AAPL\t{DAYS[0].isoformat()}\t{NEW_DAYS[-1].isoformat()}\n"
 
 
+def test_refresh_preserves_multi_span_pit_universe(tmp_path: Path) -> None:
+    """A PIT span file survives a refresh: closed spans verbatim, open span extended."""
+    store = two_ticker_store(tmp_path)
+    closed = ("AAPL", DAYS[0].isoformat(), DAYS[2].isoformat())  # PIT exit: history
+    reopened = ("AAPL", DAYS[4].isoformat(), LAST_OLD.isoformat())  # member at store end
+    lagging = ("MSFT", DAYS[0].isoformat(), DAYS[3].isoformat())  # exited before store end
+    (store / "instruments" / "pit.txt").write_text(
+        "".join(f"{s}\t{a}\t{b}\n" for s, a, b in (closed, reopened, lagging))
+    )
+
+    client = WindowedFakeFmp(
+        bars={
+            "AAPL": make_bars("AAPL", DAYS + NEW_DAYS),
+            "MSFT": make_bars("MSFT", DAYS + NEW_DAYS, close=200.0),
+        }
+    )
+    assert refresh_store(store, client, end=NEW_DAYS[-1]).updated is True
+    refreshed = (store / "instruments" / "pit.txt").read_text().splitlines()
+    assert refreshed == [
+        f"AAPL\t{DAYS[0].isoformat()}\t{DAYS[2].isoformat()}",
+        f"AAPL\t{DAYS[4].isoformat()}\t{NEW_DAYS[-1].isoformat()}",
+        f"MSFT\t{DAYS[0].isoformat()}\t{DAYS[3].isoformat()}",
+    ]
+
+
+def test_read_universes_rejects_malformed_line(tmp_path: Path) -> None:
+    store = two_ticker_store(tmp_path)
+    (store / "instruments" / "bad.txt").write_text("AAPL 2024-01-02 2024-01-08\n")
+    with pytest.raises(RefreshError, match="malformed instruments line"):
+        read_universes(store)
+
+
 def test_build_store_rejects_bad_extra_instruments(tmp_path: Path) -> None:
     bundles = [TickerBundle("AAPL", make_bars("AAPL"), (), ())]
+    row = ("AAPL", DAYS[0].isoformat(), LAST_OLD.isoformat())
     with pytest.raises(BuildError, match="reserved"):
-        build_store(bundles, tmp_path / "s1", extra_instruments={"all": ["AAPL"]})
+        build_store(bundles, tmp_path / "s1", extra_instruments={"all": [row]})
     with pytest.raises(BuildError, match="not in the store"):
-        build_store(bundles, tmp_path / "s2", extra_instruments={"tech": ["MSFT"]})
+        build_store(
+            bundles,
+            tmp_path / "s2",
+            extra_instruments={"tech": [("MSFT", row[1], row[2])]},
+        )
     # failed builds leave no partial store behind
     assert not (tmp_path / "s1").exists()
     assert not (tmp_path / "s2").exists()
@@ -294,7 +333,7 @@ def test_extend_store_adds_new_ticker_and_preserves_universes(tmp_path: Path) ->
         if line.strip()
     }
     assert all_symbols == {"AAPL", "MSFT", "GOOG"}
-    assert read_universes(store)["pair"] == ["AAPL"]
+    assert read_universes(store)["pair"] == [("AAPL", "2024-01-02", "2024-01-08")]
     # Fetch window is aligned to the store's own calendar, never "today".
     assert fmp.windows == [("GOOG", "2024-01-02", "2024-01-08")]
     # Existing tickers survive the rebuild with their bars intact.
@@ -304,6 +343,16 @@ def test_extend_store_adds_new_ticker_and_preserves_universes(tmp_path: Path) ->
         if line.strip()
     ]
     assert [bar.date for bar in read_raw_bars(store, "AAPL", calendar)] == DAYS
+
+
+def test_extend_store_preserves_multi_span_universe_verbatim(tmp_path: Path) -> None:
+    """Extending never touches existing tickers, so PIT spans pass through unchanged."""
+    store = build_fixture_store(tmp_path, {"AAPL": make_bars("AAPL")})
+    spans = "AAPL\t2024-01-02\t2024-01-04\nAAPL\t2024-01-08\t2024-01-08\n"
+    (store / "instruments" / "pit.txt").write_text(spans)
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG", close=50.0)})
+    assert extend_store(store, fmp, ["GOOG"]).added == {"GOOG": 5}
+    assert (store / "instruments" / "pit.txt").read_text() == spans
 
 
 def test_extend_store_reports_symbols_fmp_lacks_and_leaves_store_untouched(

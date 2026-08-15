@@ -73,8 +73,13 @@
   bars after each ticker's own last date, refetches full split/dividend history,
   and rebuilds through `build_store` — so a split landing between refreshes
   re-scales the whole history correctly. `build_store(..., extra_instruments=)`
-  carries make_universe files across the rebuild (spans refreshed) inside the
-  same atomic swap; without it a rebuild DELETES `instruments/<universe>.txt`.
+  carries make_universe files across the rebuild inside the same atomic swap
+  (without it a rebuild DELETES `instruments/<universe>.txt`). It takes FULL
+  (symbol, start, end) rows written verbatim; span semantics live in
+  `refresh.refresh_universe_spans`: an open span (end == ticker's pre-refresh
+  last bar) follows the ticker's new end, a closed span (PIT exit) is carried
+  byte-for-byte — never re-derive universe spans from all.txt, that flattens
+  PIT membership back to full-history (US-024).
   Default `--end` is *yesterday* in America/New_York, never today — FMP's EOD
   endpoint returns a partial bar for an in-progress session. When nothing is
   new, the store is left byte-for-byte untouched (safe to run any time).

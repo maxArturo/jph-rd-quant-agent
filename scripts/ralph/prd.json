@@ -370,8 +370,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "read_universes returns full span rows; refresh_universe_spans advances only open spans (end == ticker's pre-refresh last bar), closed PIT exits verbatim; build_store writes rows verbatim. us_liquid regenerated PIT on-box (589/720 spans; HUBS+CACI enter 2017-01-03); promoted files untouched (tested). Bias on record in docs/decisions.md: e05ad9b4 re-predicted on both universes over 2025-01-03→2026-08-13 — net ARR 83.1%→67.2%, IR 2.011→1.759, MDD ~unchanged (~2 min per docker re-predict); c9587797 unusable (degenerate snapshot incident)."
     },
     {
       "id": "US-025",

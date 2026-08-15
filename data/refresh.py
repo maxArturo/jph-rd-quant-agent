@@ -4,8 +4,10 @@ Pulls only the bars each ticker is missing (since its own last stored date),
 refetches the full split/dividend history, recomputes adjustment factors over
 the merged series, and rebuilds the store through build_store's
 temp -> validate -> atomic-swap path. Custom instruments files written by
-data/make_universe.py are carried across the rebuild with their date spans
-refreshed, inside the same atomic swap.
+data/make_universe.py are carried across the rebuild inside the same atomic
+swap, membership spans preserved: a span that ended at its ticker's last bar
+follows the ticker's new end, while spans closed earlier (point-in-time
+exits, US-023) are kept verbatim.
 
 Raw bars are recovered from the store itself (the field conventions make raw
 values recoverable: raw price = stored adjusted price / factor, raw volume =
@@ -102,16 +104,56 @@ def read_all_symbols(store: Path) -> list[str]:
     return symbols
 
 
-def read_universes(store: Path) -> dict[str, list[str]]:
-    """Every instruments file except all.txt, as name -> ordered ticker list."""
-    universes: dict[str, list[str]] = {}
+def read_universes(store: Path) -> dict[str, list[tuple[str, str, str]]]:
+    """Every instruments file except all.txt, as name -> ordered (symbol, start, end) rows.
+
+    Full rows, not just symbols: point-in-time universes (data/make_universe.py
+    ``mode: pit``) carry multiple membership spans per symbol, which a rebuild
+    must preserve — re-deriving spans from all.txt would silently flatten them
+    back to full-history membership (the exact bias US-023 removed).
+    """
+    universes: dict[str, list[tuple[str, str, str]]] = {}
     for path in sorted((store / "instruments").glob("*.txt")):
         if path.stem == MARKET_ALL:
             continue
-        universes[path.stem] = [
-            line.split("\t")[0] for line in path.read_text().splitlines() if line.strip()
-        ]
+        rows: list[tuple[str, str, str]] = []
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) != 3:
+                raise RefreshError(f"malformed instruments line in {path}: {line!r}")
+            rows.append((parts[0], parts[1], parts[2]))
+        universes[path.stem] = rows
     return universes
+
+
+def refresh_universe_spans(
+    universes: dict[str, list[tuple[str, str, str]]],
+    old_ends: dict[str, date],
+    new_ends: dict[str, date],
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Advance each row's end only when it tracked its ticker's end before the refresh.
+
+    A span ending at (or somehow past) the ticker's pre-refresh last bar is
+    "open" — the ticker was still a member at store end — so it follows the
+    ticker's new end. A span closed earlier (a PIT exit) is history and is
+    carried verbatim. For legacy full-span files this reproduces the old
+    rewrite-from-all.txt behavior exactly (starts never move on a refresh).
+    """
+    refreshed: dict[str, list[tuple[str, str, str]]] = {}
+    for name, rows in universes.items():
+        refreshed[name] = [
+            (
+                symbol,
+                start,
+                new_ends[symbol].isoformat()
+                if symbol in old_ends and end >= old_ends[symbol].isoformat()
+                else end,
+            )
+            for symbol, start, end in rows
+        ]
+    return refreshed
 
 
 def _read_field(feature_dir: Path, field: str) -> tuple[int, np.ndarray]:
@@ -204,7 +246,13 @@ def refresh_store(
         )
         for symbol in symbols
     ]
-    build_store(bundles, store, extra_instruments=universes)
+    old_ends = {symbol: bars[-1].date for symbol, bars in existing.items()}
+    new_ends = {bundle.symbol: bundle.bars[-1].date for bundle in bundles}
+    build_store(
+        bundles,
+        store,
+        extra_instruments=refresh_universe_spans(universes, old_ends, new_ends),
+    )
     last_after = max(bundle.bars[-1].date for bundle in bundles)
     return RefreshResult(
         True, last_before, last_after, {s: len(bars) for s, bars in new_bars.items()}

@@ -901,3 +901,57 @@ by their artifact DIRS (portfolio_analysis/sig_analysis).
 **Migration note:** existing snapshots lack `pred_refresh_params.pkl`; the
 refresh fails with the remedy in the message. e05ad9b4's snapshot was
 re-run by hand at deploy time (2026-08-07).
+
+## 2026-08-15 — US-024: us_liquid rolled out point-in-time; retroactive-liquidity bias measured
+
+**Decision:** `instruments/us_liquid.txt` on-box is now point-in-time (US-023
+`mode: pit`): 589 tickers / 720 membership spans / 3 filtered, membership
+re-evaluated monthly from trailing 20-day ADV ≥ $20M and raw price ≥ $5 with
+one-period hysteresis. Frozen promoted universes (`us_liquid_promoted_30.txt`)
+and the promoted strategy's pinned snapshot are untouched (covered by test).
+The nightly refresh carry-across (`data/refresh.py` → `build_store
+extra_instruments`) now preserves span rows instead of re-deriving full spans
+from all.txt — an open span (ending at its ticker's last bar) follows the
+ticker's new end; a closed span (a PIT exit) is carried verbatim. Without
+that fix the first refresh would have silently flattened PIT membership back
+to full-history — the exact bias US-023 removed.
+
+**Spot-check (late entrants now real):** HUBS and CACI enter the universe
+2017-01-03 (store starts 2015-01-02); SAIC carries 6 spans (churned through
+2017-2022), TDY 3. The legacy file admitted all of them from their first bar.
+
+**Bias magnitude (same workspace, both universes):** exact-weights re-predict
+(US-049/US-009 machinery, `ops/confirm_window.confirmation_returns` with
+`force_repredict`) of the previous incumbent **e05ad9b4** over its
+out-of-train test segment 2025-01-03 → 2026-08-13 (403 trading days), once
+against the preserved legacy last-window universe and once against the PIT
+universe. Net of costs, same topk/n_drop/cost params, same simulation code
+both sides:
+
+| universe | ARR | IR | MDD | reproduction |
+|---|---|---|---|---|
+| last-window (581 full-span) | 83.1% | 2.011 | −38.2% | 0.999997 |
+| point-in-time (589/720 spans) | 67.2% | 1.759 | −38.0% | 0.999868 |
+| **delta** | **−15.9 pp (−19% rel)** | **−0.25 (−13% rel)** | ~0 | |
+
+Direction as expected: the last-window universe let the backtest rank into
+names before they became liquid enough to trade (they typically became liquid
+*because* they ran up), flattering ARR/IR; drawdown is universe-insensitive
+here. Even this recent window — long after most 2015-2020 admissions — shows
+a double-digit relative ARR flattering, so historical windows are biased at
+least this much. Runtime: ~2 min per docker re-predict (128 s / 106 s) plus
+seconds of simulation; cheap enough to repeat per promotion if wanted.
+
+**Why e05ad9b4 and not the current incumbent c9587797:** c9587797's snapshot
+re-predict is degenerate (2026-08-15 incident: parquet-conf snapshot collapses
+581 names to ~37 unique scores, reproduction 0.127) and is blocked by the
+US-010 reproduction check by design. e05ad9b4 is the previous incumbent, uses
+the same `us_liquid` market in its conf, and reproduces its backtested pred at
+0.9999 — the comparison is clean there. Re-run on c9587797 once its snapshot
+is repaired.
+
+**Consequences:** the resolved us_liquid instrument list (and therefore
+`hash_instruments`) changed — the promotion gate's parity check will mismatch
+candidates launched pre-rollout against post-rollout incumbents, by design.
+Delisted/acquired names are still absent entirely (survivorship remains; see
+US-025 follow-up).

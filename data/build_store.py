@@ -184,14 +184,16 @@ def _write_bin(path: Path, start_index: int, values: Sequence[float] | np.ndarra
 def build_store(
     bundles: Sequence[TickerBundle],
     target: Path,
-    extra_instruments: Mapping[str, Sequence[str]] | None = None,
+    extra_instruments: Mapping[str, Sequence[tuple[str, str, str]]] | None = None,
 ) -> None:
     """Write a Qlib bin store for the bundles: temp dir -> validate -> swap.
 
-    extra_instruments maps additional universe names to their ticker lists
-    (data/refresh.py uses this to carry make_universe files across a rebuild);
-    each file is written with spans refreshed from the new bundles, inside the
-    same atomic swap as the rest of the store.
+    extra_instruments maps additional universe names to their (symbol, start,
+    end) rows — data/refresh.py uses this to carry make_universe files across
+    a rebuild inside the same atomic swap. Rows are written verbatim (the
+    caller owns span semantics: refresh.refresh_universe_spans advances only
+    ends that tracked their ticker's end), so multi-span point-in-time
+    universes survive a rebuild intact.
     """
     if not bundles:
         raise BuildError("no tickers to build a store from")
@@ -235,19 +237,16 @@ def build_store(
                     values[positions[day] - start_index] = value
                 _write_bin(feature_dir / f"{field}.{FREQ}.bin", start_index, values)
         (tmp / "instruments" / f"{MARKET_ALL}.txt").write_text("".join(instrument_lines))
-        for name, universe_symbols in (extra_instruments or {}).items():
+        for name, universe_rows in (extra_instruments or {}).items():
             if name == MARKET_ALL:
                 raise BuildError(f"universe name {name!r} is reserved for the full store")
-            unknown = [s for s in universe_symbols if s not in spans]
+            unknown = sorted({s for s, _, _ in universe_rows if s not in spans})
             if unknown:
                 raise BuildError(
-                    f"universe {name!r} references tickers not in the store: {sorted(unknown)}"
+                    f"universe {name!r} references tickers not in the store: {unknown}"
                 )
             (tmp / "instruments" / f"{name}.txt").write_text(
-                "".join(
-                    f"{s}\t{spans[s][0].isoformat()}\t{spans[s][1].isoformat()}\n"
-                    for s in universe_symbols
-                )
+                "".join(f"{s}\t{start}\t{end}\n" for s, start, end in universe_rows)
             )
         validate_store(tmp, [bundle.symbol for bundle in bundles])
     except BaseException:
