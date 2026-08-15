@@ -95,6 +95,22 @@
   `slack_text()` is the operator block. The instrument hash cannot be
   derived from a workspace (conf names the market, not the resolved list) —
   it must be recorded at launch and passed in.
+- `ops/confirm_window.py` (US-009) turns any workspace WITH pred-refresh
+  snapshot files into confirmation-window portfolio daily returns:
+  `confirmation_returns(ws, start, end)` re-predicts via the US-049 docker
+  machinery (test_end overridden to the window end) ONLY when the newest
+  pred.pkl doesn't already cover every needed signal day — the incumbent's
+  daily refresh usually spares its docker run; a fresh candidate always needs
+  one (and needs `snapshot_pred_refresh` run on it first — this module never
+  snapshots). Simulation: day d's return goes to the book selected from pred
+  dated d-1 (live-rebalancer timing, one day AHEAD of qlib's own backtest),
+  close-to-close on ADJUSTED store closes, equal-weight, open/close_cost on
+  traded fractions, min_cost ignored — only cross-strategy comparability
+  matters, so both sides of a gate comparison MUST come from this module.
+  Every gap raises `ConfirmWindowError` (US-010 maps it to
+  confirmation_unavailable); `annualized_ir` here is the confirmation
+  criterion's metric (benchmark-free mean/std·√252, compute_sharpe
+  convention).
 - `python -m ops.rollback_promotion [--to <ws>] [--yes]` (US-006) re-promotes
   a prior promotion_history entry using that entry's RECORDED config (never
   re-derives from the workspace conf) and appends a new history row (source

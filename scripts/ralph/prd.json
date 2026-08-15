@@ -137,8 +137,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/confirm_window.py: confirmation_returns(ws, start, end) -> WindowReturns (net+gross daily returns, evaluated window, repredicted flag) + annualized_ir. Docker re-predict (US-049 machinery, test_end=window end) skipped when the newest pred already covers the needed signal days; every gap raises ConfirmWindowError. E2E: incumbent read-only + forced real-docker on e05ad9b4 (reproduces the backtested pred EXACTLY, spearman 1.0). Verification also exposed a PRE-EXISTING live incident: c9587797's snapshot re-predict is degenerate (parquet-based snapshot conf; 419/581 scores ~0) — see progress log + Slack alert 2026-08-15."
     },
     {
       "id": "US-010",
