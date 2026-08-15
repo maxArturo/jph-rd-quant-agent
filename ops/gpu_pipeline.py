@@ -450,17 +450,36 @@ def post_comparison_chart(slack: SlackThread, candidate_workspace: str) -> None:
     slack.upload(png, filename="candidate_vs_promoted.png", title="Candidate vs promoted")
 
 
-def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict) -> str | None:
-    """Run ops.notion_summary under the orchestrator identity; returns the URL."""
+def run_status(exit_code: int | None) -> str:
+    """Terminal status from the worker exit marker — same mapping as the run row."""
+    return "completed" if exit_code == 0 else ("stopped" if exit_code is None else "failed")
+
+
+def build_notion_context(
+    options: PipelineOptions,
+    final_status: dict,
+    candidate: dict,
+    dates: RunDates | None = None,
+    instrument_hash: str | None = None,
+    exit_code: int | None = None,
+) -> dict:
+    """Context JSON for ops.notion_summary — everything the write-up prose AND
+    the machine-readable run_summary (US-013) need; the subprocess sees only
+    this file, so anything the summary must record has to ride here."""
     import datetime
 
     loops = final_status.get("loops") or []
-    context = {
+    return {
         "run_date": datetime.date.today().isoformat(),
         "universe": options.universe or "us_liquid",
         "directive": options.instruction,
         "loops_total": len([loop for loop in loops if loop.get("decision") is not None]),
         "sota_count": len([loop for loop in loops if loop.get("decision")]),
+        "loops": loops,
+        "run_status": run_status(exit_code),
+        "instrument_hash": instrument_hash,
+        "test_end": dates.test_end if dates else None,
+        "confirmation_window": [dates.confirm_start, dates.store_end] if dates else None,
         "candidate": {
             "loop": candidate.get("loop"),
             "hypothesis": candidate.get("hypothesis"),
@@ -471,6 +490,20 @@ def notion_writeup(options: PipelineOptions, final_status: dict, candidate: dict
         },
         "incumbent": final_status.get("incumbent"),
     }
+
+
+def notion_writeup(
+    options: PipelineOptions,
+    final_status: dict,
+    candidate: dict,
+    dates: RunDates | None = None,
+    instrument_hash: str | None = None,
+    exit_code: int | None = None,
+) -> str | None:
+    """Run ops.notion_summary under the orchestrator identity; returns the URL."""
+    context = build_notion_context(
+        options, final_status, candidate, dates, instrument_hash, exit_code
+    )
     context_path = Path.home() / "rdq-runs" / "gpu_worker" / "notion_context.json"
     context_path.parent.mkdir(parents=True, exist_ok=True)
     context_path.write_text(json.dumps(context))
@@ -715,8 +748,7 @@ def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | No
             return
         if trace_dir is not None:
             store.update_run_session_path(thread_ts, str(trace_dir))
-        status = "completed" if exit_code == 0 else ("stopped" if exit_code is None else "failed")
-        store.update_run_status(thread_ts, status)
+        store.update_run_status(thread_ts, run_status(exit_code))
     except Exception as exc:  # noqa: BLE001 — never lose teardown over bookkeeping
         print(f"run row finalization failed ({exc})", file=sys.stderr)
 
@@ -835,7 +867,14 @@ def run_pipeline(options: PipelineOptions) -> int:
         if candidate is not None and candidate.workspace:
             post_comparison_chart(slack, candidate.workspace)
             if not options.no_notion:
-                url = notion_writeup(options, final_status, candidate.to_dict())
+                url = notion_writeup(
+                    options,
+                    final_status,
+                    candidate.to_dict(),
+                    dates=dates,
+                    instrument_hash=instrument_hash,
+                    exit_code=exit_code,
+                )
                 if url:
                     slack.post(
                         f":memo: Plain-language write-up (result + investing approach): {url}"

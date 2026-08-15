@@ -200,8 +200,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "build_run_summary/run_summary_blocks/parse_run_summary in ops/notion_summary.py (schema_version 1; one json code block, rich_text chunked at 1900, 100-elements-per-block guard); create_summary_page appends it after the prose. Pipeline context extended via new build_notion_context (loops with outcomes, run_status, instrument_hash, test_end, confirmation_window). E2E: real Notion row written (4 chunks), read back via blocks API, parsed identical, archived."
     },
     {
       "id": "US-014",

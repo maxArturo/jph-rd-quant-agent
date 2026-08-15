@@ -74,6 +74,17 @@
   fails both modes when the resulting test end trails the store calendar end
   by >90 calendar days (`check_test_end_lag`) — refresh the fallback when it
   trips.
+- Run memory contract (US-013): every Strategy Notes page body carries a
+  machine-readable `run_summary` JSON — a fenced `json` code block after the
+  prose, chunked to Notion's 2000-char rich-text element cap (and its
+  100-elements-per-block cap), written by `ops/notion_summary.py`
+  (`build_run_summary` → `run_summary_blocks`) and read back with
+  `parse_run_summary` (handles both write- and API-read rich_text shapes;
+  returns None on anything unparseable — callers degrade, never raise). Bump
+  `RUN_SUMMARY_SCHEMA_VERSION` when the shape changes. The summary is built
+  FROM the pipeline's context JSON (`gpu_pipeline.build_notion_context`) —
+  the write-up runs as a subprocess and sees only that file, so any new field
+  the summary needs must be added to the context builder, not read from disk.
 - `python -m ops.promote_fetched --workspace <dir> [--yes]` promotes a fetched
   GPU workspace: same records as orchestrator/promotion.py confirm_promotion
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per

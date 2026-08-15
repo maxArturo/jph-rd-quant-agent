@@ -12,6 +12,7 @@ from ops.gpu_pipeline import (
     RunDates,
     SlackThread,
     StatusFile,
+    build_notion_context,
     build_run_args,
     compute_run_dates,
     format_final_summary,
@@ -22,6 +23,7 @@ from ops.gpu_pipeline import (
     parse_size_plan,
     reportable,
     resolve_instrument_hash,
+    run_status,
     worker_sh,
 )
 from ops.promotion_gate import hash_instruments
@@ -263,6 +265,64 @@ class TestIncumbentReport:
         assert report["workspace"] == str(workspace)
         assert report["metrics"] == pytest.approx({"IC": 0.0217, "ARR": 0.5936, "MDD": -0.2665})
         assert report["window"] == ["2025-01-02", "2026-07-10"]
+
+
+class TestNotionContext:
+    """The context file is all ops.notion_summary's subprocess ever sees — the
+    run_summary fields (US-013) must ride it."""
+
+    DATES = RunDates(
+        test_end="2026-06-12",
+        confirm_start="2026-06-15",
+        store_end="2026-08-13",
+        confirm_days=42,
+    )
+
+    def test_carries_run_summary_inputs(self) -> None:
+        options = PipelineOptions(universe=None, instruction="chase divergence")
+        final_status = {
+            "loops": [
+                {"loop": 0, "decision": False},
+                {"loop": 1, "decision": True, "hypothesis": "h1"},
+                {"loop": 2, "decision": None},
+            ],
+            "candidate_window": ["2025-01-02", "2026-06-12"],
+            "candidate_factors": ["f1"],
+            "incumbent": {"workspace": "/y/inc"},
+        }
+        candidate = {"loop": 1, "hypothesis": "h1", "metrics": {"IC": 0.02}}
+        context = build_notion_context(
+            options,
+            final_status,
+            candidate,
+            dates=self.DATES,
+            instrument_hash="6fbafedc13ed9a52",
+            exit_code=0,
+        )
+        assert context["loops"] == final_status["loops"]
+        assert context["run_status"] == "completed"
+        assert context["instrument_hash"] == "6fbafedc13ed9a52"
+        assert context["test_end"] == "2026-06-12"
+        assert context["confirmation_window"] == ["2026-06-15", "2026-08-13"]
+        assert context["directive"] == "chase divergence"
+        assert context["loops_total"] == 2  # verdicts only
+        assert context["sota_count"] == 1
+        assert context["candidate"]["window"] == ["2025-01-02", "2026-06-12"]
+        # The whole context must survive the JSON hop to the subprocess.
+        assert json.loads(json.dumps(context)) == context
+
+    def test_degrades_without_launch_facts(self) -> None:
+        context = build_notion_context(PipelineOptions(), {}, {}, exit_code=None)
+        assert context["run_status"] == "stopped"
+        assert context["instrument_hash"] is None
+        assert context["test_end"] is None
+        assert context["confirmation_window"] is None
+        assert context["loops"] == []
+
+    def test_run_status_mapping(self) -> None:
+        assert run_status(0) == "completed"
+        assert run_status(None) == "stopped"
+        assert run_status(1) == "failed"
 
 
 class TestSlackFallback:
