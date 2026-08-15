@@ -66,6 +66,22 @@
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per
   US-023) minus the Notion writes (thread-keyed; manual reminder printed).
   Never creates state.sqlite; dry-run by default.
+- `ops/promotion_gate.py` (US-007) codifies "beats the incumbent":
+  `evaluate_gate(candidate, incumbent, config)` is PURE — callers do IO via
+  `load_metric_bundle(workspace, instrument_hash=...)` (every field degrades
+  independently; a missing parity input FAILS parity against an incumbent,
+  never guesses). Thresholds live in orchestrator/config.yaml
+  `promotion_gate:` (`load_gate_config`; missing section = defaults;
+  bootstrap_notion rewrites of config.yaml preserve the section but drop its
+  comments). Boundary semantics: IR margin and min_ic are strict `>`, the
+  MDD tolerance passes at-limit; MDD compares MAGNITUDES (abs) so qlib's
+  negative sign convention can't flip a verdict. `hash_instruments` is the
+  canonical universe hash (sorted/deduped/sha256[:16]) — US-008's
+  pipeline_status hash and anything else comparing universes MUST use it.
+  The verdict's `to_json()` is the promotion_history.gate_verdict payload;
+  `slack_text()` is the operator block. The instrument hash cannot be
+  derived from a workspace (conf names the market, not the resolved list) —
+  it must be recorded at launch and passed in.
 - `python -m ops.rollback_promotion [--to <ws>] [--yes]` (US-006) re-promotes
   a prior promotion_history entry using that entry's RECORDED config (never
   re-derives from the workspace conf) and appends a new history row (source

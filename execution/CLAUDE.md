@@ -53,7 +53,11 @@
   key the same way (it is what bounds pred.pkl — promotion derives the
   traded universe from it, 2026-08-05 incident) but SKIPS
   conf_pred_refresh.yaml (`PRED_REFRESH_CONF_NAME`): the snapshot's market
-  may be operator-pinned to freeze the traded universe.
+  may be operator-pinned to freeze the traded universe. `load_cost_params`
+  reads the backtest cost knobs (`COST_PARAM_KEYS` open/close/min cost) from
+  `exchange_kwargs` blocks with the same scan-all-must-agree rule — a cost
+  key absent from the block counts as 0 (the promotion gate only needs both
+  sides read the same way).
 - `universe_divergence_warnings` (rebalance.py): target holdings outside the
   pinned `universe_tickers` become WARNING lines in the daily summary on
   every path that posts one. Advisory ONLY — never turn it into an abort;

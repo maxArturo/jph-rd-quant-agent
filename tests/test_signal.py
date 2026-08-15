@@ -19,6 +19,7 @@ from execution.signal import (
     equal_weight_targets,
     extract_targets,
     last_trading_day,
+    load_cost_params,
     load_latest_cross_section,
     load_market,
     load_strategy_params,
@@ -68,7 +69,12 @@ def write_calendar(path: Path, days: list[str]) -> Path:
 
 
 def write_conf(
-    workspace: Path, name: str, topk: int, n_drop: int, market: str = "us_liquid"
+    workspace: Path,
+    name: str,
+    topk: int,
+    n_drop: int,
+    market: str = "us_liquid",
+    costs: dict[str, float] | None = None,
 ) -> Path:
     """A minimal workspace conf with the jinja placeholders real confs keep."""
     workspace.mkdir(parents=True, exist_ok=True)
@@ -89,6 +95,14 @@ port_analysis_config: &port_analysis_config
             signal: <PRED>
             topk: {topk}
             n_drop: {n_drop}
+"""
+    if costs is not None:
+        cost_lines = "\n".join(f"            {key}: {value}" for key, value in costs.items())
+        text += f"""\
+    backtest:
+        exchange_kwargs:
+            deal_price: close
+{cost_lines}
 """
     path = workspace / name
     path.write_text(text)
@@ -330,6 +344,40 @@ def test_load_market_explicit_config_name_reads_that_conf(tmp_path: Path) -> Non
     write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5, market="us_liquid")
     write_conf(tmp_path, PRED_REFRESH_CONF_NAME, topk=50, n_drop=5, market="us_liquid_frozen")
     assert load_market(tmp_path, PRED_REFRESH_CONF_NAME) == "us_liquid_frozen"
+
+
+# --- load_cost_params (US-007: gate parity input) --------------------------
+
+
+COSTS = {"open_cost": 0.0005, "close_cost": 0.0005, "min_cost": 0.0}
+
+
+def test_load_cost_params_reads_exchange_kwargs(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_baseline.yaml", topk=50, n_drop=5, costs=COSTS)
+    assert load_cost_params(tmp_path) == COSTS
+
+
+def test_load_cost_params_from_real_us_templates() -> None:
+    params = load_cost_params(US_TEMPLATES / "factor_template")
+    assert params == {"open_cost": 0.0005, "close_cost": 0.0005, "min_cost": 0.0}
+
+
+def test_load_cost_params_absent_key_counts_as_zero(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5, costs={"open_cost": 0.001})
+    assert load_cost_params(tmp_path) == {"open_cost": 0.001, "close_cost": 0.0, "min_cost": 0.0}
+
+
+def test_load_cost_params_conflicting_confs_rejected(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5, costs=COSTS)
+    write_conf(tmp_path, "conf_b.yaml", topk=50, n_drop=5, costs={**COSTS, "open_cost": 0.001})
+    with pytest.raises(SignalError, match="conflicting cost params"):
+        load_cost_params(tmp_path)
+
+
+def test_load_cost_params_missing_rejected(tmp_path: Path) -> None:
+    write_conf(tmp_path, "conf_a.yaml", topk=50, n_drop=5)
+    with pytest.raises(SignalError, match="no exchange_kwargs cost params"):
+        load_cost_params(tmp_path)
 
 
 # ------------------------------------------------------- pred loading

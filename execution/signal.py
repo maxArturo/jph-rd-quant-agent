@@ -151,6 +151,53 @@ def load_market(workspace: Path, config_name: str | None = None) -> str:
     return next(iter(found.values()))
 
 
+# Backtest cost params a promotion comparison must hold constant (US-007):
+# the qlib exchange_kwargs knobs that change realized backtest returns.
+COST_PARAM_KEYS = ("open_cost", "close_cost", "min_cost")
+
+
+def load_cost_params(workspace: Path, config_name: str | None = None) -> dict[str, float]:
+    """Read the backtest cost params (open/close/min cost) from the conf yaml(s).
+
+    Scans ``exchange_kwargs`` blocks the way load_strategy_params scans
+    strategy kwargs; every conf that carries costs must agree — disagreement
+    means we cannot know which costs the backtest ran. A cost key absent from
+    the block counts as 0 (qlib's own default direction is unknowable here,
+    but the comparison only needs both sides read the same way).
+    """
+    found: dict[str, tuple[float, ...]] = {}
+    for name, data in _rendered_confs(workspace, config_name):
+        costs = _find_exchange_costs(data)
+        if costs is not None:
+            found[name] = costs
+    if not found:
+        raise SignalError(f"no exchange_kwargs cost params found in any conf under {workspace}")
+    if len(set(found.values())) > 1:
+        raise SignalError(f"conflicting cost params across configs: {found}")
+    return dict(zip(COST_PARAM_KEYS, next(iter(found.values())), strict=True))
+
+
+def _find_exchange_costs(node: Any) -> tuple[float, ...] | None:
+    """Recursively find an ``exchange_kwargs`` mapping and pull the cost keys."""
+    if isinstance(node, dict):
+        kwargs = node.get("exchange_kwargs")
+        if isinstance(kwargs, dict) and any(key in kwargs for key in COST_PARAM_KEYS):
+            try:
+                return tuple(float(kwargs.get(key, 0.0)) for key in COST_PARAM_KEYS)
+            except (TypeError, ValueError) as exc:
+                raise SignalError(f"non-numeric cost param in exchange_kwargs: {kwargs}") from exc
+        for value in node.values():
+            hit = _find_exchange_costs(value)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for item in node:
+            hit = _find_exchange_costs(item)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _find_topk_dropout_kwargs(node: Any) -> tuple[int, int] | None:
     """Recursively find a {class: TopkDropoutStrategy, kwargs: {...}} block."""
     if isinstance(node, dict):

@@ -106,8 +106,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/promotion_gate.py: pure evaluate_gate (parity: window/market/instrument-hash/topk-n_drop/costs; criteria: IR strict > incumbent×1.05, |MDD| <= incumbent×1.25 at-limit-passes, IC strict > min_ic; allow_first waives comparison not IC) + load_metric_bundle (degrades field-by-field) + hash_instruments (canonical universe hash for US-008) + promotion_gate: config section. load_cost_params added to execution/signal.py. E2E-verified on the real promoted workspace pair (honest FAIL: old e05ad9b4 beats IR bar, breaches MDD tolerance)."
     },
     {
       "id": "US-008",
