@@ -98,10 +98,21 @@
   records `.request(method, url, json=, headers=)` — a superset of the
   test_fmp.py GET-only fake).
 
-- Run memory (US-014) lives in `orchestrator/run_memory.py`:
+- Run memory (US-014/US-015) lives in `orchestrator/run_memory.py`:
   `build_digest(db_path, client)` composes the prior-run digest (Notion
   Strategy Notes `run_summary` JSON per row + incumbent section from local
-  state/workspace artifacts) that US-015 injects into RDQ_USER_INSTRUCTION.
+  state/workspace artifacts); `build_digest_details` additionally returns
+  the included-entry count (`Digest.runs`, reported in the run-start Slack
+  message). US-015 injects it into RDQ_USER_INSTRUCTION at start_research:
+  `compose_instruction(directive, digest)` = directive + `MEMORY_DELIMITER`
+  + digest — the directive always comes first and only the digest is ever
+  trimmed to fit. Anything recording the instruction durably MUST strip the
+  digest first with `split_instruction` (gpu_pipeline.build_notion_context
+  does — otherwise digest text compounds into every future digest).
+  ConversationCore takes `digest_builder=` (None skips injection; app.py
+  wires `lambda: build_digest_details(store.db_path)`), and the
+  start_research tool's `include_memory` arg (default true) is the operator
+  clean-slate switch.
   It NEVER raises and never stalls a launch: every failure degrades (Notion
   down / a row without parseable JSON falls back to local runs/directives,
   directive + status only), total Notion time is budgeted (15s, checked

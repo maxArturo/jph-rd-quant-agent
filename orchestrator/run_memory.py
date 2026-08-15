@@ -1,8 +1,12 @@
-"""Run-history digest for new research runs (US-014).
+"""Run-history digest for new research runs (US-014/US-015).
 
 ``build_digest`` composes a compact, deterministic digest of prior runs so
-the research LLM stops re-proposing rejected ideas. Sources, in order of
-preference:
+the research LLM stops re-proposing rejected ideas. US-015 injects it into
+the run's ``RDQ_USER_INSTRUCTION`` via ``compose_instruction`` (operator
+directive first, then ``MEMORY_DELIMITER``, then the digest — the digest is
+trimmed to fit, never the directive; ``split_instruction`` recovers the bare
+directive for durable records so digest text never feeds future digests).
+Sources, in order of preference:
 
 - The Notion Strategy Notes database: the most recent rows' machine-readable
   ``run_summary`` JSON (written by ops/notion_summary.py, US-013) gives per
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +36,16 @@ from orchestrator.state import DEFAULT_DB_PATH, StateStore
 DIGEST_ROWS = 10
 DIGEST_MAX_CHARS = 4000
 NOTION_BUDGET_SECONDS = 15.0
+
+# US-015: directive + delimiter + digest composed into RDQ_USER_INSTRUCTION.
+# The delimiter is load-bearing: split_instruction recovers the bare directive
+# from a composed instruction for durable records (Notion run_summary, status
+# file), so digest text never compounds into future digests.
+MEMORY_DELIMITER = (
+    "\n\n--- Prior-run memory (read-only context; the objective above takes"
+    " precedence) ---\n\n"
+)
+INSTRUCTION_MAX_CHARS = 8000
 
 NO_PRIOR_RUNS = "No prior runs recorded."
 HEADER = "Run-history digest (prior research runs, newest first):"
@@ -51,6 +66,15 @@ _METRIC_LABELS = ("IC", "ARR", "MDD", "IR")
 _OUTCOME_ORDER = ("SOTA", "rejected", "failed")
 
 
+@dataclass(frozen=True)
+class Digest:
+    """A built digest plus how many prior-run entries it actually includes
+    (after truncation) — the count the run-start Slack message reports."""
+
+    text: str
+    runs: int
+
+
 def build_digest(
     db_path: Path = DEFAULT_DB_PATH,
     client: Any | None = None,
@@ -61,10 +85,30 @@ def build_digest(
     clock: Callable[[], float] = time.monotonic,
 ) -> str:
     """Best-effort digest of prior runs + incumbent. Never raises."""
+    return build_digest_details(
+        db_path,
+        client,
+        max_rows=max_rows,
+        max_chars=max_chars,
+        notion_budget=notion_budget,
+        clock=clock,
+    ).text
+
+
+def build_digest_details(
+    db_path: Path = DEFAULT_DB_PATH,
+    client: Any | None = None,
+    *,
+    max_rows: int = DIGEST_ROWS,
+    max_chars: int = DIGEST_MAX_CHARS,
+    notion_budget: float = NOTION_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> Digest:
+    """``build_digest`` plus the included-entry count. Never raises."""
     try:
         return _build(db_path, client, max_rows, max_chars, notion_budget, clock)
     except Exception:  # noqa: BLE001 — run memory must never block a launch
-        return NO_PRIOR_RUNS
+        return Digest(NO_PRIOR_RUNS, 0)
 
 
 def _build(
@@ -74,7 +118,7 @@ def _build(
     max_chars: int,
     notion_budget: float,
     clock: Callable[[], float],
-) -> str:
+) -> Digest:
     store = _open_store(db_path)
     local = _local_entries(store, max_rows)
     incumbent = _incumbent_section(store)
@@ -99,10 +143,47 @@ def _build(
 
     if not entries:
         if incumbent == NO_INCUMBENT:
-            return NO_PRIOR_RUNS
-        return _clamp(f"{HEADER}\n\n{incumbent}\n\n{NO_PRIOR_RUNS}", max_chars)
+            return Digest(NO_PRIOR_RUNS, 0)
+        return Digest(_clamp(f"{HEADER}\n\n{incumbent}\n\n{NO_PRIOR_RUNS}", max_chars), 0)
 
-    return _assemble(incumbent, entries, max_chars)
+    text, kept = _assemble(incumbent, entries, max_chars)
+    return Digest(text, kept)
+
+
+def compose_instruction(
+    directive: str,
+    digest: str | None,
+    *,
+    max_chars: int = INSTRUCTION_MAX_CHARS,
+) -> str:
+    """RDQ_USER_INSTRUCTION = directive + MEMORY_DELIMITER + digest (US-015).
+
+    The directive ALWAYS comes first and is never truncated in favor of the
+    digest: when the composition would exceed ``max_chars`` the digest is
+    trimmed (or dropped entirely), even if the directive alone already
+    exceeds the budget. An empty digest (or the NO_PRIOR_RUNS placeholder)
+    composes to the bare directive.
+    """
+    directive = directive.strip()
+    digest = (digest or "").strip()
+    if not digest or digest == NO_PRIOR_RUNS:
+        return directive
+    budget = max_chars - len(directive) - len(MEMORY_DELIMITER)
+    if len(digest) > budget:
+        digest = digest[: max(budget, 0)].rstrip()
+        if not digest:
+            return directive
+    return directive + MEMORY_DELIMITER + digest
+
+
+def split_instruction(instruction: str) -> tuple[str, str | None]:
+    """(directive, digest | None) back out of a composed instruction.
+
+    Durable records (Notion run_summary directive, status file) must store
+    the bare directive, or digest text would compound into future digests.
+    """
+    directive, sep, digest = instruction.partition(MEMORY_DELIMITER)
+    return directive, (digest if sep else None)
 
 
 def _normalize(directive: str) -> str:
@@ -350,8 +431,8 @@ def _degraded_entry(run_date: str | None, status: str | None, directive: str | N
     return _entry_header(run_date, status, directive) + " (no run summary available)"
 
 
-def _assemble(incumbent: str, entries: list[str], max_chars: int) -> str:
-    """Header + incumbent + entries, dropping OLDEST entries to fit max_chars."""
+def _assemble(incumbent: str, entries: list[str], max_chars: int) -> tuple[str, int]:
+    """Header + incumbent + entries (dropping OLDEST to fit) + kept count."""
     omitted = 0
     while True:
         parts = [HEADER, "", incumbent, ""]
@@ -360,7 +441,7 @@ def _assemble(incumbent: str, entries: list[str], max_chars: int) -> str:
             parts.append(f"\n(+{omitted} {OMITTED_NOTE})")
         text = "\n".join(parts)
         if len(text) <= max_chars or not entries:
-            return _clamp(text, max_chars)
+            return _clamp(text, max_chars), len(entries)
         entries = entries[:-1]
         omitted += 1
 

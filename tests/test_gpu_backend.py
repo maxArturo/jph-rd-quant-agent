@@ -47,6 +47,22 @@ class TestGpuBackend:
         assert "--instruction" in cmd and "focus on volume" in cmd
         assert "--loop_n" in cmd and "7" in cmd
 
+    def test_launch_passes_composed_instruction_unchanged(self, tmp_path: Path) -> None:
+        """US-015: the directive + memory digest composition must reach the
+        pipeline byte-for-byte as ONE --instruction argv element."""
+        from orchestrator.run_memory import compose_instruction
+
+        composed = compose_instruction(
+            "Test whether 12-1 momentum beats SPY\nConstraints: long-only",
+            "Run-history digest (prior research runs, newest first):\n\n"
+            "[2026-08-14 | completed] directive: try downside-share factors",
+        )
+        runner = RecordingRunner()
+        backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
+        backend.launch("1.2", instruction=composed)
+        cmd = runner.calls[0]
+        assert cmd[cmd.index("--instruction") + 1] == composed
+
     def test_launch_injects_path_for_doctl(self, tmp_path: Path) -> None:
         """Transient units get the user manager's minimal PATH — the pipeline
         needs ~/.local/bin injected or doctl/onecli are unreachable (US-002)."""

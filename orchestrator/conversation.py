@@ -22,6 +22,7 @@ from orchestrator import prompts
 from orchestrator.llm import LLMError, ModelRouter, RefusalError, ToolSpec
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.rdagent_client import RunHandle
+from orchestrator.run_memory import Digest, compose_instruction
 from orchestrator.state import (
     Directive,
     DuplicateRunError,
@@ -182,6 +183,15 @@ START_RESEARCH_SCHEMA: dict[str, Any] = {
             "description": (
                 "Hypothesis budget for the run (default 10). Only change it"
                 " when the operator names a number."
+            ),
+        },
+        "include_memory": {
+            "type": "boolean",
+            "description": (
+                "Prepend the run-history digest (prior runs + incumbent) to"
+                " the run's instruction so it builds on earlier results"
+                " (default true). Set false only when the operator explicitly"
+                " asks for a clean-slate run without memory."
             ),
         },
     },
@@ -353,8 +363,13 @@ def directive_instruction(directive: Directive) -> str:
     return directive.objective
 
 
-def format_run_started(run: Run) -> str:
-    """Slack mrkdwn confirmation posted to the thread when a run starts."""
+def format_run_started(run: Run, *, memory_runs: int | None = None) -> str:
+    """Slack mrkdwn confirmation posted to the thread when a run starts.
+
+    ``memory_runs`` is how many prior-run digest entries were injected into
+    the run's instruction (US-015); None means memory was not included
+    (include_memory=false, or no digest builder wired).
+    """
     if run.supervised:
         tail = "Hypotheses will be posted here for approval as the loop proposes them."
     else:
@@ -363,10 +378,15 @@ def format_run_started(run: Run) -> str:
             " here — no approvals needed. It stops on its own after its"
             " hypothesis budget and posts the best result found."
         )
+    if memory_runs is None:
+        memory = "*Run memory:* not included (clean-slate run)"
+    else:
+        memory = f"*Run memory:* {memory_runs} prior run(s) included as context"
     return (
         "*Research run started*\n"
         f"*Universe:* {run.universe}\n"
         f"*Session:* `{run.session_path}`\n"
+        f"{memory}\n"
         f"{tail}"
     )
 
@@ -569,6 +589,7 @@ class ConversationCore:
         interactions: HypothesisSteering | None = None,
         promotions: PromotionManager | None = None,
         gpu: GpuRunner | None = None,
+        digest_builder: Callable[[], Digest] | None = None,
     ) -> None:
         if rdagent is None:
             from orchestrator.rdagent_client import RdAgentClient
@@ -600,6 +621,11 @@ class ConversationCore:
         # default provisioned a real droplet from the test suite on
         # 2026-08-06 — None now makes start_research refuse instead.
         self._gpu: GpuRunner | None = gpu
+        # Run-history digest for RDQ_USER_INSTRUCTION (US-015). None (tests,
+        # partial wiring) skips injection; app.py wires the real
+        # run_memory.build_digest_details, which never raises and never
+        # stalls a launch (15s Notion budget, local fallback).
+        self._digest_builder = digest_builder
         self._universes: UniverseManager = universes
         self._breaker: TradingBreaker = breaker
         self._broker: BrokerReader = broker
@@ -740,11 +766,20 @@ class ConversationCore:
                     )
                 universe = record.name
                 tickers = list(record.tickers)
+            # US-015: prepend the run-history digest so the run builds on
+            # prior results — the directive always comes first and is never
+            # truncated in favor of the digest.
+            instruction = directive_instruction(directive)
+            memory_runs: int | None = None
+            if bool(args.get("include_memory", True)) and self._digest_builder is not None:
+                digest = self._digest_builder()
+                memory_runs = digest.runs
+                instruction = compose_instruction(instruction, digest.text)
             unit = self._gpu.launch(
                 thread_ts,
                 loop_n=loop_n,
                 universe=universe,
-                instruction=directive_instruction(directive),
+                instruction=instruction,
             )
             # session_path holds the pipeline status file until the pipeline
             # rewrites it to the fetched trace dir at completion (promotion
@@ -763,14 +798,20 @@ class ConversationCore:
                 # Lost a start race — don't leave the just-launched pipeline up.
                 self._gpu.stop_unit(unit)
                 raise ValueError(duplicate_run_message(exc.existing)) from exc
-            say(text=format_run_started(run), thread_ts=thread_ts)
+            say(text=format_run_started(run, memory_runs=memory_runs), thread_ts=thread_ts)
             if self._recorder is not None:
                 self._recorder.record_idea_status(thread_ts, "researching", universe=universe)
             logger.info("started GPU research pipeline %s for thread %s", unit, thread_ts)
+            memory_note = (
+                f" Run memory: {memory_runs} prior run(s) included as context."
+                if memory_runs is not None
+                else " Run memory: not included (clean-slate run)."
+            )
             return (
                 f"GPU research pipeline launched (unit {unit}, budget {loop_n}"
                 " hypotheses) and recorded for this thread; the start notice was"
-                " posted. Confirm briefly to the operator: a GPU droplet is being"
+                f" posted.{memory_note}"
+                " Confirm briefly to the operator: a GPU droplet is being"
                 " provisioned (~$1.57/hr, destroyed automatically when done), the"
                 " run is autonomous, per-loop digests will arrive in this thread,"
                 " and the final summary names the promotion candidate. Progress"

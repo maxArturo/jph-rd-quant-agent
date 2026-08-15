@@ -301,6 +301,8 @@ def main() -> None:
     from orchestrator.gpu_backend import GpuBackend, locate_run_artifacts
 
     promotions = PromotionFlow(store, recorder=recorder, locate=locate_run_artifacts)
+    from orchestrator.run_memory import build_digest_details
+
     conversation = ConversationCore(
         store=store,
         router=ModelRouter(),
@@ -310,6 +312,9 @@ def main() -> None:
         interactions=poller,
         promotions=promotions,
         gpu=GpuBackend(),
+        # US-015: run-history digest injected into RDQ_USER_INSTRUCTION at
+        # start_research (never raises, never stalls a launch).
+        digest_builder=lambda: build_digest_details(store.db_path),
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),

@@ -230,8 +230,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "run_memory gains Digest/build_digest_details (entry count), compose_instruction (directive first + MEMORY_DELIMITER + digest, digest-only trimming) and split_instruction (gpu_pipeline strips the digest from durable records). ConversationCore digest_builder= wired in app.py; include_memory arg (default true); run-start Slack + tool result state the prior-run count. E2E: real digest under onecli (5 runs, 3.1s), composed round-trip verified."
     },
     {
       "id": "US-016",

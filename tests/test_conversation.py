@@ -22,6 +22,7 @@ from orchestrator.conversation import (
 )
 from orchestrator.llm import ModelRouter
 from orchestrator.rdagent_client import RunHandle
+from orchestrator.run_memory import MEMORY_DELIMITER, Digest
 from orchestrator.state import Run, StateStore
 from tests.test_llm import (
     FakeClient,
@@ -139,6 +140,7 @@ def make_core(
     interactions: Any | None = None,
     promotions: Any | None = None,
     gpu: StubGpu | None = None,
+    digest_builder: Any | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
@@ -148,6 +150,7 @@ def make_core(
         interactions=interactions,
         promotions=promotions,
         gpu=gpu if gpu is not None else StubGpu(),
+        digest_builder=digest_builder,
     )
     return core, store
 
@@ -406,6 +409,75 @@ def test_start_research_launches_gpu_pipeline_and_writes_row(tmp_path: Path) -> 
     # GPU runs are always autonomous.
     assert run.supervised is False
     assert "no approvals needed" in say.calls[0]["text"]
+
+
+def test_start_research_injects_run_memory_digest(tmp_path: Path) -> None:
+    """US-015: directive + MEMORY_DELIMITER + digest reaches launch unchanged
+    and the start notice states how many prior runs rode along."""
+    digest = Digest(
+        text=(
+            "Run-history digest (prior research runs, newest first):\n\n"
+            "[2026-08-14 | completed] directive: try downside-share factors"
+        ),
+        runs=3,
+    )
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu, digest_builder=lambda: digest)
+    store.create_directive(
+        THREAD,
+        objective="Test whether 12-1 momentum beats SPY",
+        constraints="long-only, monthly rebalance",
+    )
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "research it", say)
+
+    directive_text = (
+        "Test whether 12-1 momentum beats SPY\nConstraints: long-only, monthly rebalance"
+    )
+    assert gpu.launched[0]["instruction"] == directive_text + MEMORY_DELIMITER + digest.text
+    run = store.get_run(THREAD)
+    assert run is not None
+    assert say.calls[0]["text"] == format_run_started(run, memory_runs=3)
+    assert "3 prior run(s) included as context" in say.calls[0]["text"]
+
+
+def test_start_research_include_memory_false_skips_digest(tmp_path: Path) -> None:
+    builder_calls: list[int] = []
+
+    def builder() -> Digest:
+        builder_calls.append(1)
+        return Digest("should never appear", 5)
+
+    client = FakeClient(
+        judgment_messages=start_research_script(tool_input={"include_memory": False})
+    )
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu, digest_builder=builder)
+    store.create_directive(THREAD, objective="Clean-slate objective")
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "research it fresh, no memory", say)
+
+    assert builder_calls == []  # clean slate: the digest is never even built
+    assert gpu.launched[0]["instruction"] == "Clean-slate objective"
+    assert "not included (clean-slate run)" in say.calls[0]["text"]
+
+
+def test_start_research_without_digest_builder_launches_bare_directive(tmp_path: Path) -> None:
+    """Unwired digest builder (tests, partial deployments) must not block a
+    launch — the instruction is the bare directive."""
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_directive(THREAD, objective="Objective only")
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "research it", say)
+
+    assert gpu.launched[0]["instruction"] == "Objective only"
+    assert "not included (clean-slate run)" in say.calls[0]["text"]
 
 
 def test_start_research_supervised_is_refused_on_gpu(tmp_path: Path) -> None:

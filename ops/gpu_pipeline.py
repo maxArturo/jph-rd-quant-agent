@@ -468,11 +468,16 @@ def build_notion_context(
     this file, so anything the summary must record has to ride here."""
     import datetime
 
+    from orchestrator.run_memory import split_instruction
+
     loops = final_status.get("loops") or []
     return {
         "run_date": datetime.date.today().isoformat(),
         "universe": options.universe or "us_liquid",
-        "directive": options.instruction,
+        # Durable records carry the BARE directive: the instruction may be
+        # directive + run-history digest (US-015), and recording the digest
+        # here would compound it into every future digest.
+        "directive": split_instruction(options.instruction)[0] if options.instruction else None,
         "loops_total": len([loop for loop in loops if loop.get("decision") is not None]),
         "sota_count": len([loop for loop in loops if loop.get("decision")]),
         "loops": loops,

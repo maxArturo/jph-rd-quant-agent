@@ -14,10 +14,15 @@ from typing import Any
 from ops.notion_summary import build_run_summary, run_summary_blocks
 from orchestrator.run_memory import (
     HEADER,
+    MEMORY_DELIMITER,
     NO_INCUMBENT,
     NO_PRIOR_RUNS,
     OMITTED_NOTE,
+    Digest,
     build_digest,
+    build_digest_details,
+    compose_instruction,
+    split_instruction,
 )
 from orchestrator.state import StateStore
 from tests.test_gpu_trace import write_factors, write_metrics, write_ret
@@ -363,6 +368,96 @@ class TestTruncation:
         }
         digest = build_digest(tmp_path / "absent.sqlite", StubNotion(rows=rows, children=children))
         assert len(digest) <= 4000
+
+
+# -------------------------------------------------- digest details (US-015)
+
+
+class TestDigestDetails:
+    def test_counts_included_entries(self, tmp_path: Path) -> None:
+        rows = [make_row("row-a"), make_row("row-b")]
+        children = {
+            "row-a": summary_children(make_context("2026-08-14", "directive a")),
+            "row-b": summary_children(make_context("2026-08-10", "directive b")),
+        }
+        client = StubNotion(rows=rows, children=children)
+
+        details = build_digest_details(tmp_path / "absent.sqlite", client)
+
+        assert details.runs == 2
+        # The text is exactly what build_digest returns for the same inputs.
+        assert details.text == build_digest(
+            tmp_path / "absent.sqlite", StubNotion(rows=rows, children=children)
+        )
+
+    def test_truncation_reduces_count(self, tmp_path: Path) -> None:
+        count = 6
+        rows = [make_row(f"row-{i}") for i in range(count)]
+        children = {
+            f"row-{i}": summary_children(
+                make_context(f"2026-08-{10 + count - i}", f"unique directive {i}")
+            )
+            for i in range(count)
+        }
+        client = StubNotion(rows=rows, children=children)
+
+        details = build_digest_details(tmp_path / "absent.sqlite", client, max_chars=900)
+
+        assert 0 < details.runs < count
+        assert OMITTED_NOTE in details.text
+
+    def test_fallback_counts_zero(self, tmp_path: Path) -> None:
+        garbage_db = tmp_path / "state.sqlite"
+        garbage_db.write_bytes(b"not a sqlite file")
+        assert build_digest_details(garbage_db, object()) == Digest(NO_PRIOR_RUNS, 0)
+
+    def test_incumbent_without_history_counts_zero(self, tmp_path: Path) -> None:
+        workspace = make_incumbent_workspace(tmp_path)
+        db_path = seed_store(tmp_path, promoted_workspace=workspace)
+
+        details = build_digest_details(db_path, StubNotion(rows=[]))
+
+        assert details.runs == 0
+        assert "workspace: c9587797deadbeef" in details.text
+
+
+# --------------------------------------- instruction composition (US-015)
+
+
+DIRECTIVE = "Test whether 12-1 momentum beats SPY\nConstraints: long-only"
+DIGEST_TEXT = f"{HEADER}\n\n{NO_INCUMBENT}\n\n[2026-08-14 | completed] directive: try things"
+
+
+class TestComposeInstruction:
+    def test_directive_first_then_delimiter_then_digest(self) -> None:
+        composed = compose_instruction(DIRECTIVE, DIGEST_TEXT)
+        assert composed == DIRECTIVE + MEMORY_DELIMITER + DIGEST_TEXT
+        assert composed.startswith(DIRECTIVE)
+
+    def test_digest_is_trimmed_to_fit_never_the_directive(self) -> None:
+        digest = "x" * 500
+        composed = compose_instruction(DIRECTIVE, digest, max_chars=200)
+        assert len(composed) <= 200
+        assert composed.startswith(DIRECTIVE + MEMORY_DELIMITER)
+        assert composed.endswith("x")  # a digest prefix survived
+
+    def test_oversized_directive_is_never_truncated(self) -> None:
+        directive = "d" * 300
+        composed = compose_instruction(directive, DIGEST_TEXT, max_chars=200)
+        assert composed == directive  # intact even beyond max_chars; digest dropped
+
+    def test_empty_or_placeholder_digest_composes_to_bare_directive(self) -> None:
+        assert compose_instruction(DIRECTIVE, None) == DIRECTIVE
+        assert compose_instruction(DIRECTIVE, "") == DIRECTIVE
+        assert compose_instruction(DIRECTIVE, NO_PRIOR_RUNS) == DIRECTIVE
+        assert compose_instruction(DIRECTIVE, f"  {NO_PRIOR_RUNS}  ") == DIRECTIVE
+
+    def test_split_round_trips(self) -> None:
+        composed = compose_instruction(DIRECTIVE, DIGEST_TEXT)
+        assert split_instruction(composed) == (DIRECTIVE, DIGEST_TEXT)
+
+    def test_split_of_bare_directive_has_no_digest(self) -> None:
+        assert split_instruction(DIRECTIVE) == (DIRECTIVE, None)
 
 
 # --------------------------------------------------------------- empty state

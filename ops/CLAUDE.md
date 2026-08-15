@@ -88,7 +88,10 @@
   The reader side (US-014) is `orchestrator/run_memory.py build_digest`
   (NotionClient.list_block_children → parse_run_summary per row) — when the
   run_summary shape changes, update build_run_summary, the digest's
-  `_summary_entry`, and bump the schema version together.
+  `_summary_entry`, and bump the schema version together. Since US-015 the
+  launch instruction may be directive + run-memory digest — the context's
+  `directive` field strips the digest via `run_memory.split_instruction`
+  (keep it that way, or digest text compounds into every future digest).
 - `python -m ops.promote_fetched --workspace <dir> [--yes]` promotes a fetched
   GPU workspace: same records as orchestrator/promotion.py confirm_promotion
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per

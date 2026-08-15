@@ -311,6 +311,16 @@ class TestNotionContext:
         # The whole context must survive the JSON hop to the subprocess.
         assert json.loads(json.dumps(context)) == context
 
+    def test_directive_strips_run_memory_digest(self) -> None:
+        """US-015: the instruction may carry the run-history digest — durable
+        records must keep the BARE directive or digests would compound."""
+        from orchestrator.run_memory import compose_instruction
+
+        composed = compose_instruction("chase divergence", "Run-history digest:\n\nold stuff")
+        options = PipelineOptions(instruction=composed)
+        context = build_notion_context(options, {}, {}, exit_code=0)
+        assert context["directive"] == "chase divergence"
+
     def test_degrades_without_launch_facts(self) -> None:
         context = build_notion_context(PipelineOptions(), {}, {}, exit_code=None)
         assert context["run_status"] == "stopped"
