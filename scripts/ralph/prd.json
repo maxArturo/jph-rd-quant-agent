@@ -323,8 +323,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "orchestrator/run_reaper.py GpuRunReaper thread in app.py: running/gpu rows whose rdq-gpu-run-<ts> unit is inactive for one grace period (default 15 min, in-memory clock) get an in-thread note then status='failed' (note first, flip last — Slack failure retries). start_research now treats ONLY status='failed' as non-blocking (create_run replace_failed=True deletes exactly-a-failed row atomically; completed/stopped still block — promotion needs their session_path). E2E: real systemctl probe on a temp DB reaped a dead-unit row and the thread relaunched."
     },
     {
       "id": "US-022",

@@ -303,6 +303,7 @@ def main() -> None:
     promotions = PromotionFlow(store, recorder=recorder, locate=locate_run_artifacts)
     from orchestrator.run_memory import build_digest_details
 
+    gpu = GpuBackend()
     conversation = ConversationCore(
         store=store,
         router=ModelRouter(),
@@ -311,7 +312,7 @@ def main() -> None:
         # Spoken decisions ride the same handlers as the buttons (US-044).
         interactions=poller,
         promotions=promotions,
-        gpu=GpuBackend(),
+        gpu=gpu,
         # US-015: run-history digest injected into RDQ_USER_INSTRUCTION at
         # start_research (never raises, never stalls a launch).
         digest_builder=lambda: build_digest_details(store.db_path),
@@ -320,6 +321,16 @@ def main() -> None:
         OneCliApprovalsClient(base_url=load_onecli_url()),
         slack=web_client,
         channel_id=config.channel_id,
+    )
+    # US-021: finalize GPU run rows whose pipeline unit died (SIGKILL, reboot)
+    # so a stranded 'running' row can't permanently brick its Slack thread.
+    from orchestrator.run_reaper import GpuRunReaper
+
+    reaper = GpuRunReaper(
+        store,
+        slack=web_client,
+        channel_id=config.channel_id,
+        unit_active=gpu.unit_active,
     )
     app = create_app(
         config,
@@ -333,6 +344,7 @@ def main() -> None:
     )
     poller.start()
     approvals.start()
+    reaper.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
     handler = SocketModeHandler(app, config.app_token)
     # Slack must never route through the OneCLI proxy (docs/decisions.md

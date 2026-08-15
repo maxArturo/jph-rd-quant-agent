@@ -181,6 +181,35 @@ def test_delete_run_frees_thread(store: StateStore) -> None:
     store.create_run("1.1", session_path="/logs/b")  # no DuplicateRunError
 
 
+def test_create_run_replace_failed_replaces_a_failed_row(store: StateStore) -> None:
+    """US-021: a reaped run row can be replaced atomically by a fresh start."""
+    store.create_run("1.1", session_path="/status.json", backend="gpu")
+    store.update_run_status("1.1", "failed")
+    replacement = store.create_run(
+        "1.1", session_path="/status2.json", backend="gpu", replace_failed=True
+    )
+    fetched = store.get_run("1.1")
+    assert fetched == replacement
+    assert fetched is not None and fetched.status == "running"
+    assert fetched.session_path == "/status2.json"
+
+
+def test_create_run_replace_failed_still_rejects_a_live_row(store: StateStore) -> None:
+    store.create_run("1.1", session_path="/status.json", backend="gpu")
+    with pytest.raises(DuplicateRunError) as exc_info:
+        store.create_run("1.1", session_path="/status2.json", replace_failed=True)
+    assert exc_info.value.existing.session_path == "/status.json"
+    fetched = store.get_run("1.1")
+    assert fetched is not None and fetched.status == "running"
+
+
+def test_create_run_default_still_rejects_a_failed_row(store: StateStore) -> None:
+    store.create_run("1.1", session_path="/status.json", backend="gpu")
+    store.update_run_status("1.1", "failed")
+    with pytest.raises(DuplicateRunError):
+        store.create_run("1.1", session_path="/status2.json")
+
+
 # -- promoted strategy -----------------------------------------------------------
 
 

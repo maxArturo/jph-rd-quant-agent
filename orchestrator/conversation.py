@@ -755,7 +755,9 @@ class ConversationCore:
                     " the idea with the operator and call save_directive first"
                 )
             existing = self._store.get_run(thread_ts)
-            if existing is not None:
+            # US-021: a failed run (crashed pipeline, reaped row) must not
+            # brick its thread — only non-failed runs block a fresh start.
+            if existing is not None and existing.status != "failed":
                 raise ValueError(duplicate_run_message(existing))
             # US-020: one GPU worker at a time, globally — another thread's
             # active run must refuse this launch (its teardown would destroy
@@ -816,6 +818,7 @@ class ConversationCore:
                     universe_tickers=tickers,
                     supervised=False,
                     backend="gpu",
+                    replace_failed=True,
                 )
             except DuplicateRunError as exc:
                 # Lost a start race — don't leave the just-launched pipeline up.

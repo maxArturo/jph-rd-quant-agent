@@ -249,6 +249,18 @@
   kills the single shared worker's tmux session. The unit-active probe rides
   GpuBackend's injected runner, so tests stay hermetic (StubGpu in
   tests/test_conversation.py carries `lock`/`broken_lock` fields).
+- Stale GPU run-row reaper (US-021, `orchestrator/run_reaper.py`): a
+  background `GpuRunReaper` thread in app.py (ApprovalsBridge pattern) marks
+  `running`/`gpu` run rows 'failed' once their `rdq-gpu-run-<ts>` unit has
+  been inactive for one grace period (15 min default), posting a note in the
+  run's thread FIRST and flipping the status LAST (a Slack failure retries
+  the whole reap next tick — same convention as poller completion). Grace
+  tracking is in-memory (a restart only delays a reap). A 'failed' run row no
+  longer blocks start_research: it passes `replace_failed=True` to
+  `create_run`, which atomically deletes exactly-a-failed row before the
+  insert (any live row still raises DuplicateRunError). Completed/stopped
+  rows still block — promotion reads their session_path; never widen
+  replace_failed beyond 'failed'.
 - Broker visibility (US-046): check_account/check_orders/check_pnl are
   READ-ONLY ToolSpecs in ConversationCore behind the `BrokerReader` protocol
   (default: the real `execution.alpaca_client.AlpacaClient` — the

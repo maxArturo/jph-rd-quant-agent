@@ -371,6 +371,7 @@ class StateStore:
         universe_tickers: Sequence[str] | None = None,
         supervised: bool = False,
         backend: str = "server_ui",
+        replace_failed: bool = False,
     ) -> Run:
         now = _utcnow()
         tickers = None if universe_tickers is None else tuple(universe_tickers)
@@ -387,6 +388,15 @@ class StateStore:
         )
         try:
             with self._connect() as conn:
+                if replace_failed:
+                    # US-021: a reaped (failed) run must not brick its thread —
+                    # drop it in the same transaction so the insert either
+                    # replaces exactly a failed row or hits the PK (a
+                    # concurrent non-failed row still raises DuplicateRunError).
+                    conn.execute(
+                        "DELETE FROM runs WHERE thread_ts = ? AND status = 'failed'",
+                        (thread_ts,),
+                    )
                 conn.execute(
                     "INSERT INTO runs (thread_ts, session_path, status, universe,"
                     " universe_tickers, supervised, backend, created_at, updated_at)"

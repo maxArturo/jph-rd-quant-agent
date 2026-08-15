@@ -586,6 +586,68 @@ def test_duplicate_start_rejected_pointing_at_active_run(tmp_path: Path) -> None
     assert existing.status in tool_result["content"]
 
 
+def test_start_research_works_again_after_a_run_is_reaped(tmp_path: Path) -> None:
+    """US-021: a reaped (failed) GPU run row no longer bricks its thread —
+    the full loop: stranded running row -> reaper marks it failed ->
+    start_research launches a fresh run in the same thread."""
+    from orchestrator.run_reaper import GpuRunReaper
+
+    client = FakeClient(judgment_messages=start_research_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_directive(THREAD, objective="Momentum on US large caps")
+    store.create_run(THREAD, "/stub-gpu/pipeline_status.json", backend="gpu")
+
+    class ReapSlack:
+        def chat_postMessage(self, **kwargs: Any) -> None:  # noqa: N802
+            pass
+
+    clock_now = [0.0]
+    reaper = GpuRunReaper(
+        store,
+        ReapSlack(),
+        "C0TEST",
+        unit_active=lambda thread_ts: False,  # the pipeline unit died
+        grace_seconds=60.0,
+        clock=lambda: clock_now[0],
+    )
+    reaper.tick()  # grace starts
+    clock_now[0] = 61.0
+    assert reaper.tick() == [THREAD]
+    reaped = store.get_run(THREAD)
+    assert reaped is not None and reaped.status == "failed"
+
+    reply = core.handle_message(THREAD, "research it again", RecordingSay())
+
+    assert len(gpu.launched) == 1
+    run = store.get_run(THREAD)
+    assert run is not None
+    assert run.status == "running"
+    assert run.backend == "gpu"
+    assert reply == "Run started — watch this thread."
+
+
+def test_start_research_still_blocked_by_completed_and_stopped_runs(tmp_path: Path) -> None:
+    """Only a failed run frees the thread — terminal-but-promotable runs keep
+    the one-run-per-thread rule (promotion reads the row's session_path)."""
+    for status in ("completed", "stopped"):
+        client = FakeClient(judgment_messages=start_research_script("Already ran here."))
+        gpu = StubGpu()
+        (tmp_path / status).mkdir()
+        core, store = make_core(tmp_path / status, client, gpu=gpu)
+        store.create_directive(THREAD, objective="Momentum on US large caps")
+        store.create_run(THREAD, "/stub-gpu/trace", backend="gpu")
+        store.update_run_status(THREAD, status)
+
+        core.handle_message(THREAD, "research it again", RecordingSay())
+
+        assert gpu.launched == []
+        existing = store.get_run(THREAD)
+        assert existing is not None and existing.status == status
+        tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+        assert tool_result["is_error"] is True
+
+
 class RaceyStore(StateStore):
     """Simulates a concurrent start: the duplicate pre-check misses the other
     run (first get_run returns None), then create_run hits the PK conflict."""
