@@ -29,3 +29,13 @@ Started: Sat Aug 15 12:50:59 PM UTC 2026
   - `systemctl --user show <unit> -p Environment` reflects per-unit Environment= lines after daemon-reload (unlike show-environment).
   - To safely exercise the watchdog's doctl path on-box, point --state-file at a temp worker.env with a bogus DROPLET_ID: doctl get fails -> stale-state cleanup path, no real resources touched. Real state lives at ~/rdq-runs/gpu_worker/worker.env (absent today).
 ---
+## 2026-08-15 13:30 UTC - US-003
+- Restricted token-bearing env files and wired regression detection: `.env` and `research/.env` chmod 600 on-box (were 644). ops/health.sh gains section 4 "Env file permission audit": fails when mode has any group/other bit or an owner execute bit (i.e. more permissive than 600), passes absent files ("nothing to leak"), and honors an RDQ_ENV_FILES colon-separated override so tests are hermetic.
+- Tests (tests/test_health.py): stub box now creates 600-mode env files + RDQ_ENV_FILES; new cases 644 fails w/ chmod hint, 700 (owner exec) fails, 400 passes, absent passes. 23/23 pass; shellcheck clean.
+- Files changed: ops/health.sh, tests/test_health.py, ops/CLAUDE.md.
+- Verified: make check green (1072 passed / 3 skipped). On-box `bash ops/health.sh` shows `PASS env mode .env (mode 600)` and `PASS env mode research/.env (mode 600)`.
+- **Learnings for future iterations:**
+  - ON-BOX FINDING (pre-existing, not from this story): health.sh fails on `tailscale serve :8443 -> http://127.0.0.1:3200` — that's the user's separate jph-master-tracker node app (tailnet-only, up 17 days), same category as the pre-existing 443/3100 mappings but added after the PLAN.md §1 allowlist. Deliberately NOT allowlisted autonomously (exposure-policy = operator decision). US-019 (health timer) will make this page Slack daily — resolve before/at that story: either operator adds 8443->3200 to ALLOWED_SERVE + PLAN.md §1, or removes the mapping.
+  - health.sh tests are hermetic via env-var path overrides (RDQ_ENV_FILES pattern) — prefer that over letting the script read real repo files in tests.
+  - Octal mode test in bash: `(( (8#$mode & 8#177) != 0 ))` = any group/other bit or owner-x; stricter modes (400) still pass.
+---

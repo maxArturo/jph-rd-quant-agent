@@ -99,11 +99,18 @@ def make_stub_box(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     (stub_dir / "ss.txt").write_text(HEALTHY_SS)
     (stub_dir / "serve.txt").write_text(HEALTHY_SERVE)
     (stub_dir / "mainpid_rdq-research.service").write_text("4242\n")
+    env_files = []
+    for name in ("root.env", "research.env"):
+        env_file = stub_dir / name
+        env_file.write_text("TOKEN=x\n")
+        env_file.chmod(0o600)
+        env_files.append(env_file)
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HEALTH_STUB_DIR": str(stub_dir),
         "XDG_RUNTIME_DIR": "/tmp",
         "HOME": str(tmp_path),
+        "RDQ_ENV_FILES": ":".join(str(f) for f in env_files),
     }
     return stub_dir, env
 
@@ -271,6 +278,36 @@ class TestFailureModes:
         result = run_health(env)
         assert result.returncode == 1
         assert "FAIL  tailscale serve :3100" in result.stdout
+
+    def test_group_readable_env_file_fails(self, tmp_path: Path) -> None:
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "root.env").chmod(0o644)
+        result = run_health(env)
+        assert result.returncode == 1
+        assert "FAIL  env mode" in result.stdout
+        assert "mode 644 is more permissive than 600" in result.stdout
+        assert f"chmod 600 {stub_dir / 'root.env'}" in result.stdout
+
+    def test_owner_execute_env_file_fails(self, tmp_path: Path) -> None:
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "research.env").chmod(0o700)
+        result = run_health(env)
+        assert result.returncode == 1
+        assert "mode 700 is more permissive than 600" in result.stdout
+
+    def test_stricter_env_mode_passes(self, tmp_path: Path) -> None:
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "root.env").chmod(0o400)
+        result = run_health(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "PASS  env mode" in result.stdout
+
+    def test_absent_env_file_is_not_a_failure(self, tmp_path: Path) -> None:
+        stub_dir, env = make_stub_box(tmp_path)
+        (stub_dir / "research.env").unlink()
+        result = run_health(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "absent" in result.stdout
 
     def test_multiple_failures_all_listed(self, tmp_path: Path) -> None:
         stub_dir, env = make_stub_box(tmp_path)

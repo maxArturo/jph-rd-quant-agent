@@ -43,8 +43,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Both env files chmod 600 on-box; health.sh section 4 audits modes (600-or-stricter, RDQ_ENV_FILES test override); on-box run shows both PASS. Pre-existing unrelated finding: tailscale serve :8443 -> jph-master-tracker :3200 not in allowlist — operator decision left open."
     },
     {
       "id": "US-004",

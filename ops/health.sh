@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # health.sh — one-shot health check + exposure audit for rd-agent-q (US-042).
 #
-# Proves three things about this box:
+# Proves four things about this box:
 #   1. Every rdq-* systemd user unit is in its expected state: long-running
 #      services active, timers active/waiting, timer-driven oneshot services
 #      not in the "failed" state (inactive/dead is their healthy resting state).
@@ -13,6 +13,8 @@
 #      mapping tailnet-only, never funnel, :19899 never exposed, :19900 (when
 #      enabled via ops/expose_traces.sh) proxying exactly http://127.0.0.1:19900,
 #      and no mapping outside the known allowlist.
+#   4. Token-bearing env files (.env, research/.env) are owner-only: mode 600
+#      or stricter (US-003).
 #
 # Exit: 0 on a healthy box; nonzero otherwise, naming each failing check.
 set -uo pipefail
@@ -62,6 +64,7 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 command -v systemctl >/dev/null || die "systemctl not found on PATH"
 command -v ss >/dev/null || die "ss not found on PATH"
 command -v tailscale >/dev/null || die "tailscale not found on PATH"
+command -v stat >/dev/null || die "stat not found on PATH"
 
 fails=0
 failed_checks=()
@@ -204,6 +207,35 @@ done <<<"$serve_out"
 if [[ $serve_violations -eq 0 ]]; then
   pass "tailscale exposure" "all mappings tailnet-only and in the PLAN.md port table"
 fi
+
+# --- 4. Env file permission audit -------------------------------------------------
+# Token-bearing env files must be unreadable by group/other: mode 600 or
+# stricter, no execute bits. Tests override the checked list with
+# RDQ_ENV_FILES (colon-separated absolute paths).
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ -n "${RDQ_ENV_FILES:-}" ]]; then
+  IFS=':' read -r -a env_files <<<"$RDQ_ENV_FILES"
+else
+  env_files=("$repo_root/.env" "$repo_root/research/.env")
+fi
+for env_file in "${env_files[@]}"; do
+  rel=${env_file#"$repo_root"/}
+  if [[ ! -e "$env_file" ]]; then
+    pass "env mode $rel" "absent — nothing to leak"
+    continue
+  fi
+  mode=$(stat -c %a "$env_file" 2>/dev/null)
+  if [[ -z "$mode" ]]; then
+    fail "env mode $rel" "stat failed on $env_file"
+    continue
+  fi
+  # Any group/other bit or an owner execute bit is more permissive than 600.
+  if (( (8#$mode & 8#177) != 0 )); then
+    fail "env mode $rel" "mode $mode is more permissive than 600 — chmod 600 $env_file"
+  else
+    pass "env mode $rel" "mode $mode"
+  fi
+done
 
 # --- Summary --------------------------------------------------------------------
 echo

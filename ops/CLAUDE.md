@@ -163,7 +163,11 @@
   there is sanctioned, not a leak — 19899 has no allowed mapping and fails
   everywhere. Scripts calling systemctl/ss/tailscale by bare name are testable
   end-to-end with PATH-shimmed stub binaries (tests/test_health.py pattern) —
-  both exit paths get real coverage without touching box state.
+  both exit paths get real coverage without touching box state. It also audits
+  env-file modes (.env, research/.env must be 600 or stricter); tests point it
+  at temp files via `RDQ_ENV_FILES` (colon-separated) so they never depend on
+  real repo file modes. Keep the real env files 600 — anything that recreates
+  them (editors, `cp`, deploy scripts) can silently reset to 644.
 - `ops/sweep.py` (US-041) derives SOTA **offline from the trace logs**: the
   FileStorage layout is `<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl`, and a
   loop's `feedback` pkl (`.decision` attr) pairs with its `runner result` pkl
