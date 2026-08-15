@@ -369,6 +369,20 @@ def install_gate_fakes(
 
 
 class TestGateAndPromote:
+    @pytest.fixture(autouse=True)
+    def capture_decisions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """US-012 Decision Log rows are captured — the real record_via_onecli
+        would shell out to onecli and write actual Notion rows from tests."""
+        import ops.promotion_decision as promotion_decision
+
+        self.decisions: list[dict] = []
+
+        def fake_record(payload, **_kwargs):
+            self.decisions.append(dict(payload))
+            return True
+
+        monkeypatch.setattr(promotion_decision, "record_via_onecli", fake_record)
+
     def setup_box(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         """Candidate workspace, incumbent workspace, store, and a promoted DB."""
         candidate = make_workspace(tmp_path)
@@ -421,6 +435,13 @@ class TestGateAndPromote:
         status = json.loads(status_path.read_text())
         assert status["auto_promoted"] is True
         assert status["gate"]["pass"] is True
+        # US-012: the auto-promotion left a Decision Log record too.
+        (decision,) = self.decisions
+        assert decision["source"] == "auto_gate"
+        assert decision["workspace"] == str(candidate)
+        assert decision["replaced_workspace"] == str(incumbent)
+        assert decision["gate_verdict"]["pass"] is True
+        assert decision["forced"] is False
 
     def test_no_promote_on_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         candidate, incumbent, store, db = self.setup_box(tmp_path)
@@ -438,6 +459,7 @@ class TestGateAndPromote:
         assert "FAIL" in text
         assert "failing criteria: IR" in text
         assert json.loads(status_path.read_text())["auto_promoted"] is False
+        assert self.decisions == []  # no promotion, no Decision Log row
 
     def test_no_promote_on_parity_mismatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

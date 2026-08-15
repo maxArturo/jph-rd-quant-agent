@@ -208,6 +208,40 @@ def test_request_promotion_uses_the_real_workspace_conf(
     assert "topk=50" in say.calls[0]["text"]
 
 
+def test_confirmation_includes_incumbent_metrics_and_window(
+    store: StateStore, tmp_path: Path
+) -> None:
+    """US-012: what is being given up must be visible where the decision is made."""
+    from tests.test_summary import write_qlib_res_csv, write_ret_pkl
+
+    old = tmp_path / "old_workspace"
+    old.mkdir()
+    write_qlib_res_csv(old / "qlib_res.csv")
+    write_ret_pkl(old / "ret.pkl")
+    store.set_promoted_strategy(str(old), {"universe": "us_liquid"})
+
+    flow = make_flow(store, promotable_artifacts(tmp_path))
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+
+    text = say.calls[0]["text"]
+    assert "Incumbent's own record:" in text
+    assert "IC 0.0432" in text
+    assert "ARR 0.1234" in text
+    assert "MDD -0.0840" in text
+    assert "test window 2025-01-02 →" in text
+
+
+def test_confirmation_incumbent_context_degrades_when_artifacts_gone(
+    store: StateStore, tmp_path: Path
+) -> None:
+    store.set_promoted_strategy("/swept/away", {"universe": "old"})
+    flow = make_flow(store, promotable_artifacts(tmp_path))
+    say = RecordingSay()
+    flow.request_promotion(THREAD, say)
+    assert "Incumbent's own record:* unavailable" in say.calls[0]["text"]
+
+
 def test_request_promotion_warns_when_replacing(store: StateStore, tmp_path: Path) -> None:
     store.set_promoted_strategy("/old/workspace", {"universe": "us_liquid"})
     flow = make_flow(store, promotable_artifacts(tmp_path))
@@ -359,6 +393,11 @@ def test_confirm_promotion_pins_workspace_and_config(
     assert "promoted to paper trading" in call["text"]
     assert "Replaced" not in call["text"]  # nothing was promoted before
 
+    # US-012: the conversational path leaves the same history record.
+    (history,) = store.list_promotion_history()
+    assert history.source == "conversation"
+    assert history.workspace_path == str(tmp_path / "workspace")
+
 
 def test_confirm_promotion_replacement_notice_and_single_row(
     store: StateStore, tmp_path: Path
@@ -457,6 +496,8 @@ def test_confirm_promotion_writes_decision_log_row(
     assert "topk=50" in details and "n_drop=5" in details
     assert "us_liquid" in details
     assert "IC: 0.0432" in details
+    # US-012: every source's Decision Log row states its gate standing.
+    assert "Gate: not evaluated (conversational promotion" in details
 
     # The idea page's Status moves to 'promoted'.
     assert status_update["method"] == "PATCH"

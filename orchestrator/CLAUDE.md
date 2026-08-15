@@ -274,7 +274,12 @@
   workspace + config into the single `promoted_strategy` row (replacement is
   announced in-thread), writes a Decision Log row
   (`NotionRecorder.record_decision`), and moves the idea page's Status to
-  `promoted`. The rebalancer-side check is `execution/promoted.py` —
+  `promoted`. US-012: the confirmation text shows the INCUMBENT's own
+  IC/ARR/MDD + test window (read from its workspace via ops.gpu_trace,
+  degrades to "unavailable" when swept), and the Decision Log details end
+  with a gate-standing line — this path never runs the gate, so it appends
+  `ops.promotion_gate.GATE_NOT_EVALUATED` (CLI/auto rows render theirs with
+  `gate_summary_line`). The rebalancer-side check is `execution/promoted.py` —
   keep the pinned config keys (universe/universe_tickers/topk/n_drop/
   thread_ts/session_path) in sync with what US-034 consumes.
 

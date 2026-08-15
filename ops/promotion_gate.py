@@ -259,6 +259,38 @@ def _workspace_tag(workspace: str) -> str:
     return Path(workspace).name[:8] or "unknown"
 
 
+# The conversational promotion path (orchestrator/promotion.py) never runs the
+# gate — its Decision Log rows carry this line so every source states its gate
+# standing explicitly (US-012).
+GATE_NOT_EVALUATED = "Gate: not evaluated (conversational promotion — operator judgment)"
+
+
+def gate_summary_line(
+    verdict: Mapping[str, Any] | None, *, forced: bool = False, error: str | None = None
+) -> str:
+    """One-line gate standing for audit records (Notion Decision Log, US-012).
+
+    ``verdict`` is a GateVerdict.to_dict() payload (also what
+    promotion_history.gate_verdict stores); ``error`` covers the
+    could-not-evaluate case; ``forced`` marks an operator override that
+    promoted despite the verdict.
+    """
+    if verdict is None:
+        base = f"Gate: ERROR — {error}" if error else "Gate: not evaluated"
+    elif verdict.get("pass"):
+        base = "Gate: PASS — parity ok, all criteria met"
+    else:
+        failing = [
+            str(criterion.get("name"))
+            for criterion in verdict.get("criteria") or []
+            if not criterion.get("passed")
+        ]
+        if not verdict.get("parity_ok", True):
+            failing.insert(0, "parity")
+        base = f"Gate: FAIL — {', '.join(failing) or 'unspecified'}"
+    return f"{base} — promoted anyway (operator --force)" if forced else base
+
+
 def _confirmation_side_text(role: str, side: ConfirmationSide) -> str:
     ir = f"{side.ir:.4f}" if side.ir is not None else "n/a"
     source = "re-predicted" if side.repredicted else "cached pred"

@@ -176,7 +176,29 @@ def confirmation_text(candidate: PromotionCandidate, previous: PromotedStrategy 
             f":warning: This replaces the currently promoted strategy"
             f" (workspace `{previous.workspace_path}`, promoted {previous.promoted_at})."
         )
+        context = _incumbent_context(previous)
+        lines.append(
+            f"• *Incumbent's own record:* {context}"
+            if context
+            else "• *Incumbent's own record:* unavailable (workspace artifacts missing)"
+        )
     return "\n".join(lines)
+
+
+def _incumbent_context(previous: PromotedStrategy) -> str | None:
+    """The incumbent's headline metrics + test window (US-012): replacement is
+    a decision, so what is being given up must be visible where it is made.
+    Degrades to None when the workspace's artifacts are gone (e.g. swept)."""
+    from ops.gpu_trace import workspace_metrics, workspace_window
+
+    metrics = workspace_metrics(previous.workspace_path) or {}
+    parts = [
+        f"{label} {metrics[label]:.4f}" for label in ("IC", "ARR", "MDD") if label in metrics
+    ]
+    window = workspace_window(previous.workspace_path)
+    if window:
+        parts.append(f"test window {window[0]} → {window[1]}")
+    return " · ".join(parts) if parts else None
 
 
 def confirmation_blocks(
@@ -416,4 +438,9 @@ class PromotionFlow:
             lines.append(
                 f"Replaced: {previous.workspace_path} (promoted {previous.promoted_at})"
             )
+        # US-012: every promotion source states its gate standing; this path
+        # is pure operator judgment, and the record says so.
+        from ops.promotion_gate import GATE_NOT_EVALUATED
+
+        lines.append(GATE_NOT_EVALUATED)
         return "\n".join(lines)

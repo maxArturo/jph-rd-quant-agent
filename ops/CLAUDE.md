@@ -77,7 +77,14 @@
 - `python -m ops.promote_fetched --workspace <dir> [--yes]` promotes a fetched
   GPU workspace: same records as orchestrator/promotion.py confirm_promotion
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per
-  US-023) minus the Notion writes (thread-keyed; manual reminder printed).
+  US-023) plus, since US-012, the Notion Decision Log row (via
+  ops.promotion_decision.record_via_onecli — falls back to a manual reminder
+  when the write fails; `--no-notion` skips). It runs the promotion gate in
+  ADVISORY mode first (candidate hash from the CURRENT store list,
+  confirmation window re-derived via gpu_pipeline.compute_run_dates — both
+  approximations of the launch-recorded values a bare workspace can't reach);
+  a non-PASS verdict blocks `--yes` unless `--force`, and the override is
+  recorded in promotion_history.gate_verdict as `"forced": true`.
   Never creates state.sqlite; dry-run by default. Its
   `promote_workspace(ws, source=..., gate_verdict=...)` is THE promotion
   write path (validate → tickers → snapshot → pointer flip + history row,
@@ -146,6 +153,18 @@
   degenerate refresh (the incident: ~0.13) can therefore never feed the
   gate; the live promoted c9587797 currently FAILS this check by design
   until its parquet-conf snapshot is fixed or rolled back.
+- `ops/promotion_decision.py` (US-012) is how ops-side code writes Notion
+  Decision Log rows: the bearer only injects under `onecli run --agent
+  rdq-orchestrator`, so promote_fetched and the pipeline's auto-promotion
+  build a JSON payload (`build_payload`) and hop identities with
+  `record_via_onecli` (subprocess re-entering `python -m
+  ops.promotion_decision --payload <file>` — same pattern as notion_writeup).
+  The write itself still goes through `NotionRecorder.record_decision`
+  (one-writer-per-DB holds). Every promotion source's row carries a
+  `promotion_gate.gate_summary_line` gate-standing line (conversational rows
+  use the `GATE_NOT_EVALUATED` constant). Tests must monkeypatch
+  `record_via_onecli` on any path that promotes — on a box with onecli
+  installed the real thing writes actual Notion rows.
 - `python -m ops.rollback_promotion [--to <ws>] [--yes]` (US-006) re-promotes
   a prior promotion_history entry using that entry's RECORDED config (never
   re-derives from the workspace conf) and appends a new history row (source

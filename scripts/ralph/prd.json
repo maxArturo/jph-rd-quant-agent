@@ -185,8 +185,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "promote_fetched: advisory gate (auto-gate evaluation, CLI-assembled inputs) blocks --yes on non-PASS unless --force (recorded as gate_verdict.forced=true in history); Decision Log row written via new ops/promotion_decision.py (onecli identity hop, write still through NotionRecorder). Conversational confirmation shows incumbent IC/ARR/MDD + test window; all three sources' Decision Log rows carry a gate_summary_line. auto_gate path writes its row from _auto_promote. E2E: real dry-run verdict on e05ad9b4 vs live c9587797 (honest FAIL, --force hint); real Notion row written under onecli and archived."
     },
     {
       "id": "US-013",

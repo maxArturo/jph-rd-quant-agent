@@ -17,12 +17,21 @@ flow writes (orchestrator/promotion.py confirm_promotion):
    never from a label) and the conf's real topk/n_drop.
 3. A Slack notice to the channel.
 
-It deliberately does NOT write the Notion Decision Log / idea status (those
-key on a Slack thread the run doesn't have) — it reminds you instead.
+Audit trail (US-012): every CLI promotion appends a promotion_history row
+(source 'cli') and writes a Notion Decision Log row via ops.promotion_decision
+(the write hops through `onecli run --agent rdq-orchestrator` for the Notion
+bearer; on failure the manual reminder prints instead). The promotion gate
+(ops/promotion_gate.py) runs in ADVISORY mode first — same evaluation as the
+GPU pipeline's auto-gate, with the candidate's universe hash taken from the
+CURRENT store instrument list and the confirmation window derived from the
+store calendar (gpu_pipeline.compute_run_dates). A failing or unavailable
+verdict blocks --yes unless --force, and --force is recorded in the history
+row's gate_verdict ("forced": true).
 
 Safety rails:
 - refuses if state.sqlite doesn't already exist (never creates the DB);
 - prints the CURRENT promoted strategy and requires --yes to replace it;
+- a failing gate verdict requires an explicit --force (recorded);
 - warns that re-snapshotting overwrites an operator-pinned market in an
   existing conf_pred_refresh.yaml (e.g. the us_liquid_promoted_30 freeze);
 - verifies the market's instruments file exists on THIS box.
@@ -37,13 +46,16 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from execution.pred_refresh import snapshot_pred_refresh
 from execution.rebalance import DEFAULT_STORE_PATH
 from execution.signal import SignalError, load_market, load_strategy_params
 from ops.gpu_trace import workspace_metrics
 from orchestrator.state import DEFAULT_DB_PATH, StateStore
+
+if TYPE_CHECKING:
+    from ops.promotion_gate import GateVerdict
 
 PRED_REFRESH_CONF = "conf_pred_refresh.yaml"
 
@@ -125,6 +137,71 @@ def promote_workspace(
     )
 
 
+def evaluate_advisory_gate(
+    workspace: Path,
+    tickers: list[str] | None,
+    store: StateStore,
+    *,
+    store_path: Path = DEFAULT_STORE_PATH,
+    config_path: Path | None = None,
+    snapshot_missing: bool = False,
+) -> tuple[GateVerdict | None, str | None]:
+    """US-012: the auto-gate's evaluation, assembled for a CLI promotion.
+
+    Returns (verdict, None) or (None, error) — never raises. Differences from
+    the pipeline's launch-time gate, both inherent to promoting after the
+    fact: the candidate's universe hash comes from the CURRENT store
+    instrument list (the launch-recorded hash lives in that run's
+    pipeline_status.json, which a bare workspace path can't reach), and the
+    confirmation window is re-derived from the store calendar
+    (compute_run_dates — same confirm_days default as launch).
+
+    ``snapshot_missing=True`` (the --yes path) snapshots the candidate first
+    when its pred-refresh files are absent: confirmation needs them, and
+    promote_workspace would write the identical files moments later anyway.
+    Dry-run keeps its nothing-written promise and lets confirmation degrade.
+    """
+    try:
+        import datetime as dt
+
+        from ops.gpu_pipeline import compute_run_dates
+        from ops.promotion_gate import (
+            DEFAULT_CONFIG_PATH,
+            evaluate_gate,
+            hash_instruments,
+            load_confirmation_evidence,
+            load_gate_config,
+            load_metric_bundle,
+        )
+
+        gate_config = load_gate_config(config_path if config_path else DEFAULT_CONFIG_PATH)
+        candidate = load_metric_bundle(
+            workspace, instrument_hash=hash_instruments(tickers) if tickers else None
+        )
+        incumbent_row = store.get_promoted_strategy()
+        if incumbent_row is None:
+            return evaluate_gate(candidate, None, gate_config), None
+        incumbent_tickers = incumbent_row.config.get("universe_tickers") or []
+        incumbent = load_metric_bundle(
+            incumbent_row.workspace_path,
+            instrument_hash=hash_instruments(incumbent_tickers) if incumbent_tickers else None,
+        )
+        if snapshot_missing and not (workspace / PRED_REFRESH_CONF).is_file():
+            snapshot_pred_refresh(workspace)
+        resolved_store = store_path.expanduser()
+        dates = compute_run_dates(store=resolved_store)
+        evidence = load_confirmation_evidence(
+            workspace,
+            incumbent_row.workspace_path,
+            dt.date.fromisoformat(dates.confirm_start),
+            dt.date.fromisoformat(dates.store_end),
+            store_path=resolved_store,
+        )
+        return evaluate_gate(candidate, incumbent, gate_config, evidence), None
+    except Exception as exc:  # noqa: BLE001 — advisory: the verdict degrades, main() decides
+        return None, str(exc)
+
+
 def read_tickers(instruments_dir: Path, market: str) -> list[str] | None:
     path = instruments_dir / f"{market}.txt"
     if not path.is_file():
@@ -171,7 +248,15 @@ def main(argv: list[str] | None = None) -> int:
         "--session-path", default=None, help="informational trace dir for the record"
     )
     parser.add_argument("--yes", action="store_true", help="actually write (default is dry-run)")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="promote despite a failing/unavailable gate verdict (recorded in history)",
+    )
     parser.add_argument("--no-slack", action="store_true")
+    parser.add_argument(
+        "--no-notion", action="store_true", help="skip the Notion Decision Log write"
+    )
     args = parser.parse_args(argv)
 
     workspace = args.workspace.expanduser().resolve()
@@ -219,9 +304,40 @@ def main(argv: list[str] | None = None) -> int:
                 "re-applied to the NEW snapshot afterwards."
             )
 
+    # US-012: same gate the pipeline auto-runs, advisory here. On the --yes
+    # path a missing candidate snapshot is written up-front (confirmation
+    # needs it; promote_workspace would write the same files right after).
+    verdict, gate_error = evaluate_advisory_gate(
+        workspace,
+        tickers,
+        store,
+        store_path=args.store.expanduser(),
+        snapshot_missing=args.yes,
+    )
+    if verdict is not None:
+        print(verdict.slack_text())
+    else:
+        print(f"gate verdict unavailable: {gate_error}", file=sys.stderr)
+    gate_passed = verdict is not None and verdict.passed
+
     if not args.yes:
+        if not gate_passed:
+            print("gate verdict is not a PASS — promoting will additionally need --force")
         print("dry-run (no --yes): nothing written")
         return 0
+
+    if not gate_passed and not args.force:
+        print(
+            "REFUSED: gate verdict is FAIL/unavailable — re-run with --force to promote "
+            "anyway (the override is recorded in promotion_history)",
+            file=sys.stderr,
+        )
+        return 1
+    forced = bool(args.force and not gate_passed)
+    gate_record: dict[str, Any] = (
+        verdict.to_dict() if verdict is not None else {"error": gate_error}
+    )
+    gate_record["forced"] = forced
 
     try:
         result = promote_workspace(
@@ -229,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             db_path=args.db,
             store_path=args.store,
             source="cli",
+            gate_verdict=gate_record,
             session_path=args.session_path,
         )
     except PromoteFetchedError as exc:
@@ -237,12 +354,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"snapshot written: {', '.join(result.snapshot_files)}")
     print(f"promoted_strategy row set at {result.promoted_at}")
 
+    decision_recorded = False
+    if not args.no_notion:
+        from ops import promotion_decision
+
+        decision_recorded = promotion_decision.record_via_onecli(
+            promotion_decision.build_payload(
+                result,
+                source="cli",
+                gate_verdict=verdict.to_dict() if verdict is not None else None,
+                gate_error=gate_error,
+                forced=forced,
+            )
+        )
+        print(
+            "Notion Decision Log row written."
+            if decision_recorded
+            else "Decision Log write FAILED — add the entry manually in Notion.",
+            file=sys.stdout if decision_recorded else sys.stderr,
+        )
+
     notice = (
         f":trophy: Promoted GPU-run workspace `{workspace.name[:8]}` "
         f"(market {market}, topk {candidate['topk']}/drop {candidate['n_drop']}"
-        f"{', ' + metric_text if metric_text else ''}). "
-        "Verify with `python -m execution.pred_refresh --no-slack`. "
-        "Reminder: add a Decision Log entry in Notion (no thread for this run)."
+        f"{', ' + metric_text if metric_text else ''})"
+        f"{' — gate verdict OVERRIDDEN with --force' if forced else ''}. "
+        "Verify with `python -m execution.pred_refresh --no-slack`."
+        + ("" if decision_recorded else " Reminder: add a Decision Log entry in Notion.")
     )
     if args.no_slack:
         print(notice, file=sys.stderr)

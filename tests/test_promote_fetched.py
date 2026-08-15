@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 import ops.promote_fetched as promote_fetched
-from ops.promote_fetched import PromoteFetchedError, read_tickers, validate_workspace
+from ops.promote_fetched import (
+    PromoteFetchedError,
+    evaluate_advisory_gate,
+    read_tickers,
+    validate_workspace,
+)
+from ops.promotion_gate import CriterionResult, GateConfig, GateVerdict
 from orchestrator.state import StateStore
 
 CONF = """\
@@ -103,6 +109,42 @@ class TestValidateWorkspace:
             validate_workspace(workspace)
 
 
+def make_verdict(passed: bool) -> GateVerdict:
+    """A minimal stub verdict for driving main()'s advisory-gate branches."""
+    return GateVerdict(
+        parity_ok=True,
+        passed=passed,
+        parity_mismatches=(),
+        criteria=(CriterionResult("IR", passed, "stub reason"),),
+        candidate_workspace="/ws/candidate",
+        incumbent_workspace="/ws/incumbent",
+        config=GateConfig(),
+    )
+
+
+def stub_gate(
+    monkeypatch: pytest.MonkeyPatch, verdict: GateVerdict | None, error: str | None = None
+) -> None:
+    monkeypatch.setattr(
+        promote_fetched, "evaluate_advisory_gate", lambda *a, **kw: (verdict, error)
+    )
+
+
+@pytest.fixture(autouse=True)
+def capture_decisions(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Never let a test reach the real onecli subprocess (it writes Notion)."""
+    import ops.promotion_decision as promotion_decision
+
+    calls: list[dict] = []
+
+    def fake_record(payload, **_kwargs):
+        calls.append(dict(payload))
+        return True
+
+    monkeypatch.setattr(promotion_decision, "record_via_onecli", fake_record)
+    return calls
+
+
 class TestReadTickers:
     def test_reads_sorted_unique_symbols(self, tmp_path: Path) -> None:
         store = make_store(tmp_path)
@@ -113,16 +155,31 @@ class TestReadTickers:
 
 
 class TestMain:
-    def test_dry_run_writes_nothing(self, tmp_path: Path, capsys) -> None:
+    def base_args(self, tmp_path: Path) -> tuple[Path, Path, list[str]]:
         workspace = make_workspace(tmp_path)
         store = make_store(tmp_path)
         db = tmp_path / "state.sqlite"
         StateStore(db)  # create schema so --db exists
-        rc = promote_fetched.main(
-            ["--workspace", str(workspace), "--db", str(db), "--store", str(store), "--no-slack"]
-        )
+        args = [
+            "--workspace",
+            str(workspace),
+            "--db",
+            str(db),
+            "--store",
+            str(store),
+            "--no-slack",
+        ]
+        return workspace, db, args
+
+    def test_dry_run_writes_nothing(self, tmp_path: Path, capsys) -> None:
+        workspace, db, args = self.base_args(tmp_path)
+        rc = promote_fetched.main(args)
         assert rc == 0
-        assert "dry-run" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "dry-run" in out
+        # The real advisory gate ran: empty DB = no incumbent, allow_first off.
+        assert "*Promotion gate:*" in out and "FAIL" in out
+        assert "--force" in out
         assert not (workspace / "conf_pred_refresh.yaml").exists()
         assert StateStore(db).get_promoted_strategy() is None
 
@@ -133,23 +190,12 @@ class TestMain:
         assert rc == 1
         assert "does not exist" in capsys.readouterr().err
 
-    def test_yes_writes_snapshot_and_row(self, tmp_path: Path) -> None:
-        workspace = make_workspace(tmp_path)
-        store = make_store(tmp_path)
-        db = tmp_path / "state.sqlite"
-        StateStore(db)
-        rc = promote_fetched.main(
-            [
-                "--workspace",
-                str(workspace),
-                "--db",
-                str(db),
-                "--store",
-                str(store),
-                "--yes",
-                "--no-slack",
-            ]
-        )
+    def test_yes_writes_snapshot_and_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace, db, args = self.base_args(tmp_path)
+        stub_gate(monkeypatch, make_verdict(passed=True))
+        rc = promote_fetched.main([*args, "--yes", "--no-notion"])
         assert rc == 0
         assert (workspace / "conf_pred_refresh.yaml").is_file()
         assert (workspace / "pred_refresh.env").is_file()
@@ -161,8 +207,92 @@ class TestMain:
         assert promoted.config["universe_tickers"] == ["AAPL", "SPY"]
         assert promoted.config["topk"] == 20
         assert promoted.config["n_drop"] == 3
+        # US-012: the CLI path leaves the same history record as the others.
+        (history,) = StateStore(db).list_promotion_history()
+        assert history.source == "cli"
+        assert history.gate_verdict is not None
+        assert history.gate_verdict["pass"] is True
+        assert history.gate_verdict["forced"] is False
+
+    def test_failing_gate_blocks_yes_without_force(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        workspace, db, args = self.base_args(tmp_path)
+        stub_gate(monkeypatch, make_verdict(passed=False))
+        rc = promote_fetched.main([*args, "--yes", "--no-notion"])
+        assert rc == 1
+        assert "--force" in capsys.readouterr().err
+        assert not (workspace / "conf_pred_refresh.yaml").exists()
+        assert StateStore(db).get_promoted_strategy() is None
+        assert StateStore(db).list_promotion_history() == []
+
+    def test_force_promotes_and_records_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace, db, args = self.base_args(tmp_path)
+        stub_gate(monkeypatch, make_verdict(passed=False))
+        rc = promote_fetched.main([*args, "--yes", "--force", "--no-notion"])
+        assert rc == 0
+        promoted = StateStore(db).get_promoted_strategy()
+        assert promoted is not None and promoted.workspace_path == str(workspace)
+        (history,) = StateStore(db).list_promotion_history()
+        assert history.source == "cli"
+        assert history.gate_verdict is not None
+        assert history.gate_verdict["pass"] is False
+        assert history.gate_verdict["forced"] is True
+
+    def test_force_covers_gate_error_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace, db, args = self.base_args(tmp_path)
+        stub_gate(monkeypatch, None, "store exploded")
+        assert promote_fetched.main([*args, "--yes", "--no-notion"]) == 1
+        rc = promote_fetched.main([*args, "--yes", "--force", "--no-notion"])
+        assert rc == 0
+        (history,) = StateStore(db).list_promotion_history()
+        assert history.gate_verdict == {"error": "store exploded", "forced": True}
+
+    def test_decision_log_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_decisions: list[dict]
+    ) -> None:
+        """US-012: the CLI writes the Decision Log row it used to skip."""
+        workspace, _db, args = self.base_args(tmp_path)
+        stub_gate(monkeypatch, make_verdict(passed=False))
+        rc = promote_fetched.main([*args, "--yes", "--force"])
+        assert rc == 0
+        (payload,) = capture_decisions
+        assert payload["source"] == "cli"
+        assert payload["workspace"] == str(workspace)
+        assert payload["market"] == "us_liquid"
+        assert payload["metrics"]["IC"] == 0.0186
+        assert payload["replaced_workspace"] is None
+        assert payload["forced"] is True
+        assert payload["gate_verdict"]["pass"] is False
 
     def test_refused_workspace_exits_one(self, tmp_path: Path, capsys) -> None:
         rc = promote_fetched.main(["--workspace", str(tmp_path / "missing"), "--no-slack"])
         assert rc == 1
         assert "REFUSED" in capsys.readouterr().err
+
+
+class TestAdvisoryGate:
+    def test_no_incumbent_runs_pure_gate(self, tmp_path: Path) -> None:
+        workspace = make_workspace(tmp_path)
+        db = StateStore(tmp_path / "state.sqlite")
+        verdict, error = evaluate_advisory_gate(workspace, ["AAPL", "SPY"], db)
+        assert error is None
+        assert verdict is not None
+        assert verdict.passed is False  # allow_first defaults off
+        assert verdict.incumbent_workspace is None
+
+    def test_gate_assembly_error_degrades_never_raises(self, tmp_path: Path) -> None:
+        """With an incumbent the confirmation leg needs the store calendar —
+        the fixture has none, and the contract is (None, error), no raise."""
+        workspace = make_workspace(tmp_path)
+        db = StateStore(tmp_path / "state.sqlite")
+        db.set_promoted_strategy(str(tmp_path / "old"), {"universe": "us_liquid"})
+        verdict, error = evaluate_advisory_gate(
+            workspace, ["AAPL", "SPY"], db, store_path=tmp_path / "store"
+        )
+        assert verdict is None
+        assert error is not None

@@ -565,7 +565,11 @@ def _manual_promote_command(candidate_workspace: str) -> str:
 
 
 def _auto_promote(
-    candidate_workspace: str, verdict: GateVerdict, db_path: Path, store_path: Path | None
+    candidate_workspace: str,
+    verdict: GateVerdict,
+    db_path: Path,
+    store_path: Path | None,
+    thread_ts: str | None = None,
 ) -> tuple[bool, str]:
     """Promote through the promote_fetched write path; (promoted?, Slack line).
 
@@ -591,6 +595,18 @@ def _auto_promote(
             f"({exc}) — run finalizes UNPROMOTED; the current strategy is untouched. "
             f"Fix and promote manually: {_manual_promote_command(candidate_workspace)}"
         )
+    # US-012: auto-promotions leave the same Notion Decision Log record as the
+    # CLI and conversational paths (best-effort — never unwinds the promotion).
+    try:
+        from ops import promotion_decision
+
+        promotion_decision.record_via_onecli(
+            promotion_decision.build_payload(
+                result, source="auto_gate", gate_verdict=verdict.to_dict(), thread_ts=thread_ts
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must never fail the run
+        print(f"decision log write failed ({exc})", file=sys.stderr)
     replaced = (
         f"replacing `{Path(result.replaced_workspace).name[:8]}`"
         if result.replaced_workspace
@@ -615,6 +631,7 @@ def gate_and_promote(
     store_path: Path | None = None,
     config_path: Path | None = None,
     confirm_kwargs: dict | None = None,
+    thread_ts: str | None = None,
 ) -> bool:
     """US-011: gate the candidate against the incumbent; auto-promote on pass.
 
@@ -667,7 +684,9 @@ def gate_and_promote(
 
     promoted = False
     if verdict.passed and gate_config.auto_promote:
-        promoted, outcome = _auto_promote(candidate_workspace, verdict, db, store_path)
+        promoted, outcome = _auto_promote(
+            candidate_workspace, verdict, db, store_path, thread_ts
+        )
     elif verdict.passed:
         outcome = (
             ":pause_button: gate PASSED but promotion_gate.auto_promote is false — report-only "
@@ -825,7 +844,14 @@ def run_pipeline(options: PipelineOptions) -> int:
                     slack.post(":warning: Notion write-up failed — see pipeline logs")
             # US-011: gate + auto-promotion — last, so the chart/write-up
             # still describe the pre-promotion world. Never raises.
-            gate_and_promote(candidate.workspace, dates, instrument_hash, slack, status_file)
+            gate_and_promote(
+                candidate.workspace,
+                dates,
+                instrument_hash,
+                slack,
+                status_file,
+                thread_ts=options.thread_ts,
+            )
         return 0 if exit_code == 0 else 1
     except Exception as exc:  # noqa: BLE001 — report, tear down, re-raise as exit code
         slack.post(f":x: GPU pipeline failed: {exc}")
