@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             "thread_ts": None,
             "session_path": args.session_path,
         },
+        source="cli",
     )
     print(f"promoted_strategy row set at {promoted.promoted_at}")
 

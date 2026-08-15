@@ -1,9 +1,9 @@
 """SQLite state store for the orchestrator.
 
 Persists what must survive a process restart: refined research directives,
-thread-to-run mappings, the single promoted strategy, and pending operator
-interactions. The schema migration is idempotent (plain ``CREATE ... IF NOT
-EXISTS``) and runs on every startup.
+thread-to-run mappings, the single promoted strategy (plus its append-only
+promotion history), and pending operator interactions. The schema migration
+is idempotent (plain ``CREATE ... IF NOT EXISTS``) and runs on every startup.
 
 Concurrency model: each helper opens a short-lived connection, so a
 ``StateStore`` instance is safe to share across threads (the Bolt handlers
@@ -67,6 +67,21 @@ CREATE TABLE IF NOT EXISTS promoted_strategy (
     workspace_path TEXT NOT NULL,
     config         TEXT NOT NULL,
     promoted_at    TEXT NOT NULL
+);
+
+-- Append-only promotion audit trail (US-005): every set_promoted_strategy
+-- call appends a row here, while promoted_strategy above stays the current
+-- pointer. Rows are never updated or deleted, so what-replaced-what is
+-- always reconstructable.
+CREATE TABLE IF NOT EXISTS promotion_history (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_path     TEXT NOT NULL,
+    config             TEXT NOT NULL,
+    promoted_at        TEXT NOT NULL,
+    source             TEXT NOT NULL
+        CHECK (source IN ('auto_gate', 'conversation', 'cli')),
+    gate_verdict       TEXT,
+    replaced_workspace TEXT
 );
 
 -- Notion page-id mappings (US-027): which Notion page records a given
@@ -144,6 +159,22 @@ class PromotedStrategy:
     promoted_at: str
 
 
+# Who drove a promotion: the auto-promotion gate, a conversational (Slack)
+# confirm, or a CLI invocation (ops/promote_fetched.py, rollback).
+PROMOTION_SOURCES = ("auto_gate", "conversation", "cli")
+
+
+@dataclass(frozen=True)
+class PromotionHistoryEntry:
+    id: int
+    workspace_path: str
+    config: dict[str, Any]
+    promoted_at: str
+    source: str
+    gate_verdict: dict[str, Any] | None
+    replaced_workspace: str | None
+
+
 @dataclass(frozen=True)
 class PendingInteraction:
     id: int
@@ -189,6 +220,19 @@ def _universe_from_row(row: sqlite3.Row) -> ThreadUniverse:
         status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _history_from_row(row: sqlite3.Row) -> PromotionHistoryEntry:
+    verdict = row["gate_verdict"]
+    return PromotionHistoryEntry(
+        id=row["id"],
+        workspace_path=row["workspace_path"],
+        config=json.loads(row["config"]),
+        promoted_at=row["promoted_at"],
+        source=row["source"],
+        gate_verdict=None if verdict is None else json.loads(verdict),
+        replaced_workspace=row["replaced_workspace"],
     )
 
 
@@ -255,6 +299,30 @@ class StateStore:
                 conn.execute(
                     "ALTER TABLE runs ADD COLUMN backend TEXT NOT NULL DEFAULT 'server_ui'"
                 )
+            # Backfill (US-005): a DB promoted before promotion_history existed
+            # gets its current pointer as history row 1. Provenance of that
+            # promotion is unknowable, so it is labeled 'cli' (every promotion
+            # to date was a human-driven path). History is append-only and
+            # never emptied, so the empty-table guard makes this idempotent.
+            has_history = conn.execute(
+                "SELECT 1 FROM promotion_history LIMIT 1"
+            ).fetchone()
+            if has_history is None:
+                promoted = conn.execute(
+                    "SELECT workspace_path, config, promoted_at"
+                    " FROM promoted_strategy WHERE id = 1"
+                ).fetchone()
+                if promoted is not None:
+                    conn.execute(
+                        "INSERT INTO promotion_history (workspace_path, config,"
+                        " promoted_at, source, gate_verdict, replaced_workspace)"
+                        " VALUES (?, ?, ?, 'cli', NULL, NULL)",
+                        (
+                            promoted["workspace_path"],
+                            promoted["config"],
+                            promoted["promoted_at"],
+                        ),
+                    )
 
     # -- directives ---------------------------------------------------------
 
@@ -437,17 +505,45 @@ class StateStore:
     # -- promoted strategy ----------------------------------------------------
 
     def set_promoted_strategy(
-        self, workspace_path: str, config: dict[str, Any]
+        self,
+        workspace_path: str,
+        config: dict[str, Any],
+        source: str = "cli",
+        gate_verdict: dict[str, Any] | None = None,
     ) -> PromotedStrategy:
-        """Replace THE promoted strategy (single row; any previous one is overwritten)."""
+        """Replace THE promoted strategy (single row; any previous one is overwritten).
+
+        Every call also appends a promotion_history row (US-005) recording who
+        drove it (``source``), the gate verdict when one exists, and which
+        workspace was replaced — pointer flip and audit row commit atomically.
+        """
+        if source not in PROMOTION_SOURCES:
+            raise ValueError(
+                f"unknown promotion source {source!r} (expected one of {PROMOTION_SOURCES})"
+            )
         now = _utcnow()
         with self._connect() as conn:
+            previous = conn.execute(
+                "SELECT workspace_path FROM promoted_strategy WHERE id = 1"
+            ).fetchone()
             conn.execute(
                 "INSERT INTO promoted_strategy (id, workspace_path, config, promoted_at)"
                 " VALUES (1, ?, ?, ?)"
                 " ON CONFLICT (id) DO UPDATE SET workspace_path = excluded.workspace_path,"
                 " config = excluded.config, promoted_at = excluded.promoted_at",
                 (workspace_path, json.dumps(config), now),
+            )
+            conn.execute(
+                "INSERT INTO promotion_history (workspace_path, config, promoted_at,"
+                " source, gate_verdict, replaced_workspace) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    workspace_path,
+                    json.dumps(config),
+                    now,
+                    source,
+                    None if gate_verdict is None else json.dumps(gate_verdict),
+                    None if previous is None else previous["workspace_path"],
+                ),
             )
         return PromotedStrategy(workspace_path=workspace_path, config=config, promoted_at=now)
 
@@ -463,6 +559,17 @@ class StateStore:
             config=json.loads(row["config"]),
             promoted_at=row["promoted_at"],
         )
+
+    def list_promotion_history(self, limit: int | None = None) -> list[PromotionHistoryEntry]:
+        """Promotion audit rows, newest first (optionally the most recent ``limit``)."""
+        query = "SELECT * FROM promotion_history ORDER BY id DESC"
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (limit,)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_history_from_row(row) for row in rows]
 
     # -- notion page mappings (US-027) -------------------------------------------
 

@@ -252,7 +252,9 @@ class PromotionFlow:
             say(text=f":no_entry: Cannot promote: {exc}", thread_ts=thread_ts)
             return
         previous = self._store.get_promoted_strategy()
-        promoted = self._store.set_promoted_strategy(str(candidate.workspace), candidate.config)
+        promoted = self._store.set_promoted_strategy(
+            str(candidate.workspace), candidate.config, source="conversation"
+        )
         lines = [
             ":rocket: *Strategy promoted to paper trading.*",
             f"• Universe `{candidate.universe}`, topk={candidate.params.topk},"

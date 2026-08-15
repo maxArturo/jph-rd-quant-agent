@@ -208,6 +208,107 @@ def test_promoted_strategy_replace_keeps_single_row(store: StateStore, db_path: 
     assert count == 1
 
 
+# -- promotion history (loop-hardening US-005) -------------------------------------
+
+
+def test_promote_appends_history_row(store: StateStore) -> None:
+    store.set_promoted_strategy(
+        "/workspaces/abc", {"topk": 30}, source="auto_gate", gate_verdict={"pass": True}
+    )
+    history = store.list_promotion_history()
+    assert len(history) == 1
+    entry = history[0]
+    assert entry.workspace_path == "/workspaces/abc"
+    assert entry.config == {"topk": 30}
+    assert entry.source == "auto_gate"
+    assert entry.gate_verdict == {"pass": True}
+    assert entry.replaced_workspace is None
+    assert entry.promoted_at != ""
+
+
+def test_history_records_replaced_workspace(store: StateStore) -> None:
+    store.set_promoted_strategy("/workspaces/old", {"topk": 30}, source="cli")
+    store.set_promoted_strategy("/workspaces/new", {"topk": 50}, source="conversation")
+    newest, oldest = store.list_promotion_history()  # newest first
+    assert newest.workspace_path == "/workspaces/new"
+    assert newest.replaced_workspace == "/workspaces/old"
+    assert newest.source == "conversation"
+    assert oldest.replaced_workspace is None
+    # the single-row pointer still tracks the latest promotion
+    promoted = store.get_promoted_strategy()
+    assert promoted is not None and promoted.workspace_path == "/workspaces/new"
+
+
+def test_history_default_source_is_cli_with_null_verdict(store: StateStore) -> None:
+    store.set_promoted_strategy("/workspaces/abc", {"topk": 30})
+    (entry,) = store.list_promotion_history()
+    assert entry.source == "cli"
+    assert entry.gate_verdict is None
+
+
+def test_promote_rejects_unknown_source(store: StateStore) -> None:
+    with pytest.raises(ValueError, match="unknown promotion source"):
+        store.set_promoted_strategy("/workspaces/abc", {}, source="button_mash")
+    assert store.list_promotion_history() == []
+    assert store.get_promoted_strategy() is None
+
+
+def test_list_promotion_history_limit(store: StateStore) -> None:
+    for i in range(4):
+        store.set_promoted_strategy(f"/workspaces/{i}", {"topk": i})
+    recent = store.list_promotion_history(limit=2)
+    assert [e.workspace_path for e in recent] == ["/workspaces/3", "/workspaces/2"]
+
+
+def test_migration_backfills_legacy_promoted_row(db_path: Path) -> None:
+    """DBs promoted before US-005 lack promotion_history; the existing promoted
+    row becomes history row 1 with source 'cli'."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE promoted_strategy (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            " workspace_path TEXT NOT NULL, config TEXT NOT NULL,"
+            " promoted_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO promoted_strategy VALUES"
+            " (1, '/workspaces/legacy', '{\"topk\": 30}', '2026-08-01T00:00:00+00:00')"
+        )
+    store = StateStore(db_path)  # migration runs here
+    (entry,) = store.list_promotion_history()
+    assert entry.workspace_path == "/workspaces/legacy"
+    assert entry.config == {"topk": 30}
+    assert entry.promoted_at == "2026-08-01T00:00:00+00:00"
+    assert entry.source == "cli"
+    assert entry.gate_verdict is None and entry.replaced_workspace is None
+
+
+def test_backfill_is_idempotent_across_remigrations(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE promoted_strategy (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            " workspace_path TEXT NOT NULL, config TEXT NOT NULL,"
+            " promoted_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO promoted_strategy VALUES"
+            " (1, '/workspaces/legacy', '{}', '2026-08-01T00:00:00+00:00')"
+        )
+    store = StateStore(db_path)
+    store.migrate()  # explicit re-run
+    StateStore(db_path)  # second startup on the same file
+    assert len(store.list_promotion_history()) == 1
+    # later promotions grow the history; further migrations still add nothing
+    store.set_promoted_strategy("/workspaces/new", {"topk": 50})
+    store.migrate()
+    assert len(store.list_promotion_history()) == 2
+
+
+def test_fresh_db_without_promotion_backfills_nothing(store: StateStore) -> None:
+    assert store.list_promotion_history() == []
+    store.migrate()
+    assert store.list_promotion_history() == []
+
+
 # -- pending interactions ---------------------------------------------------------
 
 

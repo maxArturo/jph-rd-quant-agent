@@ -19,6 +19,14 @@
   so cross-process writers (GPU pipeline unit, CLI promotes) queue instead of
   raising 'database is locked' — keep any new sqlite connection in this repo
   on the same settings.
+- Promotions are audited (US-005): `set_promoted_strategy` appends an
+  append-only `promotion_history` row (source `auto_gate`/`conversation`/
+  `cli`, optional gate_verdict JSON, replaced_workspace) in the same
+  transaction as the pointer flip — every new promotion path MUST go through
+  `set_promoted_strategy` with an honest `source`, never write the
+  promoted_strategy table directly. Read history with
+  `list_promotion_history` (newest first); rows are never updated or
+  deleted (rollback = a NEW row re-promoting an old workspace).
 
 - All orchestrator LLM calls go through `orchestrator/llm.py` (`ModelRouter`):
   `judgment()` = claude-fable-5 (streamed, server-side refusal fallback to
