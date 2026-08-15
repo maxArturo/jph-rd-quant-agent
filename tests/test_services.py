@@ -25,6 +25,10 @@ GPU_WATCHDOG_UNIT = REPO_ROOT / "ops" / "rdq-gpu-watchdog.service"
 GPU_WATCHDOG_TIMER = REPO_ROOT / "ops" / "rdq-gpu-watchdog.timer"
 DIVERGENCE_UNIT = REPO_ROOT / "ops" / "rdq-divergence.service"
 DIVERGENCE_TIMER = REPO_ROOT / "ops" / "rdq-divergence.timer"
+RECONCILE_UNIT = REPO_ROOT / "ops" / "rdq-reconcile.service"
+RECONCILE_TIMER = REPO_ROOT / "ops" / "rdq-reconcile.timer"
+HEALTH_UNIT = REPO_ROOT / "ops" / "rdq-health.service"
+HEALTH_TIMER = REPO_ROOT / "ops" / "rdq-health.timer"
 NOTIFY_TEMPLATE = REPO_ROOT / "ops" / "rdq-notify-failure@.service"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
@@ -439,6 +443,95 @@ class TestDivergenceUnits:
         _systemd_analyze_verify(DIVERGENCE_TIMER)
 
 
+class TestReconcileUnits:
+    """US-019: weekday post-close Trade Ledger reconcile + repair timer."""
+
+    def test_exist(self) -> None:
+        assert RECONCILE_UNIT.is_file()
+        assert RECONCILE_TIMER.is_file()
+
+    def test_runs_reconcile_update_mode_under_exec_paper_identity(self) -> None:
+        """Alpaca secrets + the Notion app connection both inject for
+        rdq-exec-paper — the same pair the ledger writer uses."""
+        text = RECONCILE_UNIT.read_text()
+        assert "onecli run --agent rdq-exec-paper" in text
+        assert "python -m ops.reconcile --update --notify --lookback 4" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+        # timer-driven oneshot convention: enable the timer, not the service
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_slack_bypasses_onecli_proxy(self) -> None:
+        """--notify summaries go to Slack, which must never transit the
+        OneCLI proxy (docs/decisions.md)."""
+        text = RECONCILE_UNIT.read_text()
+        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+
+    def test_ordered_after_rebalance(self) -> None:
+        after = re.search(r"^After=(.+)$", RECONCILE_UNIT.read_text(), re.MULTILINE)
+        assert after and "rdq-rebalance.service" in after.group(1)
+
+    def test_timer_weekday_postclose_new_york(self) -> None:
+        days, hhmm = timer_schedule(RECONCILE_TIMER)
+        assert days == "Mon..Fri"
+        assert hhmm == "16:15"  # post-close: day orders have terminal status
+        # idempotent audit/repair with --lookback: catch-up after downtime is safe
+        assert "Persistent=true" in RECONCILE_TIMER.read_text()
+        assert "WantedBy=timers.target" in RECONCILE_TIMER.read_text()
+
+    def test_scheduled_between_rebalance_and_divergence(self) -> None:
+        """Daily order: rebalance (pre-open) -> reconcile -> divergence."""
+        _, rebalance_time = timer_schedule(REBALANCE_TIMER)
+        _, reconcile_time = timer_schedule(RECONCILE_TIMER)
+        _, divergence_time = timer_schedule(DIVERGENCE_TIMER)
+        assert rebalance_time < reconcile_time < divergence_time
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(RECONCILE_UNIT)
+        _systemd_analyze_verify(RECONCILE_TIMER)
+
+
+class TestHealthUnits:
+    """US-019: daily health.sh audit timer; findings reach Slack via OnFailure."""
+
+    def test_exist(self) -> None:
+        assert HEALTH_UNIT.is_file()
+        assert HEALTH_TIMER.is_file()
+
+    def test_runs_health_script(self) -> None:
+        text = HEALTH_UNIT.read_text()
+        assert "ops/health.sh" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+        # timer-driven oneshot convention: enable the timer, not the service
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_failures_reach_slack_via_onfailure(self) -> None:
+        """AC US-019: a health finding fails the unit and the US-018 notifier
+        posts it — the explicit assertion, not just the glob test below."""
+        assert re.search(
+            r"^OnFailure=rdq-notify-failure@%n\.service$", HEALTH_UNIT.read_text(), re.MULTILINE
+        )
+
+    def test_timer_daily_new_york(self) -> None:
+        days, hhmm = timer_schedule(HEALTH_TIMER)
+        assert days == "*-*-*"  # daily — exposure and unit rot don't keep market hours
+        assert hhmm == "09:00"  # after data-refresh (06:30) and rebalance (08:00)
+        # read-only audit: a check missed while the box was down fires on boot
+        assert "Persistent=true" in HEALTH_TIMER.read_text()
+        assert "WantedBy=timers.target" in HEALTH_TIMER.read_text()
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(HEALTH_UNIT)
+        _systemd_analyze_verify(HEALTH_TIMER)
+
+
 class TestNotifyFailureUnits:
     """US-018: templated OnFailure Slack notifier wired into every rdq service."""
 
@@ -499,6 +592,10 @@ class TestInstallScript:
         assert "rdq-sweep.timer" in text
         assert "rdq-divergence.service" in text
         assert "rdq-divergence.timer" in text
+        assert "rdq-reconcile.service" in text
+        assert "rdq-reconcile.timer" in text
+        assert "rdq-health.service" in text
+        assert "rdq-health.timer" in text
         assert ".config/systemd/user" in text
         assert "daemon-reload" in text
 

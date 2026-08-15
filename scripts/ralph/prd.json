@@ -293,8 +293,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "reconcile gains --update (repairs PURE fill-state mismatches to broker truth; identity/orphan/missing stay unresolved exit 1), --notify (one Slack line only on mismatches), --lookback. rdq-reconcile weekday 16:15 ET + rdq-health daily 09:00 ET (findings page via US-018 OnFailure). E2E: manual unit start repaired the real ledger (66 stale fill-poll-timeout rows over 4 days -> 0 unresolved, re-run OK, Slack line confirmed). NOTE: pre-existing tailscale :8443 finding will page daily until the operator allowlists or removes it."
     },
     {
       "id": "US-020",

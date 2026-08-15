@@ -290,14 +290,30 @@
   book holds. Operator procedures live in `ops/runbook.md` — keep it current
   when halt/rotate/exposure mechanics change (tests/test_flatten.py asserts
   its required sections).
-- `ops/reconcile.py` (US-037) is READ-ONLY on both sides and runs as
+- `ops/reconcile.py` (US-037) is read-only by default and runs as
   rdq-exec-paper (Alpaca vault secrets + Notion app connection both inject
-  for that identity). Exit codes: 0 = ledger matches broker history exactly,
-  1 = mismatches (printed with order id + differing fields), 2 = the
-  comparison itself failed (config/auth/HTTP). Any smoke test that writes a
+  for that identity). Exit codes: 0 = ledger matches broker history exactly
+  (or every mismatch was repaired), 1 = unresolved mismatches (printed with
+  order id + differing fields), 2 = the comparison itself failed
+  (config/auth/HTTP). `--update` (US-019) repairs ONLY pure fill-state
+  mismatches (Status / Filled Qty / Filled Avg Price all-that-differ — the
+  fill-poll-timeout case) to broker truth via the same ledger_status
+  vocabulary; identity mismatches, orphans, duplicates, and missing rows are
+  never touched and keep exit 1. `--notify` posts a ONE-LINE Slack summary
+  only when mismatches were found; `--lookback N` widens the range for the
+  timer's Persistent catch-up. Any smoke test that writes a
   Trade Ledger row MUST archive it afterwards, or reconcile flags it as an
   orphan forever (archived pages are invisible to Notion queries — that is
   the sanctioned cleanup mechanism, not deletion).
+- `rdq-reconcile.{service,timer}` (US-019): weekday 16:15 America/New_York —
+  post-close so day orders are terminal, before the 16:30 divergence check —
+  runs `ops.reconcile --update --notify --lookback 4` as rdq-exec-paper with
+  NO_PROXY=slack.com; Persistent=true (idempotent repair + lookback covers
+  missed days). `rdq-health.{service,timer}` (US-019): daily 09:00
+  America/New_York run of ops/health.sh with NO direct Slack path — findings
+  exit non-zero and reach Slack via the US-018 OnFailure notifier, so an
+  unresolved health finding pages EVERY DAY until fixed (that's the point;
+  don't allowlist things just to quiet it).
 - `ops/health.sh` (US-042) is the box audit: rdq unit states + loopback audit +
   tailscale exposure vs the PLAN.md §1 allowlist. When adding a unit, add it to
   BOTH install_services.sh UNITS and the matching health.sh list

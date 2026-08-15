@@ -1,0 +1,27 @@
+# RD-Agent(Q) daily box health audit (US-019).
+#
+# Runs ops/health.sh — rdq unit states, loopback/tailnet exposure vs the
+# PLAN.md §1 allowlist, env-file permission audit. The script needs no
+# credentials and no proxy (it only shells out to systemctl/ss/tailscale),
+# so it runs bare. Any finding makes health.sh exit non-zero, which fails
+# this unit and reaches Slack through the templated OnFailure notifier
+# (US-018) with the journal tail naming the failing check — that is the
+# alerting path, no direct Slack post from the script.
+#
+# Started by rdq-health.timer (daily 09:00 America/New_York); no [Install]
+# section on purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-health.timer
+# Logs:     journalctl --user -u rdq-health.service
+
+[Unit]
+# Findings fail the unit; the templated notifier posts them to Slack (US-018).
+OnFailure=rdq-notify-failure@%n.service
+Description=RD-Agent(Q) daily box health audit (ops/health.sh)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=/usr/bin/bash %h/rd-agent-q/ops/health.sh

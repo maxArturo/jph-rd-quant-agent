@@ -24,6 +24,10 @@ UNITS=(
   rdq-gpu-watchdog.timer
   rdq-divergence.service
   rdq-divergence.timer
+  rdq-reconcile.service
+  rdq-reconcile.timer
+  rdq-health.service
+  rdq-health.timer
   rdq-notify-failure@.service
 )
 

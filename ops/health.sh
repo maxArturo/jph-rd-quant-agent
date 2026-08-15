@@ -32,6 +32,8 @@ TIMERS=(
   rdq-sweep.timer
   rdq-gpu-watchdog.timer
   rdq-divergence.timer
+  rdq-reconcile.timer
+  rdq-health.timer
 )
 # Timer-driven oneshots: healthy is "anything but failed" (dead between runs).
 ONESHOTS=(
@@ -41,6 +43,8 @@ ONESHOTS=(
   rdq-sweep.service
   rdq-gpu-watchdog.service
   rdq-divergence.service
+  rdq-reconcile.service
+  rdq-health.service
 )
 
 # PLAN.md §1 port table: tailscale serve allowlist, serve port -> proxy target.

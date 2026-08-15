@@ -341,6 +341,129 @@ def test_main_rejects_inverted_range() -> None:
     assert excinfo.value.code == 2
 
 
+def test_update_repairs_submitted_then_filled_row(capsys: pytest.CaptureFixture[str]) -> None:
+    """AC US-019: a row stuck at 'submitted' (fill poll timed out) is patched
+    to the broker's final status/qty/price."""
+    notion_session = NotionSession(
+        [
+            query_response(
+                [ledger_page(status="submitted", filled_qty=0.0, filled_avg_price=None)]
+            ),
+            NotionResponse(200, {"object": "page", "id": "page-1"}),
+        ]
+    )
+    notion = NotionClient(session=notion_session)
+    alpaca = AlpacaClient(session=BrokerSession([BrokerResponse(200, [order_row()])]))
+    messages: list[str] = []
+    exit_code = run_reconcile(
+        notion, alpaca, DB_ID, START, END, update=True, notify=messages.append
+    )
+    assert exit_code == 0  # fully repaired: no page-worthy residue
+    patch = notion_session.calls[-1]
+    assert patch["method"] == "PATCH"
+    assert patch["url"].endswith("/v1/pages/page-1")
+    assert patch["json"]["properties"] == {
+        "Status": {"select": {"name": "filled"}},
+        "Filled Qty": {"number": 10.0},
+        "Filled Avg Price": {"number": 100.0},
+    }
+    out = capsys.readouterr().out
+    assert "UPDATED [ord-1]" in out
+    assert "FIXED" in out
+    assert messages == [
+        ":mag: Trade Ledger reconcile 2026-07-09..2026-07-09: 1 mismatch(es) across "
+        "1 Alpaca order(s) and 1 Trade Ledger row(s); 1 ledger row(s) updated to "
+        "final fill state, 0 unresolved"
+    ]
+
+
+def test_update_patches_only_the_differing_fill_fields() -> None:
+    """A partial fill-state gap (price already right) patches just the gaps."""
+    notion_session = NotionSession(
+        [
+            query_response([ledger_page(status="partially_filled", filled_qty=5.0)]),
+            NotionResponse(200, {"object": "page", "id": "page-1"}),
+        ]
+    )
+    notion = NotionClient(session=notion_session)
+    alpaca = AlpacaClient(session=BrokerSession([BrokerResponse(200, [order_row()])]))
+    assert run_reconcile(notion, alpaca, DB_ID, START, END, update=True) == 0
+    assert notion_session.calls[-1]["json"]["properties"] == {
+        "Status": {"select": {"name": "filled"}},
+        "Filled Qty": {"number": 10.0},
+    }
+
+
+def test_update_never_touches_identity_mismatches(capsys: pytest.CaptureFixture[str]) -> None:
+    """Qty disagrees with the broker: corruption, not a late fill — report
+    only. The fake session would fail loudly on any unexpected PATCH."""
+    notion, alpaca = make_clients(
+        [ledger_page(qty=12.0, status="submitted", filled_qty=0.0, filled_avg_price=None)],
+        [order_row()],
+    )
+    assert run_reconcile(notion, alpaca, DB_ID, START, END, update=True) == 1
+    out = capsys.readouterr().out
+    assert "UPDATED" not in out
+    assert "1 unresolved" in out
+
+
+def test_update_cannot_fix_orphans_or_missing_rows() -> None:
+    notion, alpaca = make_clients(
+        [ledger_page(order_id="ord-gone")],
+        [order_row(id="ord-new")],
+    )
+    messages: list[str] = []
+    exit_code = run_reconcile(
+        notion, alpaca, DB_ID, START, END, update=True, notify=messages.append
+    )
+    assert exit_code == 1
+    assert len(messages) == 1
+    assert "0 ledger row(s) updated to final fill state, 2 unresolved" in messages[0]
+
+
+def test_update_patch_failure_stays_unresolved(capsys: pytest.CaptureFixture[str]) -> None:
+    notion_session = NotionSession(
+        [
+            query_response([ledger_page(status="submitted", filled_qty=0.0)]),
+            NotionResponse(404, {"object": "error", "code": "gone", "message": "page gone"}),
+        ]
+    )
+    notion = NotionClient(session=notion_session)
+    alpaca = AlpacaClient(session=BrokerSession([BrokerResponse(200, [order_row()])]))
+    assert run_reconcile(notion, alpaca, DB_ID, START, END, update=True) == 1
+    out = capsys.readouterr().out
+    assert "UPDATE FAILED [ord-1]" in out
+    assert "1 unresolved" in out
+
+
+def test_notify_is_silent_on_a_clean_day() -> None:
+    notion, alpaca = make_clients([ledger_page()], [order_row()])
+    messages: list[str] = []
+    assert run_reconcile(notion, alpaca, DB_ID, START, END, notify=messages.append) == 0
+    assert messages == []
+
+
+def test_notify_posts_one_line_without_update_mode() -> None:
+    notion, alpaca = make_clients([ledger_page(qty=12.0)], [order_row()])
+    messages: list[str] = []
+    assert run_reconcile(notion, alpaca, DB_ID, START, END, notify=messages.append) == 1
+    assert len(messages) == 1
+    assert "\n" not in messages[0]
+    assert "1 mismatch(es)" in messages[0]
+
+
+def test_main_rejects_lookback_with_start() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--start", "2026-07-08", "--lookback", "2"])
+    assert excinfo.value.code == 2
+
+
+def test_main_rejects_negative_lookback() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--lookback", "-1"])
+    assert excinfo.value.code == 2
+
+
 def test_mismatch_describe_format() -> None:
     mismatch = Mismatch("ord-1", "field_mismatch", "Qty: ledger=12 alpaca=10")
     assert mismatch.describe() == "field_mismatch [ord-1]: Qty: ledger=12 alpaca=10"

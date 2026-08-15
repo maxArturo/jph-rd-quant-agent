@@ -1,0 +1,37 @@
+# RD-Agent(Q) daily Trade Ledger reconcile + repair (US-019).
+#
+# Runs `python -m ops.reconcile --update --notify --lookback 4` under the
+# rdq-exec-paper OneCLI identity (the proxy injects the Alpaca paper secrets;
+# Notion rides the agent's app connection — the same pair the rebalancer's
+# ledger writer uses). --update patches ledger rows whose only disagreement
+# with the broker is fill state (Status / Filled Qty / Filled Avg Price — the
+# fill-poll-timeout case) to what record_final would have written; identity
+# mismatches, orphans, and missing rows are reported but never touched.
+# --notify posts a one-line Slack summary ONLY when mismatches were found, so
+# a clean day makes no noise. --lookback 4 lets a Persistent catch-up run
+# after downtime still cover the missed days.
+#
+# Slack notices must NOT transit the OneCLI proxy (docs/decisions.md
+# 2026-07-08); onecli preserves a pre-set NO_PROXY and urllib suffix-matches
+# it, covering *.slack.com.
+#
+# Started by rdq-reconcile.timer (weekday 16:15 America/New_York, post-close
+# so day orders have reached their terminal status); no [Install] section on
+# purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-reconcile.timer
+# Logs:     journalctl --user -u rdq-reconcile.service
+
+[Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
+Description=RD-Agent(Q) daily Trade Ledger reconcile (Alpaca + Notion via rdq-exec-paper OneCLI identity)
+After=network-online.target rdq-rebalance.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+ExecStart=%h/.local/bin/onecli run --agent rdq-exec-paper -- %h/rd-agent-q/.venv/bin/python -m ops.reconcile --update --notify --lookback 4

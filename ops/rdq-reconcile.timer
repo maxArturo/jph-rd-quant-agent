@@ -1,0 +1,22 @@
+# Weekday post-close trigger for rdq-reconcile.service (US-019).
+#
+# 16:15 America/New_York — after the 16:00 ET close, so today's day orders
+# have reached their terminal status (filled/expired/cancelled) and the
+# ledger repair sees final broker truth; before the 16:30 divergence check,
+# keeping the post-close order deterministic. Explicitly timezone-qualified
+# so US DST shifts never drift the run relative to the close.
+#
+# Persistent=true: reconciliation is an idempotent audit/repair, and the
+# service's --lookback 4 means a catch-up run after downtime still covers
+# the missed days — late is strictly better than never.
+
+[Unit]
+Description=Weekday 16:15 America/New_York trigger for the Trade Ledger reconcile
+
+[Timer]
+OnCalendar=Mon..Fri 16:15 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

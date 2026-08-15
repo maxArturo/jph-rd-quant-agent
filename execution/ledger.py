@@ -2,9 +2,12 @@
 
 One row per order the rebalancer submitted, updated with its terminal fill
 or rejection (docs/reference/notion-schema.md). This module is the Trade
-Ledger's SOLE writer (one-writer-per-DB convention) — the orchestrator's
-NotionRecorder never touches it, and reconciliation (US-037) can therefore
-treat every row as rebalancer output.
+Ledger's sole ROW-CREATING writer (one-writer-per-DB convention) — the
+orchestrator's NotionRecorder never touches it, and reconciliation (US-037)
+can therefore treat every row as rebalancer output. The one other sanctioned
+writer is ops/reconcile.py --update (US-019), which only ever re-states
+broker truth onto the fill-state fields this module would have written had
+its fill poll not timed out.
 
 Writes are best-effort BY DESIGN, like NotionRecorder: by the time a ledger
 row is due the order is already live at Alpaca, so a Notion outage must not

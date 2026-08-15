@@ -1,0 +1,21 @@
+# Daily trigger for rdq-health.service (US-019).
+#
+# 09:00 America/New_York every day (weekends included — exposure and unit
+# rot don't keep market hours), after the morning data-refresh (06:30) and
+# rebalance (08:00) so a unit that failed this morning is caught the same
+# day. Explicitly timezone-qualified like every other rdq timer.
+#
+# Persistent=true: the audit is read-only and idempotent — a check missed
+# while the box was down should fire on boot (a freshly rebooted box is
+# exactly when unit rot appears).
+
+[Unit]
+Description=Daily 09:00 America/New_York trigger for the box health audit
+
+[Timer]
+OnCalendar=*-*-* 09:00 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

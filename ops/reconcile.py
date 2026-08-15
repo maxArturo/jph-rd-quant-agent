@@ -13,9 +13,23 @@ script:
    (Alpaca statuses mapped through execution.ledger.ledger_status, the same
    mapping the writer used).
 
-Exit codes: 0 = every order matches its ledger row exactly; 1 = mismatches
-(each printed with the order id and the differing fields); 2 = the
-comparison itself could not run (config/auth/HTTP failure).
+Exit codes: 0 = every order matches its ledger row exactly (or, with
+--update, every mismatch was repaired); 1 = unresolved mismatches (each
+printed with the order id and the differing fields); 2 = the comparison
+itself could not run (config/auth/HTTP failure).
+
+``--update`` (US-019) additionally repairs the fill-poll-timeout case: a
+ledger row whose ONLY differences from the broker are the fill-state fields
+(Status / Filled Qty / Filled Avg Price) is patched to the values the
+rebalancer's record_final would have written (same ledger_status mapping and
+property shapes). Rows that disagree on identity fields (Symbol / Side /
+Qty / Limit Price), orphans, duplicates, and missing rows are never touched
+— those mean corruption or an out-of-band trade, and stay unresolved for a
+human. This is the one sanctioned writer besides execution/ledger.py, and it
+only ever writes broker truth. ``--notify`` posts a one-line Slack summary
+when (and only when) mismatches were found — the daily timer
+(ops/rdq-reconcile.timer, weekday 16:15 America/New_York) runs
+``--update --notify --lookback 4`` so quiet days stay silent.
 
 Because the Trade Ledger has exactly one writer (the rebalancer,
 execution/ledger.py), every discrepancy is meaningful: a missing ledger row
@@ -51,10 +65,16 @@ from orchestrator.notion_recorder import (
     DEFAULT_CONFIG_PATH,
     RecorderConfigError,
     load_notion_databases,
+    select_property,
 )
 
 # Alpaca's GET /v2/orders page cap.
 ORDERS_PAGE_LIMIT = 500
+
+# The fill-state fields --update may repair (broker truth only). Everything
+# else on a ledger row is identity the rebalancer wrote at submit time — a
+# disagreement there is corruption, not a late fill, and is never patched.
+FILL_FIELDS = ("Status", "Filled Qty", "Filled Avg Price")
 
 
 class ReconcileError(Exception):
@@ -271,14 +291,22 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def compare_fields(row: LedgerRow, order: Order) -> list[str]:
-    """Human lines for every field where the ledger disagrees with Alpaca."""
+def diff_fields(row: LedgerRow, order: Order) -> dict[str, tuple[Any, Any]]:
+    """Every disagreeing field, mapped to its (ledger value, broker value)."""
     expected = expected_ledger_fields(order)
     actual = _row_fields(row)
-    return [
-        f"{field}: ledger={_fmt(actual[field])} alpaca={_fmt(expected[field])}"
+    return {
+        field: (actual[field], expected[field])
         for field in expected
         if not _values_match(actual[field], expected[field])
+    }
+
+
+def compare_fields(row: LedgerRow, order: Order) -> list[str]:
+    """Human lines for every field where the ledger disagrees with Alpaca."""
+    return [
+        f"{field}: ledger={_fmt(ledger_value)} alpaca={_fmt(broker_value)}"
+        for field, (ledger_value, broker_value) in diff_fields(row, order).items()
     ]
 
 
@@ -334,6 +362,70 @@ def reconcile(ledger_rows: Iterable[LedgerRow], orders: Iterable[Order]) -> list
 
 
 # ---------------------------------------------------------------------------
+# Update mode (US-019)
+# ---------------------------------------------------------------------------
+
+
+def _fill_update_properties(order: Order, fields: Iterable[str]) -> dict[str, Any]:
+    """Notion property payload setting ``fields`` (all in FILL_FIELDS) to
+    broker truth — the same values record_final would have written."""
+    expected = expected_ledger_fields(order)
+    properties: dict[str, Any] = {}
+    for field in fields:
+        if field == "Status":
+            properties[field] = select_property(str(expected[field]))
+        else:
+            # None clears a stale number (Notion treats null as "unset").
+            properties[field] = {"number": expected[field]}
+    return properties
+
+
+def apply_fill_updates(
+    notion: NotionClient,
+    ledger_rows: Iterable[LedgerRow],
+    orders: Iterable[Order],
+    mismatches: Sequence[Mismatch],
+    out: Callable[[str], None] = print,
+) -> tuple[list[str], list[Mismatch]]:
+    """Repair pure fill-state mismatches; return (updated order ids, unresolved).
+
+    Only a ``field_mismatch`` whose every differing field is in FILL_FIELDS is
+    patched (the fill-poll-timeout case: submitted-then-filled). Identity
+    disagreements, orphans, duplicates, missing rows, and failed patches stay
+    in the unresolved list.
+    """
+    rows_by_id: dict[str, list[LedgerRow]] = {}
+    for row in ledger_rows:
+        if row.order_id:
+            rows_by_id.setdefault(row.order_id, []).append(row)
+    orders_by_id = {order.id: order for order in orders}
+
+    updated: list[str] = []
+    unresolved: list[Mismatch] = []
+    for mismatch in mismatches:
+        rows = rows_by_id.get(mismatch.order_id)
+        order = orders_by_id.get(mismatch.order_id)
+        if mismatch.kind != "field_mismatch" or not rows or order is None:
+            unresolved.append(mismatch)
+            continue
+        diffs = diff_fields(rows[0], order)
+        if any(field not in FILL_FIELDS for field in diffs):
+            unresolved.append(mismatch)
+            continue
+        try:
+            notion.update_page(
+                rows[0].page_id, properties=_fill_update_properties(order, diffs)
+            )
+        except NotionError as exc:
+            out(f"UPDATE FAILED [{mismatch.order_id}]: {exc}")
+            unresolved.append(mismatch)
+            continue
+        out(f"UPDATED [{mismatch.order_id}]: {', '.join(diffs)} set to final fill state")
+        updated.append(mismatch.order_id)
+    return updated, unresolved
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -345,8 +437,16 @@ def run_reconcile(
     start: dt.date,
     end: dt.date,
     out: Callable[[str], None] = print,
+    update: bool = False,
+    notify: Callable[[str], None] | None = None,
 ) -> int:
-    """Fetch both sides, compare, report. Returns the process exit code."""
+    """Fetch both sides, compare, report (and optionally repair).
+
+    Returns the process exit code: 0 when the ledger matches (or every
+    mismatch was repaired by ``update``), 1 when unresolved mismatches
+    remain. ``notify`` is called with a one-line summary only when
+    mismatches were found.
+    """
     ledger_rows = fetch_ledger_rows(notion, trade_ledger_db_id, start, end)
     orders = fetch_broker_orders(alpaca, start, end)
     mismatches = reconcile(ledger_rows, orders)
@@ -359,11 +459,21 @@ def run_reconcile(
         return 0
     for mismatch in mismatches:
         out(f"MISMATCH {mismatch.describe()}")
-    out(
-        f"FAIL {scope}: {len(mismatches)} mismatch(es) across {len(orders)} Alpaca order(s) "
+    unresolved = list(mismatches)
+    summary = (
+        f"{scope}: {len(mismatches)} mismatch(es) across {len(orders)} Alpaca order(s) "
         f"and {len(ledger_rows)} Trade Ledger row(s)"
     )
-    return 1
+    if update:
+        updated, unresolved = apply_fill_updates(notion, ledger_rows, orders, mismatches, out)
+        summary += (
+            f"; {len(updated)} ledger row(s) updated to final fill state, "
+            f"{len(unresolved)} unresolved"
+        )
+    out(("FAIL " if unresolved else "FIXED ") + summary)
+    if notify is not None:
+        notify(f":mag: Trade Ledger reconcile {summary}")
+    return 1 if unresolved else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -388,16 +498,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_CONFIG_PATH,
         help="orchestrator/config.yaml holding the Trade Ledger database id",
     )
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        default=0,
+        help="reconcile [end - N calendar days, end] instead of just end "
+        "(timer mode; conflicts with --start)",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="repair pure fill-state mismatches (Status / Filled Qty / Filled Avg "
+        "Price) to broker truth; identity mismatches are only reported",
+    )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="post a one-line Slack summary when mismatches were found "
+        "(quiet days post nothing)",
+    )
     args = parser.parse_args(argv)
 
+    if args.lookback < 0:
+        parser.error(f"--lookback must be >= 0, got {args.lookback}")
+    if args.lookback and args.start is not None:
+        parser.error("--lookback conflicts with --start (pick one way to set the range)")
     end = args.end if args.end is not None else dt.datetime.now(tz=MARKET_TZ).date()
-    start = args.start if args.start is not None else end
+    start = args.start if args.start is not None else end - dt.timedelta(days=args.lookback)
     if start > end:
         parser.error(f"--start {start} is after --end {end}")
 
+    notify: Callable[[str], None] | None = None
+    if args.notify:
+        from execution.rebalance import slack_notifier
+        from orchestrator.config import ConfigError
+
+        try:
+            notify = slack_notifier()
+        except ConfigError as exc:
+            print(f"reconcile failed: --notify needs a Slack config: {exc}", file=sys.stderr)
+            return 2
+
     try:
         databases = load_notion_databases(args.config_path)
-        return run_reconcile(NotionClient(), AlpacaClient(), databases.trade_ledger, start, end)
+        return run_reconcile(
+            NotionClient(),
+            AlpacaClient(),
+            databases.trade_ledger,
+            start,
+            end,
+            update=args.update,
+            notify=notify,
+        )
     except (RecorderConfigError, NotionError, AlpacaError, ReconcileError) as exc:
         print(f"reconcile failed: {exc}", file=sys.stderr)
         return 2

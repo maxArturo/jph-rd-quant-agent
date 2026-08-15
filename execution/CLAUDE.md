@@ -175,9 +175,11 @@
   universe/universe_tickers/topk/n_drop/thread_ts/session_path — pass topk/
   n_drop into `signal.StrategyParams` rather than re-deriving them from the
   workspace conf (the operator confirmed those exact values when promoting).
-- `execution/ledger.py` (`TradeLedger`) is the Notion Trade Ledger's SOLE
-  writer (one-writer-per-DB; the orchestrator's NotionRecorder must never
-  touch that database). Row lifecycle: `record_submitted` right after each
+- `execution/ledger.py` (`TradeLedger`) is the Notion Trade Ledger's sole
+  ROW-CREATING writer (one-writer-per-DB; the orchestrator's NotionRecorder
+  must never touch that database; the only other sanctioned writer is
+  `ops/reconcile.py --update`, US-019, which re-states broker truth onto the
+  fill-state fields when the fill poll timed out). Row lifecycle: `record_submitted` right after each
   POST /v2/orders succeeds (so a mid-batch submit failure still leaves rows
   for the live orders), `record_final` with the post-poll snapshot; if the
   submit-time create failed, `record_final` creates the full row instead of
