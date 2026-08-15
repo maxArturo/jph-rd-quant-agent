@@ -461,6 +461,16 @@ def test_load_gate_config_rejects_junk_values(tmp_path: Path) -> None:
         load_gate_config(path)
 
 
+def test_load_gate_config_auto_promote_kill_switch(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("promotion_gate:\n  auto_promote: false\n")
+    assert load_gate_config(path).auto_promote is False
+    assert GateConfig().auto_promote is True  # absent key defaults to on
+    path.write_text("promotion_gate:\n  auto_promote: maybe\n")
+    with pytest.raises(GateConfigError, match="auto_promote"):
+        load_gate_config(path)
+
+
 def test_repo_config_yaml_carries_the_gate_section() -> None:
     config = load_gate_config()
     assert config == GateConfig(

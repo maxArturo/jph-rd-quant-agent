@@ -24,6 +24,15 @@ ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
    the windows differ — with the exact promote command, and DESTROY the
    droplet (billing guard: also destroys on pipeline failure and on the
    --max-hours abort; --keep-worker opts out).
+5. gate + auto-promotion (US-011) — after the final summary the candidate is
+   run through ops/promotion_gate.evaluate_gate (parity from the launch-
+   recorded instrument hash, confirmation evidence over the reserved window
+   via ops/confirm_window). On PASS the candidate is promoted through the
+   SAME write path as ops.promote_fetched (snapshot first — a snapshot
+   failure blocks promotion, never warn-and-promote), source=auto_gate, the
+   verdict stored in promotion_history. A gate fail or gate error NEVER
+   fails the run; promotion_gate.auto_promote=false is the report-only
+   kill-switch.
 
 Slack posting: root message to SLACK_CHANNEL_ID (repo-root .env), then a
 thread per run — same channel the orchestrator uses, but these runs live
@@ -41,6 +50,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ops.promotion_gate import GateVerdict
+    from orchestrator.state import PromotedStrategy
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GPU_WORKER = REPO_ROOT / "ops" / "gpu_worker" / "gpu_worker.sh"
@@ -512,6 +526,163 @@ def format_run_start(options: PipelineOptions, dates: RunDates, instrument_hash:
     )
 
 
+ROLLBACK_COMMAND = ".venv/bin/python -m ops.rollback_promotion --yes"
+
+
+def _promoted_row(db_path: Path) -> PromotedStrategy | None:
+    """Current promoted row, or None — never creates the DB (read-only caller,
+    same guard as sweep.py: StateStore(path) would create a fresh file)."""
+    db_path = db_path.expanduser()
+    if not db_path.is_file():
+        return None
+    from orchestrator.state import StateStore
+
+    return StateStore(db_path).get_promoted_strategy()
+
+
+def _recorded_instrument_hash(config: dict) -> str | None:
+    """The incumbent's universe hash, from the ticker list its promotion pinned.
+
+    A workspace can't yield its own hash (the conf names the market, not the
+    resolved list) — the candidate's comes from launch (US-008), the
+    incumbent's only from its promotion record. hash_instruments canonicalizes
+    (sorted/deduped), so the two are comparable.
+    """
+    tickers = config.get("universe_tickers") or []
+    from ops.promotion_gate import hash_instruments
+
+    try:
+        return hash_instruments(tickers)
+    except ValueError:  # no tickers pinned at promotion time
+        return None
+
+
+def _manual_promote_command(candidate_workspace: str) -> str:
+    return (
+        f"`.venv/bin/python -m ops.promote_fetched --workspace {candidate_workspace} --yes` "
+        "(run from ~/rd-agent-q)"
+    )
+
+
+def _auto_promote(
+    candidate_workspace: str, verdict: GateVerdict, db_path: Path, store_path: Path | None
+) -> tuple[bool, str]:
+    """Promote through the promote_fetched write path; (promoted?, Slack line).
+
+    Any failure — validation or the pred-refresh snapshot — happens BEFORE the
+    pointer flip (promote_workspace orders it that way), so the run finalizes
+    unpromoted with the old strategy untouched.
+    """
+    from ops.promote_fetched import promote_workspace
+
+    kwargs: dict = {"db_path": db_path}
+    if store_path is not None:
+        kwargs["store_path"] = store_path
+    try:
+        result = promote_workspace(
+            Path(candidate_workspace),
+            source="auto_gate",
+            gate_verdict=verdict.to_dict(),
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 — blocks the promotion, never the run
+        return False, (
+            f":rotating_light: gate PASSED but promotion failed before the pointer flip "
+            f"({exc}) — run finalizes UNPROMOTED; the current strategy is untouched. "
+            f"Fix and promote manually: {_manual_promote_command(candidate_workspace)}"
+        )
+    replaced = (
+        f"replacing `{Path(result.replaced_workspace).name[:8]}`"
+        if result.replaced_workspace
+        else "(first promotion)"
+    )
+    return True, (
+        f":trophy: auto-promoted `{Path(result.workspace).name[:8]}` {replaced} — "
+        f"market {result.market}, topk {result.topk}/drop {result.n_drop}. "
+        f"Roll back with `{ROLLBACK_COMMAND}` (run from ~/rd-agent-q). "
+        "Verify with `python -m execution.pred_refresh --no-slack`."
+    )
+
+
+def gate_and_promote(
+    candidate_workspace: str,
+    dates: RunDates,
+    instrument_hash: str,
+    slack: SlackThread,
+    status_file: StatusFile,
+    *,
+    db_path: Path | None = None,
+    store_path: Path | None = None,
+    config_path: Path | None = None,
+    confirm_kwargs: dict | None = None,
+) -> bool:
+    """US-011: gate the candidate against the incumbent; auto-promote on pass.
+
+    NEVER raises — a gate fail, a gate error, or a snapshot failure all
+    finalize the run unpromoted with the verdict (or the error) posted to the
+    thread. Returns whether a promotion happened. Parity inputs come from
+    launch (``instrument_hash``, US-008); the confirmation window is the
+    launch-reserved slice in ``dates``.
+    """
+    import datetime as dt
+
+    from orchestrator.state import DEFAULT_DB_PATH
+
+    db = db_path if db_path is not None else Path(DEFAULT_DB_PATH)
+    status_file.update(stage="gate")
+    try:
+        from ops.promotion_gate import (
+            DEFAULT_CONFIG_PATH,
+            evaluate_gate,
+            load_confirmation_evidence,
+            load_gate_config,
+            load_metric_bundle,
+        )
+
+        gate_config = load_gate_config(config_path if config_path else DEFAULT_CONFIG_PATH)
+        candidate = load_metric_bundle(candidate_workspace, instrument_hash=instrument_hash)
+        incumbent_row = _promoted_row(db)
+        if incumbent_row is None:
+            verdict = evaluate_gate(candidate, None, gate_config)
+        else:
+            incumbent = load_metric_bundle(
+                incumbent_row.workspace_path,
+                instrument_hash=_recorded_instrument_hash(incumbent_row.config),
+            )
+            evidence = load_confirmation_evidence(
+                candidate_workspace,
+                incumbent_row.workspace_path,
+                dt.date.fromisoformat(dates.confirm_start),
+                dt.date.fromisoformat(dates.store_end),
+                **(confirm_kwargs or {}),
+            )
+            verdict = evaluate_gate(candidate, incumbent, gate_config, evidence)
+    except Exception as exc:  # noqa: BLE001 — a gate error must never fail the run
+        slack.post(
+            f":warning: promotion gate errored ({exc}) — run finalizes unpromoted; "
+            f"evaluate manually if warranted: {_manual_promote_command(candidate_workspace)}"
+        )
+        status_file.update(stage="finished", gate={"error": str(exc)}, auto_promoted=False)
+        return False
+
+    promoted = False
+    if verdict.passed and gate_config.auto_promote:
+        promoted, outcome = _auto_promote(candidate_workspace, verdict, db, store_path)
+    elif verdict.passed:
+        outcome = (
+            ":pause_button: gate PASSED but promotion_gate.auto_promote is false — report-only "
+            f"mode; promote manually with {_manual_promote_command(candidate_workspace)}"
+        )
+    else:
+        failing = [criterion.name for criterion in verdict.criteria if not criterion.passed]
+        if not verdict.parity_ok:
+            failing.insert(0, "parity")
+        outcome = f":no_entry_sign: not promoted — failing criteria: {', '.join(failing)}"
+    slack.post(f"{verdict.slack_text()}\n{outcome}")
+    status_file.update(stage="finished", gate=verdict.to_dict(), auto_promoted=promoted)
+    return promoted
+
+
 def finalize_run_row(thread_ts: str, trace_dir: Path | None, exit_code: int | None) -> None:
     """Point the orchestrator's run row at the fetched trace and close it out."""
     try:
@@ -652,6 +823,9 @@ def run_pipeline(options: PipelineOptions) -> int:
                     )
                 else:
                     slack.post(":warning: Notion write-up failed — see pipeline logs")
+            # US-011: gate + auto-promotion — last, so the chart/write-up
+            # still describe the pre-promotion world. Never raises.
+            gate_and_promote(candidate.workspace, dates, instrument_hash, slack, status_file)
         return 0 if exit_code == 0 else 1
     except Exception as exc:  # noqa: BLE001 — report, tear down, re-raise as exit code
         slack.post(f":x: GPU pipeline failed: {exc}")

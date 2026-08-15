@@ -35,7 +35,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from execution.pred_refresh import snapshot_pred_refresh
 from execution.rebalance import DEFAULT_STORE_PATH
@@ -48,6 +50,79 @@ PRED_REFRESH_CONF = "conf_pred_refresh.yaml"
 
 class PromoteFetchedError(RuntimeError):
     """Validation failure — nothing was written."""
+
+
+@dataclass(frozen=True)
+class PromotionResult:
+    """What ``promote_workspace`` wrote — everything a caller needs to report."""
+
+    workspace: str
+    market: str
+    topk: int
+    n_drop: int
+    metrics: dict[str, float]
+    tickers: list[str] | None
+    replaced_workspace: str | None
+    promoted_at: str
+    snapshot_files: tuple[str, str, str]
+
+
+def promote_workspace(
+    workspace: Path,
+    *,
+    db_path: Path = DEFAULT_DB_PATH,
+    store_path: Path = DEFAULT_STORE_PATH,
+    source: str = "cli",
+    gate_verdict: dict[str, Any] | None = None,
+    session_path: str | None = None,
+    thread_ts: str | None = None,
+) -> PromotionResult:
+    """THE promotion write path: validate → snapshot → pointer flip + history.
+
+    Shared by the CLI below and the GPU pipeline's auto-promotion (US-011) so
+    every route leaves identical records. Ordering is load-bearing: the
+    pred-refresh snapshot runs BEFORE the pointer flip, so a snapshot failure
+    raises with NOTHING written — a workspace that cannot re-predict must
+    never become the live strategy (do not copy orchestrator/promotion.py's
+    warn-and-promote-anyway behavior here).
+    """
+    workspace = workspace.expanduser().resolve()
+    candidate = validate_workspace(workspace)
+    market = candidate["market"]
+    tickers = read_tickers(store_path.expanduser() / "instruments", market)
+    db_path = db_path.expanduser()
+    if not db_path.is_file():
+        raise PromoteFetchedError(
+            f"{db_path} does not exist — run this from the deployed checkout "
+            "(~/rd-agent-q), never let it create a fresh DB"
+        )
+    store = StateStore(db_path)
+    current = store.get_promoted_strategy()
+    conf_path, env_path, params_path = snapshot_pred_refresh(workspace)
+    promoted = store.set_promoted_strategy(
+        str(workspace),
+        {
+            "universe": market,
+            "universe_tickers": tickers,
+            "topk": candidate["topk"],
+            "n_drop": candidate["n_drop"],
+            "thread_ts": thread_ts,
+            "session_path": session_path,
+        },
+        source=source,
+        gate_verdict=gate_verdict,
+    )
+    return PromotionResult(
+        workspace=str(workspace),
+        market=market,
+        topk=candidate["topk"],
+        n_drop=candidate["n_drop"],
+        metrics=dict(candidate["metrics"]),
+        tickers=tickers,
+        replaced_workspace=current.workspace_path if current else None,
+        promoted_at=promoted.promoted_at,
+        snapshot_files=(conf_path.name, env_path.name, params_path.name),
+    )
 
 
 def read_tickers(instruments_dir: Path, market: str) -> list[str] | None:
@@ -148,21 +223,19 @@ def main(argv: list[str] | None = None) -> int:
         print("dry-run (no --yes): nothing written")
         return 0
 
-    conf_path, env_path, params_path = snapshot_pred_refresh(workspace)
-    print(f"snapshot written: {conf_path.name}, {env_path.name}, {params_path.name}")
-    promoted = store.set_promoted_strategy(
-        str(workspace),
-        {
-            "universe": market,
-            "universe_tickers": tickers,
-            "topk": candidate["topk"],
-            "n_drop": candidate["n_drop"],
-            "thread_ts": None,
-            "session_path": args.session_path,
-        },
-        source="cli",
-    )
-    print(f"promoted_strategy row set at {promoted.promoted_at}")
+    try:
+        result = promote_workspace(
+            workspace,
+            db_path=args.db,
+            store_path=args.store,
+            source="cli",
+            session_path=args.session_path,
+        )
+    except PromoteFetchedError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+    print(f"snapshot written: {', '.join(result.snapshot_files)}")
+    print(f"promoted_strategy row set at {result.promoted_at}")
 
     notice = (
         f":trophy: Promoted GPU-run workspace `{workspace.name[:8]}` "

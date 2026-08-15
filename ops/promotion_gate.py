@@ -67,6 +67,9 @@ class GateConfig:
     min_ic: float = 0.0
     allow_first: bool = False
     confirm_ir_margin: float = 1.0
+    # Kill-switch (US-011): False = report-only, the pipeline posts the
+    # verdict but never promotes. Does not affect the verdict itself.
+    auto_promote: bool = True
 
 
 def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
@@ -92,6 +95,7 @@ def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
         confirm_ir_margin=_config_float(
             section, "confirm_ir_margin", GateConfig.confirm_ir_margin
         ),
+        auto_promote=_config_bool(section, "auto_promote", GateConfig.auto_promote),
     )
 
 

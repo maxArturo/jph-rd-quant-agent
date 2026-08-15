@@ -169,8 +169,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "gate_and_promote stage (never raises) wired last in run_pipeline; promotes via new promote_fetched.promote_workspace (snapshot BEFORE pointer flip — failure blocks promotion with nothing written), source=auto_gate + verdict in promotion_history; auto_promote kill-switch added to GateConfig/config.yaml; incumbent parity hash from its recorded universe_tickers. 6 scenario tests; E2E on a live-DB copy: honest FAIL (MDD + confirmation_unavailable on the real c9587797 incident), nothing promoted."
     },
     {
       "id": "US-012",

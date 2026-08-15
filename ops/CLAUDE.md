@@ -78,7 +78,25 @@
   GPU workspace: same records as orchestrator/promotion.py confirm_promotion
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per
   US-023) minus the Notion writes (thread-keyed; manual reminder printed).
-  Never creates state.sqlite; dry-run by default.
+  Never creates state.sqlite; dry-run by default. Its
+  `promote_workspace(ws, source=..., gate_verdict=...)` is THE promotion
+  write path (validate → tickers → snapshot → pointer flip + history row,
+  atomically last): the snapshot runs BEFORE the pointer flip so a snapshot
+  failure raises with NOTHING written — any new promotion route must call it,
+  never re-implement (and never copy orchestrator/promotion.py's
+  warn-and-promote-anyway behavior).
+- Auto-promotion (US-011): `gpu_pipeline.gate_and_promote` runs LAST in the
+  pipeline (after chart + Notion write-up, so those describe the
+  pre-promotion world) and NEVER raises — gate fail, gate error, and
+  snapshot failure all finalize the run unpromoted with the verdict/error
+  posted; on pass it promotes via promote_workspace with source='auto_gate'
+  and the verdict JSON in promotion_history. Kill-switch:
+  `promotion_gate.auto_promote: false` in config.yaml = report-only (verdict
+  still posted). Parity hashes: candidate's from launch
+  (pipeline_status.json), incumbent's from its promotion record's
+  `universe_tickers` via hash_instruments (both canonicalize identically —
+  verified matching on the real pair 2026-08-15). Status file gains
+  `gate` (verdict dict or {"error": ...}) + `auto_promoted` fields.
 - `ops/promotion_gate.py` (US-007) codifies "beats the incumbent":
   `evaluate_gate(candidate, incumbent, config)` is PURE — callers do IO via
   `load_metric_bundle(workspace, instrument_hash=...)` (every field degrades

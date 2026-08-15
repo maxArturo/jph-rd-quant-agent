@@ -17,10 +17,12 @@ notion:
 # |MDD| × mdd_tolerance AND candidate IC > min_ic AND candidate
 # confirmation-window IR > incumbent's × confirm_ir_margin (1.0 = no margin
 # on the out-of-search-sample leg). allow_first: pass with no incumbent on
-# record (IC still required).
+# record (IC still required). auto_promote: false = report-only (US-011
+# kill-switch) — the GPU pipeline posts the verdict but never promotes.
 promotion_gate:
   ir_margin: 1.05
   mdd_tolerance: 1.25
   min_ic: 0.0
   allow_first: false
   confirm_ir_margin: 1.0
+  auto_promote: true

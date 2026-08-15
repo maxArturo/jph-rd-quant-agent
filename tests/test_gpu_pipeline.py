@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from ops.gpu_pipeline import (
     PipelineOptions,
+    RunDates,
     SlackThread,
+    StatusFile,
     build_run_args,
     compute_run_dates,
     format_final_summary,
     format_loop_digest,
     format_run_start,
+    gate_and_promote,
     incumbent_report,
     parse_size_plan,
     reportable,
     resolve_instrument_hash,
     worker_sh,
 )
+from ops.promotion_gate import hash_instruments
+from orchestrator.state import StateStore
+from tests.test_promote_fetched import make_store as make_instrument_store
+from tests.test_promote_fetched import make_workspace
 
 
 class TestSizePlan:
@@ -268,3 +276,251 @@ class TestWorkerSh:
     def test_failure_raises_with_stderr_tail(self) -> None:
         with pytest.raises(RuntimeError, match="unknown subcommand"):
             worker_sh("frobnicate")
+
+
+# ------------------------------------------------------------------ gate + auto-promotion
+# The candidate workspace fixture (conf + qlib_res + pred/params + docker log)
+# is the promote_fetched one — auto-promotion runs through that exact path.
+
+TEST_WINDOW = ("2025-01-02", "2026-06-12")
+GATE_DATES = RunDates(
+    test_end="2026-06-12", confirm_start="2026-06-15", store_end="2026-08-13", confirm_days=42
+)
+LAUNCH_HASH = hash_instruments(["AAPL", "SPY"])  # matches make_instrument_store's list
+
+
+class RecordingSlack(SlackThread):
+    def __init__(self) -> None:
+        super().__init__(enabled=False)
+        self.posts: list[str] = []
+
+    def post(self, text: str) -> None:
+        self.posts.append(text)
+
+
+def gate_config_yaml(tmp_path: Path, **overrides: object) -> Path:
+    values: dict[str, object] = {
+        "ir_margin": 1.05,
+        "mdd_tolerance": 1.25,
+        "min_ic": 0.0,
+        "allow_first": False,
+        "confirm_ir_margin": 1.0,
+        "auto_promote": True,
+    }
+    values.update(overrides)
+    path = tmp_path / "gate_config.yaml"
+    path.write_text(
+        "promotion_gate:\n"
+        + "".join(f"  {key}: {json.dumps(value)}\n" for key, value in values.items())
+    )
+    return path
+
+
+def install_gate_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: Path,
+    incumbent: Path,
+    *,
+    cand_ir: float = 2.0,
+    inc_ir: float = 1.0,
+    conf_cand_ir: float = 2.0,
+    conf_inc_ir: float = 1.0,
+) -> None:
+    """Stub the gate's IO half; evaluate_gate itself runs for real."""
+    from ops import promotion_gate
+
+    metrics = {
+        str(candidate): {"IR": cand_ir, "MDD": -0.10, "IC": 0.02},
+        str(incumbent): {"IR": inc_ir, "MDD": -0.10, "IC": 0.02},
+    }
+
+    def fake_bundle(workspace, *, instrument_hash=None, config_name=None):
+        ws = str(Path(workspace).expanduser())
+        return promotion_gate.MetricBundle(
+            workspace=ws,
+            metrics=metrics[ws],
+            window=TEST_WINDOW,
+            market="us_liquid",
+            instrument_hash=instrument_hash,
+            topk=20,
+            n_drop=3,
+            cost_params={"open_cost": 0.0005, "close_cost": 0.0005, "min_cost": 5.0},
+        )
+
+    def fake_evidence(cand, inc, start, end, **kwargs):
+        window = (start.isoformat(), end.isoformat())
+
+        def side(workspace, ir):
+            return promotion_gate.ConfirmationSide(
+                workspace=str(workspace),
+                ir=ir,
+                window=window,
+                days=42,
+                repredicted=True,
+                reproduction=0.999,
+            )
+
+        return promotion_gate.ConfirmationEvidence(
+            window=window, candidate=side(cand, conf_cand_ir), incumbent=side(inc, conf_inc_ir)
+        )
+
+    monkeypatch.setattr(promotion_gate, "load_metric_bundle", fake_bundle)
+    monkeypatch.setattr(promotion_gate, "load_confirmation_evidence", fake_evidence)
+
+
+class TestGateAndPromote:
+    def setup_box(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+        """Candidate workspace, incumbent workspace, store, and a promoted DB."""
+        candidate = make_workspace(tmp_path)
+        incumbent = tmp_path / "inc" / "e05ad9b46f4d"
+        incumbent.mkdir(parents=True)
+        store = make_instrument_store(tmp_path)
+        db = tmp_path / "state.sqlite"
+        StateStore(db).set_promoted_strategy(
+            str(incumbent),
+            {"universe": "us_liquid", "universe_tickers": ["AAPL", "SPY"], "topk": 20, "n_drop": 3},
+        )
+        return candidate, incumbent, store, db
+
+    def run_gate(
+        self, tmp_path: Path, candidate: Path, store: Path, db: Path, config: Path
+    ) -> tuple[bool, RecordingSlack, Path]:
+        slack = RecordingSlack()
+        status_path = tmp_path / "pipeline_status.json"
+        promoted = gate_and_promote(
+            str(candidate),
+            GATE_DATES,
+            LAUNCH_HASH,
+            slack,
+            StatusFile(status_path, "111.222"),
+            db_path=db,
+            store_path=store,
+            config_path=config,
+        )
+        return promoted, slack, status_path
+
+    def test_promotes_on_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)
+        promoted, slack, status_path = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is True
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(candidate)
+        # Snapshot ran (the promote_fetched write path, not a bare pointer flip).
+        assert (candidate / "conf_pred_refresh.yaml").is_file()
+        latest = StateStore(db).list_promotion_history()[0]
+        assert latest.source == "auto_gate"
+        assert latest.gate_verdict is not None and latest.gate_verdict["pass"] is True
+        assert latest.replaced_workspace == str(incumbent)
+        text = "\n".join(slack.posts)
+        assert "*Promotion gate:*" in text and "PASS" in text
+        assert "replacing `e05ad9b4`" in text
+        assert "ops.rollback_promotion --yes" in text
+        status = json.loads(status_path.read_text())
+        assert status["auto_promoted"] is True
+        assert status["gate"]["pass"] is True
+
+    def test_no_promote_on_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        # IR leg fails: 1.0 is not > 1.0 × 1.05.
+        install_gate_fakes(monkeypatch, candidate, incumbent, cand_ir=1.0)
+        promoted, slack, status_path = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        assert len(StateStore(db).list_promotion_history()) == 1  # only the original
+        assert not (candidate / "conf_pred_refresh.yaml").exists()
+        text = "\n".join(slack.posts)
+        assert "FAIL" in text
+        assert "failing criteria: IR" in text
+        assert json.loads(status_path.read_text())["auto_promoted"] is False
+
+    def test_no_promote_on_parity_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)  # metrics would pass
+        slack = RecordingSlack()
+        promoted = gate_and_promote(
+            str(candidate),
+            GATE_DATES,
+            "0" * 16,  # launch hash disagrees with the incumbent's recorded universe
+            slack,
+            StatusFile(None, None),
+            db_path=db,
+            store_path=store,
+            config_path=gate_config_yaml(tmp_path),
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        text = "\n".join(slack.posts)
+        assert "instrument list mismatch" in text
+        assert "failing criteria: parity" in text
+
+    def test_no_promote_on_snapshot_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)
+
+        def broken_snapshot(workspace):
+            raise RuntimeError("jinja context unrecoverable")
+
+        monkeypatch.setattr("ops.promote_fetched.snapshot_pred_refresh", broken_snapshot)
+        promoted, slack, status_path = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is False
+        # The failure happened BEFORE the pointer flip: incumbent untouched.
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        assert len(StateStore(db).list_promotion_history()) == 1
+        text = "\n".join(slack.posts)
+        assert ":rotating_light:" in text and "UNPROMOTED" in text
+        assert "jinja context unrecoverable" in text
+        assert "ops.promote_fetched" in text  # manual recovery command
+        assert json.loads(status_path.read_text())["auto_promoted"] is False
+
+    def test_kill_switch_reverts_to_report_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)
+        promoted, slack, _ = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path, auto_promote=False)
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        assert not (candidate / "conf_pred_refresh.yaml").exists()
+        text = "\n".join(slack.posts)
+        # The verdict block still posts in full — only the promotion is withheld.
+        assert "*Promotion gate:*" in text and "PASS" in text
+        assert "report-only" in text
+        assert "ops.promote_fetched" in text
+
+    def test_gate_error_never_fails_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+
+        def exploding_bundle(workspace, *, instrument_hash=None, config_name=None):
+            raise RuntimeError("qlib_res parse exploded")
+
+        monkeypatch.setattr("ops.promotion_gate.load_metric_bundle", exploding_bundle)
+        promoted, slack, status_path = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        text = "\n".join(slack.posts)
+        assert "promotion gate errored" in text and "qlib_res parse exploded" in text
+        assert json.loads(status_path.read_text())["gate"] == {
+            "error": "qlib_res parse exploded"
+        }
