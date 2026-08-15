@@ -73,8 +73,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "promotion_history table (source CHECK auto_gate/conversation/cli, gate_verdict + replaced_workspace nullable); set_promoted_strategy appends atomically with the pointer flip; empty-table-guarded backfill in migrate(); verified against a copy of the live DB (c9587797 backfilled as row 1, source cli)."
     },
     {
       "id": "US-006",
