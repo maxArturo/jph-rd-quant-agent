@@ -18,8 +18,16 @@ The decision has two layers:
    - candidate IR strictly > incumbent IR × ir_margin (default 1.05)
    - candidate |MDD| ≤ incumbent |MDD| × mdd_tolerance (default 1.25)
    - candidate IC strictly > min_ic (default 0)
+   - candidate confirmation-window IR strictly > incumbent's ×
+     confirm_ir_margin (default 1.0 — no margin on the out-of-search-sample
+     leg, US-010). Evidence comes from ``load_confirmation_evidence`` (the
+     US-009 re-predict helper on both workspaces); a technical failure —
+     re-predict error, degenerate returns, or NO evidence supplied — fails
+     the criterion with reason ``confirmation_unavailable``, never a silent
+     skip.
    With no incumbent on record nothing passes unless ``allow_first`` is set;
-   allow_first waives the comparisons, not quality — IC is still required.
+   allow_first waives the comparisons (confirmation included), not quality —
+   IC is still required.
 
 Boundary semantics follow the repo convention (order gate / breaker): exactly
 AT the MDD tolerance passes; the IR margin and min_ic are strict ``>`` per
@@ -31,6 +39,7 @@ execution.signal's conf loaders.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
@@ -57,6 +66,7 @@ class GateConfig:
     mdd_tolerance: float = 1.25
     min_ic: float = 0.0
     allow_first: bool = False
+    confirm_ir_margin: float = 1.0
 
 
 def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
@@ -79,6 +89,9 @@ def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
         mdd_tolerance=_config_float(section, "mdd_tolerance", GateConfig.mdd_tolerance),
         min_ic=_config_float(section, "min_ic", GateConfig.min_ic),
         allow_first=_config_bool(section, "allow_first", GateConfig.allow_first),
+        confirm_ir_margin=_config_float(
+            section, "confirm_ir_margin", GateConfig.confirm_ir_margin
+        ),
     )
 
 
@@ -133,6 +146,38 @@ class MetricBundle:
 
 
 @dataclass(frozen=True)
+class ConfirmationSide:
+    """One strategy's confirmation-window evaluation (US-010).
+
+    ``ir`` is ops.confirm_window.annualized_ir over the window's net daily
+    returns — None when the window is degenerate (<2 days, zero variance),
+    which the gate treats as confirmation_unavailable. ``reproduction`` is
+    the re-predict fidelity score (spearman vs the original backtested pred;
+    None when the used pred IS the original)."""
+
+    workspace: str
+    ir: float | None
+    window: tuple[str, str]  # trading days actually evaluated, ISO, inclusive
+    days: int
+    repredicted: bool
+    reproduction: float | None = None
+
+
+@dataclass(frozen=True)
+class ConfirmationEvidence:
+    """Both strategies evaluated on the reserved confirmation window.
+
+    ``error`` set means the evaluation itself failed (re-predict error,
+    missing snapshot, non-reproducing pred, …) — the gate maps that to a
+    failing ``confirmation_unavailable`` criterion, never a silent skip."""
+
+    window: tuple[str, str]  # the requested confirmation window, ISO
+    candidate: ConfirmationSide | None = None
+    incumbent: ConfirmationSide | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class CriterionResult:
     """One criterion's outcome; ``reason`` always carries the numbers."""
 
@@ -152,6 +197,8 @@ class GateVerdict:
     candidate_workspace: str
     incumbent_workspace: str | None
     config: GateConfig
+    confirmation: ConfirmationEvidence | None = None
+    window: tuple[str, str] | None = None  # the (parity-checked) test window
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,6 +209,8 @@ class GateVerdict:
             "candidate_workspace": self.candidate_workspace,
             "incumbent_workspace": self.incumbent_workspace,
             "config": asdict(self.config),
+            "confirmation": asdict(self.confirmation) if self.confirmation else None,
+            "window": list(self.window) if self.window else None,
         }
 
     def to_json(self) -> str:
@@ -180,17 +229,36 @@ class GateVerdict:
         elif self.incumbent_workspace is None:
             lines.append("• parity: no incumbent to compare against")
         else:
-            lines.append(
-                f"• {PASS_MARK} parity: window/market/instruments/topk-n_drop/costs all match"
-            )
+            parity = "window/market/instruments/topk-n_drop/costs all match"
+            if self.window is not None:
+                parity += f" (test window {self.window[0]} → {self.window[1]})"
+            lines.append(f"• {PASS_MARK} parity: {parity}")
         for criterion in self.criteria:
             mark = PASS_MARK if criterion.passed else FAIL_MARK
             lines.append(f"• {mark} {criterion.name}: {criterion.reason}")
+        if self.confirmation is not None and self.confirmation.error is None:
+            window = self.confirmation.window
+            sides = ", ".join(
+                _confirmation_side_text(role, side)
+                for role, side in (
+                    ("candidate", self.confirmation.candidate),
+                    ("incumbent", self.confirmation.incumbent),
+                )
+                if side is not None
+            )
+            if sides:
+                lines.append(f"• confirmation window {window[0]} → {window[1]}: {sides}")
         return "\n".join(lines)
 
 
 def _workspace_tag(workspace: str) -> str:
     return Path(workspace).name[:8] or "unknown"
+
+
+def _confirmation_side_text(role: str, side: ConfirmationSide) -> str:
+    ir = f"{side.ir:.4f}" if side.ir is not None else "n/a"
+    source = "re-predicted" if side.repredicted else "cached pred"
+    return f"{role} `{_workspace_tag(side.workspace)}` IR {ir} ({side.days}d, {source})"
 
 
 # (bundle attribute, human label) — the inputs that must match for the two
@@ -295,16 +363,57 @@ def _mdd_criterion(
     )
 
 
+def _confirmation_criterion(
+    evidence: ConfirmationEvidence | None, config: GateConfig
+) -> CriterionResult:
+    """The out-of-search-sample leg (US-010): candidate must beat the
+    incumbent on the reserved confirmation window. Anything short of two
+    computed IRs is ``confirmation_unavailable`` — a re-predict failure can
+    never be mistaken for a pass."""
+    name = "confirmation"
+    if evidence is None:
+        return CriterionResult(
+            name, False, "confirmation_unavailable — confirmation window was not evaluated"
+        )
+    if evidence.error is not None:
+        return CriterionResult(name, False, f"confirmation_unavailable — {evidence.error}")
+    irs: dict[str, float] = {}
+    for role, side in (("candidate", evidence.candidate), ("incumbent", evidence.incumbent)):
+        if side is None or side.ir is None:
+            detail = (
+                "not evaluated"
+                if side is None
+                else f"IR degenerate over {side.days} trading day(s)"
+            )
+            return CriterionResult(
+                name, False, f"confirmation_unavailable — {role} window returns {detail}"
+            )
+        irs[role] = side.ir
+    cand, inc = irs["candidate"], irs["incumbent"]
+    threshold = inc * config.confirm_ir_margin
+    return CriterionResult(
+        name,
+        cand > threshold,
+        f"window {evidence.window[0]} → {evidence.window[1]}: candidate IR {cand:.4f} "
+        f"vs incumbent {inc:.4f} × {config.confirm_ir_margin:g} = {threshold:.4f} (need >)",
+        candidate=cand,
+        incumbent=inc,
+    )
+
+
 def evaluate_gate(
     candidate: MetricBundle,
     incumbent: MetricBundle | None,
     config: GateConfig | None = None,
+    confirmation: ConfirmationEvidence | None = None,
 ) -> GateVerdict:
     """PURE comparison: does the candidate beat the incumbent on this config?
 
     ``incumbent=None`` means nothing is promoted: the comparison legs are
     waived only under ``allow_first`` (IC still applies), otherwise the gate
-    fails on the missing incumbent alone.
+    fails on the missing incumbent alone. With an incumbent, ``confirmation``
+    evidence is REQUIRED — omitting it fails the confirmation criterion as
+    confirmation_unavailable (the PRD forbids a silent skip).
     """
     config = config if config is not None else GateConfig()
     criteria: list[CriterionResult] = []
@@ -324,6 +433,8 @@ def evaluate_gate(
         criteria.append(_ir_criterion(candidate, incumbent, config))
         criteria.append(_mdd_criterion(candidate, incumbent, config))
     criteria.append(_ic_criterion(candidate, config))
+    if incumbent is not None:
+        criteria.append(_confirmation_criterion(confirmation, config))
     parity_ok = not mismatches
     return GateVerdict(
         parity_ok=parity_ok,
@@ -333,6 +444,11 @@ def evaluate_gate(
         candidate_workspace=candidate.workspace,
         incumbent_workspace=incumbent.workspace if incumbent is not None else None,
         config=config,
+        confirmation=confirmation,
+        # tuple() re-wrap: workspace_window hands loaders a JSON list.
+        window=(candidate.window[0], candidate.window[1])
+        if candidate.window is not None
+        else None,
     )
 
 
@@ -394,6 +510,55 @@ def load_metric_bundle(
         n_drop=n_drop,
         cost_params=cost_params,
         daily_returns=_net_daily_returns(ws / "ret.pkl"),
+    )
+
+
+def load_confirmation_evidence(
+    candidate_workspace: str | Path,
+    incumbent_workspace: str | Path,
+    window_start: dt.date,
+    window_end: dt.date,
+    **confirm_kwargs: Any,
+) -> ConfirmationEvidence:
+    """Evaluate both strategies on the confirmation window (US-009 helper).
+
+    Never raises for evaluation problems: any ``ConfirmWindowError`` (missing
+    snapshot, re-predict failure, non-reproducing pred, window outside the
+    store) lands in ``ConfirmationEvidence.error`` naming the failing side,
+    which the gate renders as a failing confirmation_unavailable criterion.
+    The incumbent runs first — its docker re-predict is usually skipped
+    (daily refresh covers), so its failures are cheap to hit before the
+    candidate's ~minutes-long re-predict. ``confirm_kwargs`` pass through to
+    ``ops.confirm_window.confirmation_returns`` (store_path, runner, …).
+    """
+    from ops.confirm_window import ConfirmWindowError, annualized_ir, confirmation_returns
+
+    window = (window_start.isoformat(), window_end.isoformat())
+    sides: dict[str, ConfirmationSide] = {}
+    for role, workspace in (
+        ("incumbent", incumbent_workspace),
+        ("candidate", candidate_workspace),
+    ):
+        ws = Path(workspace).expanduser()
+        try:
+            returns = confirmation_returns(ws, window_start, window_end, **confirm_kwargs)
+        except ConfirmWindowError as exc:
+            return ConfirmationEvidence(
+                window=window,
+                candidate=sides.get("candidate"),
+                incumbent=sides.get("incumbent"),
+                error=f"{role} `{_workspace_tag(str(ws))}`: {exc}",
+            )
+        sides[role] = ConfirmationSide(
+            workspace=str(ws),
+            ir=annualized_ir(returns.daily_returns),
+            window=returns.window,
+            days=len(returns.daily_returns),
+            repredicted=returns.repredicted,
+            reproduction=returns.reproduction,
+        )
+    return ConfirmationEvidence(
+        window=window, candidate=sides["candidate"], incumbent=sides["incumbent"]
     )
 
 

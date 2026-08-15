@@ -11,13 +11,16 @@ notion:
     strategy_notes: 3b99b1a4-36cf-8177-a1e9-f7593da6c53d
     trade_ledger: 3989b1a4-36cf-8184-9d9d-d6dfdcadbb54
   parent_page_id: 3979b1a4-36cf-8046-baa5-cc14c1ca7665
-# Promotion gate (US-007, read by ops/promotion_gate.py): a candidate passes
-# when parity holds (same window/market/instruments/topk-n_drop/costs) AND
-# candidate IR > incumbent IR × ir_margin AND candidate |MDD| <= incumbent
-# |MDD| × mdd_tolerance AND candidate IC > min_ic. allow_first: pass with no
-# incumbent on record (IC still required).
+# Promotion gate (US-007/US-010, read by ops/promotion_gate.py): a candidate
+# passes when parity holds (same window/market/instruments/topk-n_drop/costs)
+# AND candidate IR > incumbent IR × ir_margin AND candidate |MDD| <= incumbent
+# |MDD| × mdd_tolerance AND candidate IC > min_ic AND candidate
+# confirmation-window IR > incumbent's × confirm_ir_margin (1.0 = no margin
+# on the out-of-search-sample leg). allow_first: pass with no incumbent on
+# record (IC still required).
 promotion_gate:
   ir_margin: 1.05
   mdd_tolerance: 1.25
   min_ic: 0.0
   allow_first: false
+  confirm_ir_margin: 1.0

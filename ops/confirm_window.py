@@ -40,10 +40,19 @@ which is what the confirmation criterion needs):
   min_cost is an absolute-dollar knob and is ignored (there is no notional
   here); it is identical on both sides, so the comparison is unaffected.
 
+Reproduction check (US-010, forced by the 2026-08-15 c9587797 incident): a
+"technically successful" evaluation is worthless if the pred it used does not
+reproduce the strategy. Whenever the pred being used is NOT the workspace's
+original backtested pred (oldest mlruns pred.pkl) — a fresh re-predict OR a
+cached daily-refresh pred — its scores must rank-correlate (mean spearman
+over sampled overlap days) with the original at ``min_reproduction`` (0.98)
+or better. A degenerate re-predict (the incident collapsed 581 names to ~37
+unique scores, spearman ~0.08) therefore raises instead of silently passing.
+
 Failure policy: every gap raises ``ConfirmWindowError`` (missing snapshot,
 window outside the store calendar, docker failure, pred not covering the
-window, missing prices). Never a silent None — US-010 maps the error to
-``confirmation_unavailable`` and blocks promotion.
+window, non-reproducing pred, missing prices). Never a silent None — US-010
+maps the error to ``confirmation_unavailable`` and blocks promotion.
 """
 
 from __future__ import annotations
@@ -51,6 +60,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import shutil
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +75,14 @@ SNAPSHOT_FILES = (
     pred_refresh.SNAPSHOT_ENV_NAME,
     pred_refresh.SNAPSHOT_PARAMS_NAME,
 )
+
+# Reproduction check: the used pred must mean-spearman >= this against the
+# workspace's original backtested pred on their overlap days. Healthy
+# re-predicts land at ~1.0 (US-009 e2e); the 2026-08-15 degenerate refresh
+# measured ~0.08.
+DEFAULT_MIN_REPRODUCTION = 0.98
+_REPRODUCTION_SAMPLE_DAYS = 10
+_REPRODUCTION_MIN_NAMES = 3
 
 
 class ConfirmWindowError(RuntimeError):
@@ -84,6 +102,10 @@ class WindowReturns:
     daily_returns: tuple[float, ...]
     gross_returns: tuple[float, ...]
     repredicted: bool  # whether a docker re-predict was needed
+    # Mean spearman of the used pred vs the original backtested pred on their
+    # overlap days; None when the used pred IS the original (trivially
+    # reproduces, nothing to check).
+    reproduction: float | None = None
 
 
 def annualized_ir(returns: Sequence[float]) -> float | None:
@@ -118,6 +140,7 @@ def confirmation_returns(
     timeout_minutes: float = pred_refresh.DEFAULT_TIMEOUT_MINUTES,
     runner: Runner = _docker_runner,
     force_repredict: bool = False,
+    min_reproduction: float = DEFAULT_MIN_REPRODUCTION,
 ) -> WindowReturns:
     """Exact-weights portfolio daily returns for [window_start, window_end].
 
@@ -187,6 +210,7 @@ def confirmation_returns(
                 f"{', '.join(day.isoformat() for day in still_missing)} — the snapshot "
                 "conf's test segment may not reach the confirmation window"
             )
+    reproduction = _check_reproduction(ws, pred, min_reproduction)
 
     open_cost = float(cost_params.get("open_cost", 0.0))
     close_cost = float(cost_params.get("close_cost", 0.0))
@@ -239,6 +263,7 @@ def confirmation_returns(
         daily_returns=tuple(net),
         gross_returns=tuple(gross),
         repredicted=repredicted,
+        reproduction=reproduction,
     )
 
 
@@ -255,12 +280,23 @@ def _calendar(store_path: Path) -> list[dt.date]:
 
 @dataclass(frozen=True)
 class _PredSeries:
-    """The newest pred.pkl, loaded whole (every cross-section, not just the
+    """One pred.pkl, loaded whole (every cross-section, not just the
     latest — signal.load_latest_cross_section only serves the rebalancer)."""
 
+    path: Path
     series: Any  # pd.Series, MultiIndex (datetime, instrument)
     level: int  # datetime level position
     dates: frozenset[dt.date]
+
+
+def _pred_paths(ws: Path) -> list[Path]:
+    """Every mlruns pred.pkl, oldest mtime first (path tiebreak, deterministic).
+
+    Same glob as signal.locate_pred: the newest is what the rebalancer would
+    trade; the OLDEST is the original backtested pred — the reproduction
+    check's reference.
+    """
+    return sorted(ws.glob("mlruns/**/pred.pkl"), key=lambda p: (p.stat().st_mtime, str(p)))
 
 
 def _try_load_pred(ws: Path) -> _PredSeries | None:
@@ -269,10 +305,17 @@ def _try_load_pred(ws: Path) -> _PredSeries | None:
     Pre-repredict a None just means "run the re-predict"; post-repredict the
     caller turns it into a ConfirmWindowError.
     """
+    paths = _pred_paths(ws)
+    if not paths:
+        return None
+    return _load_pred_series(paths[-1])
+
+
+def _load_pred_series(path: Path) -> _PredSeries | None:
     import pandas as pd
 
     try:
-        obj = pd.read_pickle(signal.locate_pred(ws))
+        obj = pd.read_pickle(path)
     except Exception:  # noqa: BLE001 — unusable pred means "re-predict", not crash
         return None
     if isinstance(obj, pd.DataFrame):
@@ -295,7 +338,70 @@ def _try_load_pred(ws: Path) -> _PredSeries | None:
         for value in index.get_level_values(level).unique()
         if not pd.isna(value)
     )
-    return _PredSeries(series=series, level=level, dates=dates)
+    return _PredSeries(path=path, series=series, level=level, dates=dates)
+
+
+def _check_reproduction(ws: Path, used: _PredSeries, min_reproduction: float) -> float | None:
+    """Require the used pred to reproduce the original backtested pred.
+
+    Mean spearman across up to _REPRODUCTION_SAMPLE_DAYS overlap days, each
+    over the instruments common to both cross-sections. Returns the score,
+    or None when the used pred IS the original (nothing to compare). Raises
+    ``ConfirmWindowError`` when the score misses ``min_reproduction`` or no
+    overlap day is comparable at all — an unverifiable pred is as unusable
+    as a degenerate one (2026-08-15 c9587797 incident).
+    """
+    original_path = next(iter(_pred_paths(ws)), None)
+    if original_path is None or original_path == used.path:
+        return None
+    original = _load_pred_series(original_path)
+    if original is None:
+        raise ConfirmWindowError(
+            f"cannot verify pred reproduction: original backtested pred {original_path} "
+            "is unreadable"
+        )
+    overlap = sorted(used.dates & original.dates)
+    if not overlap:
+        raise ConfirmWindowError(
+            f"cannot verify pred reproduction: {used.path} shares no prediction days "
+            f"with the original backtested pred {original_path}"
+        )
+    if len(overlap) > _REPRODUCTION_SAMPLE_DAYS:
+        step = (len(overlap) - 1) / (_REPRODUCTION_SAMPLE_DAYS - 1)
+        overlap = [overlap[round(i * step)] for i in range(_REPRODUCTION_SAMPLE_DAYS)]
+    correlations: list[float] = []
+    for day in overlap:
+        used_cross = _cross_section(used.series, used.level, day)
+        original_cross = _cross_section(original.series, original.level, day)
+        if used_cross is None or original_cross is None:
+            continue
+        common = used_cross.index.intersection(original_cross.index)
+        if len(common) < _REPRODUCTION_MIN_NAMES:
+            continue
+        with warnings.catch_warnings():
+            # A constant side makes scipy warn and return NaN — the NaN branch
+            # below handles it deliberately (unverifiable, stays loud).
+            warnings.simplefilter("ignore")
+            corr = float(
+                used_cross.loc[common].corr(original_cross.loc[common], method="spearman")
+            )
+        if not math.isnan(corr):  # NaN = zero-variance side (degenerate) — drop, stay loud below
+            correlations.append(corr)
+    if not correlations:
+        raise ConfirmWindowError(
+            f"cannot verify pred reproduction: no comparable cross-sections between "
+            f"{used.path} and the original backtested pred {original_path} "
+            "(constant scores or disjoint instruments)"
+        )
+    score = sum(correlations) / len(correlations)
+    if score < min_reproduction:
+        raise ConfirmWindowError(
+            f"pred does not reproduce the strategy: mean spearman {score:.3f} vs the "
+            f"original backtested pred over {len(correlations)} overlap day(s) "
+            f"(need >= {min_reproduction:g}) — degenerate re-predict/refresh "
+            f"({used.path})"
+        )
+    return score
 
 
 def _cross_section(series: Any, level: int, day: dt.date) -> Any | None:

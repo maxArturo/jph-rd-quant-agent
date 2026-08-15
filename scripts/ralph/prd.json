@@ -152,8 +152,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "evaluate_gate gains a required-when-incumbent ConfirmationEvidence input (None/error/degenerate IR -> failing confirmation_unavailable criterion, never skipped); candidate confirmation IR strict > incumbent x confirm_ir_margin (config, default 1.0). load_confirmation_evidence runs incumbent first, maps ConfirmWindowError to evidence.error. Slack block shows test + confirmation windows and both strategies' IRs. Added the incident-driven reproduction check in confirm_window: used pred must mean-spearman >= 0.98 vs the original backtested pred. E2E: gate correctly blocks on the real degenerate c9587797 (spearman 0.127); healthy e05ad9b4 yields full evidence (42d, IR 1.6581, reproduction 0.99999)."
     },
     {
       "id": "US-011",

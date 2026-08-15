@@ -85,6 +85,7 @@ def test_window_returns_without_repredict(tmp_path: Path) -> None:
     assert result.workspace == str(ws)
     assert result.window == ("2026-07-06", "2026-07-08")
     assert result.repredicted is False
+    assert result.reproduction is None  # the only pred IS the original — nothing to verify
     assert result.gross_returns == pytest.approx(GROSS)
     assert result.daily_returns == pytest.approx(NET)
 
@@ -127,6 +128,8 @@ def test_repredict_runs_when_pred_stops_at_test_end(tmp_path: Path) -> None:
 
     result = confirmation_returns(ws, D[2], D[4], store_path=store, runner=runner)
     assert result.repredicted is True
+    # The re-predict reproduces the original scores on the overlap day exactly.
+    assert result.reproduction == pytest.approx(1.0)
     assert result.daily_returns == pytest.approx(NET)
     (command,) = commands
     # test_end overridden to the window end; snapshot env still aboard.
@@ -188,6 +191,62 @@ def test_repredict_that_still_misses_days_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ConfirmWindowError, match="still lacks cross-sections for 2026-07-06"):
         confirmation_returns(ws, D[2], D[4], store_path=store, runner=runner)
+
+
+# --- reproduction check (US-010, forced by the 2026-08-15 c9587797 incident) ------
+
+
+def inverted_pred() -> dict[str, dict[str, float]]:
+    """PRED with every day's ranking inverted — spearman -1 vs the original."""
+    return {
+        day: {symbol: 1.0 - score for symbol, score in scores.items()}
+        for day, scores in PRED.items()
+    }
+
+
+def test_non_reproducing_cached_pred_raises(tmp_path: Path) -> None:
+    """The incident shape: a newer (daily-refresh-style) pred covers the window
+    but scrambles the original ranking — it must never be evaluated."""
+    store = make_store(tmp_path)
+    ws = make_workspace(tmp_path)  # original PRED written at mtime=1.0
+    write_pred(ws, inverted_pred(), run="refresh")  # newer mtime -> gets used
+    with pytest.raises(ConfirmWindowError, match="does not reproduce"):
+        confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+
+
+def test_non_reproducing_repredict_raises(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    ws = make_workspace(tmp_path, pred={"2026-07-02": PRED["2026-07-02"]})
+
+    def runner(command: Sequence[str], log_path: Path, timeout_seconds: float) -> int:
+        log_path.write_text("re-predict ok\n")
+        write_pred(ws, inverted_pred(), run="confirm")
+        return 0
+
+    with pytest.raises(ConfirmWindowError, match="does not reproduce"):
+        confirmation_returns(ws, D[2], D[4], store_path=store, runner=runner)
+
+
+def test_constant_score_pred_is_unverifiable_and_raises(tmp_path: Path) -> None:
+    # The real incident collapsed most scores to one value: spearman is NaN
+    # against a constant side, which must read as unverifiable, not as a pass.
+    store = make_store(tmp_path)
+    ws = make_workspace(tmp_path)
+    flat = {day: {symbol: 0.5 for symbol in scores} for day, scores in PRED.items()}
+    write_pred(ws, flat, run="refresh")
+    with pytest.raises(ConfirmWindowError, match="cannot verify pred reproduction"):
+        confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+
+
+def test_min_reproduction_is_configurable(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    ws = make_workspace(tmp_path)
+    write_pred(ws, inverted_pred(), run="refresh")
+    # Explicitly lowering the bar admits the divergent pred (score -1.0)...
+    result = confirmation_returns(
+        ws, D[2], D[4], store_path=store, runner=refuse_runner, min_reproduction=-1.0
+    )
+    assert result.reproduction == pytest.approx(-1.0)
 
 
 # --- typed errors ----------------------------------------------------------------

@@ -95,6 +95,16 @@
   `slack_text()` is the operator block. The instrument hash cannot be
   derived from a workspace (conf names the market, not the resolved list) —
   it must be recorded at launch and passed in.
+  Confirmation criterion (US-010): with an incumbent, `evaluate_gate`
+  REQUIRES `ConfirmationEvidence` — omitting it (or any evaluation error)
+  fails the criterion as `confirmation_unavailable`; there is no silent
+  skip. Candidate confirmation-window IR must be strictly > incumbent's ×
+  `confirm_ir_margin` (config, default 1.0 = no margin).
+  `load_confirmation_evidence(cand, inc, start, end, **confirm_kwargs)` is
+  the IO half: runs the incumbent FIRST (its docker re-predict is usually
+  skipped, so failures are cheap before the candidate's ~minutes-long run)
+  and never raises for evaluation problems — ConfirmWindowError lands in
+  `evidence.error` naming the side.
 - `ops/confirm_window.py` (US-009) turns any workspace WITH pred-refresh
   snapshot files into confirmation-window portfolio daily returns:
   `confirmation_returns(ws, start, end)` re-predicts via the US-049 docker
@@ -110,7 +120,14 @@
   Every gap raises `ConfirmWindowError` (US-010 maps it to
   confirmation_unavailable); `annualized_ir` here is the confirmation
   criterion's metric (benchmark-free mean/std·√252, compute_sharpe
-  convention).
+  convention). Reproduction check (US-010, from the 2026-08-15 c9587797
+  incident): whenever the pred being used is NOT the workspace's original
+  backtested pred (oldest mlruns pred.pkl) — fresh re-predict OR cached
+  daily-refresh pred — it must mean-spearman >= `min_reproduction` (0.98)
+  against the original on sampled overlap days, else ConfirmWindowError. A
+  degenerate refresh (the incident: ~0.13) can therefore never feed the
+  gate; the live promoted c9587797 currently FAILS this check by design
+  until its parquet-conf snapshot is fixed or rolled back.
 - `python -m ops.rollback_promotion [--to <ws>] [--yes]` (US-006) re-promotes
   a prior promotion_history entry using that entry's RECORDED config (never
   re-derives from the workspace conf) and appends a new history row (source
