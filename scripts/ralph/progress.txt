@@ -1,15 +1,20 @@
 # Ralph Progress Log
-Started: (not yet started)
+Started: Sat Aug 15 12:50:59 PM UTC 2026
 ---
-
 ## Codebase Patterns
-- Python-only repo (>=3.10). "Typecheck passes" means the Python typechecker (pyright), not TypeScript.
-- Quality gate: `make check` = ruff + pyright + pytest (use it before every commit).
-- Credentials: never in code or .env — bare HTTP calls through the OneCLI proxy (HTTPS_PROXY + CA cert); management API at http://127.0.0.1:10254.
-- Live trading (THIS run adds it): `api.alpaca.markets` is reachable only via `AlpacaClient(..., allow_live=True)` from the live rebalancer under the `rdq-exec-live` identity. The orchestrator identity must NEVER be able to place live orders. Until the operator vaults live keys (their final manual step, after all stories pass), nothing can authenticate to the live host — every story must verify with fakes/fixtures.
-- Paper behavior is regression-frozen: with SLACK_LIVE_CHANNEL_ID unset, existing tests must pass UNMODIFIED.
-- Proxied calls from scripts: `onecli run --agent <identifier> -- curl ...`; banner on stderr, command stdout clean. See ops/CLAUDE.md for onecli CLI gotchas (UUID vs identifier, set-secrets replaces list).
-- All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
-- LLM calls go through LiteLLM under `onecli run` (placeholder keys OK — proxy overrides headers). claude-sonnet-5 rejects temperature!=1; JSON mode may return ```json fences. See research/CLAUDE.md.
-- PRD source for this run: tasks/prd-live-trading.md (US-050..US-060 there map onto the finer-grained stories in prd.json).
-- NEVER run the real test-suite path that provisions GPU droplets: ConversationCore.gpu stays None-default; only app.py wires the real GpuBackend (2026-08-06 incident).
+- `make check` = ruff + pyright + pytest (~2 min). Run it before every commit; the tree can carry PRE-EXISTING failures from prior commits — fix them minimally (they block your commit too).
+- StateStore._connect sets WAL + timeout=30; keep any new sqlite connection on the same settings.
+- Schema changes to an EXISTING table need `CREATE ... IF NOT EXISTS` in _SCHEMA plus a guarded ALTER in migrate() (see runs.universe_tickers).
+- pyright venv is .venv; torch is not installed (docker-only) — suppress with `# pyright: ignore[reportMissingImports]` for container-side scripts.
+
+## 2026-08-15 12:55 UTC - US-001
+- Implemented WAL mode + 30s busy timeout for orchestrator/state.sqlite: `StateStore._connect` now opens with `sqlite3.connect(path, timeout=30)` (= busy_timeout 30000ms) and executes `PRAGMA journal_mode = WAL` per connection (persistent in the file, cheap no-op after first switch). Module docstring + orchestrator/CLAUDE.md updated.
+- Tests added (tests/test_state.py): PRAGMA assertions (wal + busy_timeout >= 30000), pre-seeded delete-mode DB converts to WAL with rows intact, 4 threads x 25 concurrent writes complete with zero errors and 100 rows landed.
+- Files changed: orchestrator/state.py, tests/test_state.py, orchestrator/CLAUDE.md; drive-by fixes for pre-existing check failures committed broken in b308db6: execution/pred_refresh.py (E501 line wrap), ops/gpu_trace.py + execution/pred_refresh_predict.py (pyright suppressions).
+- Verified: full `make check` green (ruff, pyright, 1063 passed / 3 skipped).
+- **Learnings for future iterations:**
+  - main was committed with failing checks (b308db6): E501 in pred_refresh.py + 2 pyright errors in gpu_trace.py / pred_refresh_predict.py. Fixed here; don't be surprised if other pre-existing failures surface.
+  - `PRAGMA journal_mode = DELETE` in a test is how you simulate the legacy live DB; journal_mode is a property of the FILE, not the connection.
+  - sqlite3 `timeout=` connect kwarg IS the busy timeout (maps to busy_timeout ms) — no separate PRAGMA needed, but assert via `PRAGMA busy_timeout`.
+  - Live-box note: the on-disk orchestrator/state.sqlite flips to WAL the first time the deployed code opens it; remember rdq-orchestrator needs a restart after deploy for this to take effect (memory: deploy-vs-running-process).
+---

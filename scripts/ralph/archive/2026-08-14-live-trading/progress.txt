@@ -1,0 +1,15 @@
+# Ralph Progress Log
+Started: (not yet started)
+---
+
+## Codebase Patterns
+- Python-only repo (>=3.10). "Typecheck passes" means the Python typechecker (pyright), not TypeScript.
+- Quality gate: `make check` = ruff + pyright + pytest (use it before every commit).
+- Credentials: never in code or .env — bare HTTP calls through the OneCLI proxy (HTTPS_PROXY + CA cert); management API at http://127.0.0.1:10254.
+- Live trading (THIS run adds it): `api.alpaca.markets` is reachable only via `AlpacaClient(..., allow_live=True)` from the live rebalancer under the `rdq-exec-live` identity. The orchestrator identity must NEVER be able to place live orders. Until the operator vaults live keys (their final manual step, after all stories pass), nothing can authenticate to the live host — every story must verify with fakes/fixtures.
+- Paper behavior is regression-frozen: with SLACK_LIVE_CHANNEL_ID unset, existing tests must pass UNMODIFIED.
+- Proxied calls from scripts: `onecli run --agent <identifier> -- curl ...`; banner on stderr, command stdout clean. See ops/CLAUDE.md for onecli CLI gotchas (UUID vs identifier, set-secrets replaces list).
+- All services bind 127.0.0.1; human-facing UIs exposed via tailnet-only `tailscale serve` only.
+- LLM calls go through LiteLLM under `onecli run` (placeholder keys OK — proxy overrides headers). claude-sonnet-5 rejects temperature!=1; JSON mode may return ```json fences. See research/CLAUDE.md.
+- PRD source for this run: tasks/prd-live-trading.md (US-050..US-060 there map onto the finer-grained stories in prd.json).
+- NEVER run the real test-suite path that provisions GPU droplets: ConversationCore.gpu stays None-default; only app.py wires the real GpuBackend (2026-08-06 incident).

@@ -116,8 +116,8 @@ def workspace_window(workspace: str | None) -> list[str] | None:
         if not isinstance(frame, pd.DataFrame) or len(frame.index) == 0:
             return None
         return [
-            pd.Timestamp(frame.index[0]).date().isoformat(),
-            pd.Timestamp(frame.index[-1]).date().isoformat(),
+            pd.Timestamp(frame.index[0]).date().isoformat(),  # pyright: ignore[reportArgumentType]
+            pd.Timestamp(frame.index[-1]).date().isoformat(),  # pyright: ignore[reportArgumentType]
         ]
     except Exception:  # noqa: BLE001 — window degrades, never breaks a summary
         return None

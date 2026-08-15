@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -41,6 +43,51 @@ def test_migration_is_idempotent(db_path: Path) -> None:
     store.migrate()  # explicit re-run
     StateStore(db_path)  # second startup on the same file
     assert StateStore(db_path).get_directive("111.222") is not None
+
+
+# -- WAL mode + busy timeout (loop-hardening US-001) ---------------------------
+
+
+def test_connections_use_wal_and_busy_timeout(store: StateStore) -> None:
+    with store._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30_000
+
+
+def test_existing_delete_mode_db_converts_to_wal_with_rows_intact(db_path: Path) -> None:
+    StateStore(db_path).create_directive("111.222", "seeded before WAL")
+    # Force the file back to the legacy rollback-journal mode, as the live DB
+    # was before this change.
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == "delete"
+    store = StateStore(db_path)
+    with store._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    fetched = store.get_directive("111.222")
+    assert fetched is not None and fetched.objective == "seeded before WAL"
+
+
+def test_concurrent_connections_write_without_lock_errors(store: StateStore) -> None:
+    # Each helper call opens its own connection, so parallel threads exercise
+    # genuinely concurrent writers against the same file.
+    errors: list[Exception] = []
+
+    def write(worker: int) -> None:
+        try:
+            for i in range(25):
+                store.create_directive(f"{worker}.{i}", f"idea {worker}-{i}")
+        except Exception as exc:  # noqa: BLE001 - surface any lock error
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(worker,)) for worker in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM directives").fetchone()[0]
+    assert count == 100
 
 
 # -- directives ---------------------------------------------------------------

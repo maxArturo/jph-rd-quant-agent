@@ -14,8 +14,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "WAL + timeout=30 set in StateStore._connect; tests cover delete->WAL conversion with rows intact and 4 concurrent writer threads."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",

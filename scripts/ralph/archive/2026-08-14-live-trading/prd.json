@@ -1,0 +1,363 @@
+{
+  "project": "rd-agent-q",
+  "branchName": "ralph/live-trading",
+  "description": "Live trading: real-money Alpaca account, fully Slack-managed from #live-trading-quant-research (tasks/prd-live-trading.md, US-050..US-060). Full research parity in the live channel, direct-to-live promotion, one-message arming (no confirmation), conservative guardrails (10% equity allocation, $500/order, $5k daily notional, 5% drawdown). IMPORTANT: the operator funds the live Alpaca account and vaults live API keys as their own FINAL step after every story passes — no story may require live credentials, a funded account, or the real live host; everything verifies with fakes, fixtures, and the paper account's shapes. Paper behavior is regression-frozen throughout: with SLACK_LIVE_CHANNEL_ID unset the system must behave byte-for-byte as today and existing tests must pass unmodified.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "AlpacaClient live-host support behind explicit allow_live opt-in",
+      "description": "As the execution layer, I want AlpacaClient to target api.alpaca.markets only when the caller passes allow_live=True, so the live rebalancer can trade while every existing paper code path stays incapable of it.",
+      "acceptanceCriteria": [
+        "AlpacaClient(base_url='https://api.alpaca.markets') still raises ValueError without allow_live=True (current refusal at execution/alpaca_client.py:269-274)",
+        "allow_live keyword defaults to False; passing allow_live=True together with the live URL constructs successfully; paper URL works with or without the flag",
+        "Default construction (no args) remains the paper host, byte-for-byte",
+        "AlpacaAuthError guidance names the identity matching the host: rdq-exec-paper for the paper host, rdq-exec-live for the live host (no hardcoded 'paper' in the message path)",
+        "Existing source-grep test still passes: no APCA-* header string anywhere in the module",
+        "Module docstring and execution/CLAUDE.md rewritten: opt-in semantics, only the live rebalance/reconcile/flatten paths may pass allow_live=True, orchestrator never",
+        "Tests cover: live host refused without flag, accepted with flag, paper unaffected, auth-error identity naming per host",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Live guardrail config: limits.live.json, breaker.live.json, allocation pct, live breaker state paths",
+      "description": "As the operator, I want live-specific guardrail numbers and fully independent live breaker state so the live account trades a small capped slice with tighter tripwires than paper.",
+      "acceptanceCriteria": [
+        "execution/limits.live.json exists: max_order_notional_usd 500, max_position_pct_equity 10, max_day_orders 60, max_total_positions 60 (same four required keys as paper; loader refuses missing/unknown keys with LimitsConfigError)",
+        "execution/breaker.live.json exists: max_daily_notional_usd 5000, max_drawdown_pct 5 (loader refuses missing/unknown keys with BreakerConfigError)",
+        "A live allocation config (new file or module constant module, e.g. execution/allocation.live.json) provides required key live_equity_allocation_pct = 10; loader validates 0 < pct <= 100 and refuses missing/unknown keys",
+        "Live breaker state path constants defined: ~/rdq-data/breaker-live/halt and ~/rdq-data/breaker-live/high_water_mark.json — distinct from paper's ~/rdq-data/breaker/; no fork of breaker.py or order_gate.py (existing parameterized ctors/loaders only)",
+        "Unit test proves paper and live Breaker instances are independent: halting one leaves the other's .halted False; separate HWM files",
+        "Corrupt live HWM file raises BreakerStateError (refuse to trade), never silently re-seeds — same semantics as paper",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Live promoted-strategy slot in StateStore + load_promoted_strategy_live",
+      "description": "As the system, I want an independent live promotion slot so live trading runs exactly one deliberately chosen strategy, separate from the paper slot.",
+      "acceptanceCriteria": [
+        "StateStore gains a single-row live slot (new table, e.g. promoted_strategy_live with CHECK (id = 1)); the paper promoted_strategy table and its CHECK (id = 1) are untouched (orchestrator/state.py:62-67)",
+        "set/get/clear methods for the live slot; config shape matches paper (universe, universe_tickers, topk, n_drop, thread_ts, session_path) plus live_equity_allocation_pct captured at promote time for audit",
+        "Clearing (demote) touches only the live slot; re-setting overwrites it; paper row never modified by any live-slot operation (test proves both directions)",
+        "execution/promoted.py gains load_promoted_strategy_live(db_path) with identical refusal semantics to paper: missing DB, missing row, or missing workspace dir raises NoPromotedStrategyError; never creates the DB",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "SLACK_LIVE_CHANNEL_ID config plumbing",
+      "description": "As the orchestrator, I want an optional live channel id in config so live features activate only when the operator wires the channel.",
+      "acceptanceCriteria": [
+        "SlackConfig gains optional live_channel_id (None default); load_slack_config reads SLACK_LIVE_CHANNEL_ID from the repo-root .env with process-env override, same precedence as existing keys",
+        "Absent/empty var yields live_channel_id=None and a config identical in behavior to today; all existing config tests pass unmodified",
+        "Validation: when set, SLACK_LIVE_CHANNEL_ID must be non-empty and different from SLACK_CHANNEL_ID (equal values raise a config error naming both vars)",
+        ".env.example or config docs mention the new var and that it arms live features",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "runs table records originating channel",
+      "description": "As the system, I want each research run to record which Slack channel started it so every notification about that run can be routed home.",
+      "acceptanceCriteria": [
+        "runs table gains a channel_id column via StateStore schema migration; existing rows migrate cleanly (NULL treated as the paper channel everywhere it is read)",
+        "Run-creation path accepts and persists the originating channel; existing callers pass config.channel_id so paper behavior is unchanged",
+        "A StateStore accessor returns the effective channel for a run (stored value, else paper channel)",
+        "Migration is idempotent: opening an already-migrated DB is a no-op; test covers fresh DB and pre-migration DB",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Dual-channel message routing in app.py + system prompt update",
+      "description": "As the operator, I want the bot to hear and answer in both #quant-research and #live-trading-quant-research so the live channel is a full conversational peer.",
+      "acceptanceCriteria": [
+        "app.py's actionable-message check (app.py:62-70) accepts events from either config.channel_id or config.live_channel_id (when set); all other filtering (subtype, bot_id, thread derivation) unchanged",
+        "The originating channel travels with the message through ConversationCore so every say()/reply posts back to that channel; a thread never migrates channels",
+        "Pending-interaction and edit-reply records are keyed so a live-channel thread_ts can never collide with a paper-channel record",
+        "orchestrator/prompts.py: 'live trading is out of scope' removed; prompt describes both channels, that the live channel controls a real-money Alpaca account, and that paper and live promotion slots are independent",
+        "With live_channel_id=None the app registers/behaves exactly as today; existing app tests pass unmodified",
+        "Tests cover: live-channel message actionable, unknown-channel message ignored, replies land in the originating channel",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Channel-aware background posters (poller digests, completion, buttons)",
+      "description": "As the operator, I want run digests, hypothesis prompts, completion summaries, and charts posted to the channel that started the run so live-channel runs report in the live channel.",
+      "acceptanceCriteria": [
+        "HypothesisPoller reads each run's originating channel (US-005) and posts hypothesis prompts/buttons, loop digests, completion summary, and the equity-curve chart upload to that channel instead of the single config.channel_id",
+        "Block Kit button handlers (hypo_approve/edit/reject) resolve and respond in the run's channel; interaction records round-trip correctly for live-channel runs",
+        "Completion messages for live-channel runs do not attach the paper Promote button; they state the run is promotable and name the promote-to-live phrasing (paper-channel runs keep today's Promote button exactly)",
+        "Runs with no stored channel (pre-migration) behave exactly as today; existing poller tests pass unmodified",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "halt_live_trading / resume_live_trading tools on live breaker paths",
+      "description": "As the operator, I want to halt and resume live trading with one Slack message in the live channel, independent of paper's halt.",
+      "acceptanceCriteria": [
+        "New tools halt_live_trading and resume_live_trading registered only when live_channel_id is configured; they write/clear the LIVE halt file (~/rdq-data/breaker-live/halt from US-002), never paper's",
+        "Invoking them from #quant-research is refused with a pointer to the live channel; paper halt_trading/resume_trading remain paper-only and are refused from the live channel with the mirror pointer",
+        "Response formatters unmistakably say LIVE (distinct from paper's format_trading_halted/format_trading_resumed wording)",
+        "Test proves halting live leaves the paper halt file absent and vice versa",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Live promotion backend: resolve source, pin slot, snapshot artifacts, Decision Log",
+      "description": "As the system, I want a promote-to-live function that pins the live slot from the paper-promoted strategy or directly from any promotable run, so the Slack tool in the next story is a thin wrapper.",
+      "acceptanceCriteria": [
+        "A promotion function resolves its candidate: explicitly named run, run resolvable from the current thread, or (neither given) the current paper-promoted strategy copied in full including universe provenance",
+        "Direct-run candidates must have status in PROMOTABLE_STATUSES ({'completed','stopped'}); anything else is a structured refusal naming the status",
+        "Ambiguous references (multiple matching runs) or no candidate produce a structured refusal listing what was found; the function never guesses",
+        "Direct-run promotion derives universe from the workspace conf market: line via execution.signal.load_market and pins universe_tickers from the store instruments file — reusing the existing promotion.py provenance helpers, no re-derived logic",
+        "Direct-to-live promotion of a workspace lacking pred-refresh snapshot artifacts creates them via snapshot_pred_refresh() (conf_pred_refresh.yaml, pred_refresh.env, pred_refresh_params.pkl); an operator-pinned market in an existing conf_pred_refresh.yaml is warned about and not overwritten silently (same rule as ops/promote_fetched.py)",
+        "Success writes the live slot (US-003) and a Decision Log entry (workspace id, universe + ticker count, allocation pct, triggering-message permalink); demote clears the slot and writes its own Decision Log entry",
+        "All behavior covered by tests using fake state/store/Notion recorders",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "promote_to_live / demote_live Slack tools — one message, no confirmation",
+      "description": "As the operator, I want a single 'promote to live' message in the live channel to arm live trading immediately, with the armed summary as after-the-fact confirmation.",
+      "acceptanceCriteria": [
+        "promote_to_live tool (live-channel-only) calls the US-009 backend and, on success, immediately posts the armed summary: workspace id, source (paper copy vs direct run), backtest headline metrics, universe with ticker count plus any label-vs-conf mismatch call-out, allocation pct, live limits and breaker values in force, and when the next live rebalance fires",
+        "No confirmation reply is required or waited on; nothing blocks between tool call and slot write",
+        "Refusal paths post the reason and write nothing: non-promotable status, workspace or pred artifacts missing, live breaker halted, live guardrail config missing/malformed, invoked from any channel other than the live channel",
+        "demote_live (also single-message, live-channel-only) clears the slot and posts what was demoted and that the next live rebalance will abort with no promoted strategy",
+        "ConversationCore continues to refuse these tools entirely when live_channel_id is unset",
+        "Tests cover the arm path, each refusal path, and demote, with fake backend/say",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Live Notion databases: bootstrap, config keys, schema doc",
+      "description": "As the operator, I want Trade Ledger (Live) and Account Snapshots (Live) under a clearly-labeled LIVE Notion page so paper and live records can never be confused.",
+      "acceptanceCriteria": [
+        "ops/bootstrap_notion.py idempotently creates or adopts by exact title a sibling page 'Automated AI Quant Investment — LIVE 🔴' with an intro callout that it reflects a real-money account, then creates Trade Ledger (Live) and Account Snapshots (Live) with property schemas identical to the paper databases",
+        "New database ids written to orchestrator/config.yaml under distinct keys; NotionDatabases dataclass (orchestrator/notion_recorder.py) gains the two fields; loading a config without them still works for paper-only operation",
+        "docs/reference/notion-schema.md documents both live databases with sole writer = the live rebalancer; Decision Log remains shared with orchestrator as sole writer",
+        "Paper page/databases untouched; bootstrap property-name cross-check tests extended to the live schemas",
+        "All bootstrap logic verified against a mocked Notion API (no real page creation needed until the operator shares the parent)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Live read-only status tools: check_live_account / check_live_orders / check_live_pnl",
+      "description": "As the operator, I want to ask the bot about the live account in the live channel without the orchestrator identity ever gaining live broker access.",
+      "acceptanceCriteria": [
+        "Live variants of check_account/check_orders/check_pnl registered live-channel-only; they read from the Live Notion databases (latest Account Snapshots (Live) / Trade Ledger (Live) rows) and orchestrator state — no AlpacaClient construction with the live host anywhere in orchestrator/",
+        "check_live_account reports the live slot's workspace, allocation pct, live halt/breaker state, and — when paper and live slots differ — names both workspaces",
+        "Before any live data exists, each tool answers gracefully with a 'no live data yet' message rather than erroring",
+        "docs/decisions.md records the read-path decision: option (b) Notion/state reads; orchestrator identity gains no live host access (PRD US-053 decision point)",
+        "Paper check_account/check_orders/check_pnl unchanged and still paper-channel-only",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "rebalance.py --live: core switch (slot, client, guardrails, scaled equity, order ids)",
+      "description": "As the system, I want a --live mode of the rebalance pipeline that trades the live slot under live guardrails with allocation-scaled sizing, while --live-less behavior stays byte-for-byte paper.",
+      "acceptanceCriteria": [
+        "execution/rebalance.py accepts --live; it switches together: load_promoted_strategy_live (US-003), AlpacaClient(live base URL, allow_live=True), limits.live.json, breaker.live.json + live state dir (US-002), and the live Slack channel for every post",
+        "Equity passed to diff.compute_orders is live account.equity * live_equity_allocation_pct / 100; cap_buys_to_buying_power still uses the account's real buying_power, never the scaled figure; diff.py itself stays account-agnostic (scaling happens in rebalance.py)",
+        "client_order_id prefix is rdq-live-<date>-<side>-<symbol> in live mode (paper keeps rdq-<date>-...)",
+        "All _ABORT_ERRORS paths abort without trading and post the reason to the live channel; live halt file exits 0; unexpected exceptions notify then re-raise — same contract as paper",
+        "Without --live, behavior is byte-for-byte today's: existing rebalance tests pass unmodified",
+        "Integration-style test with a fake HTTP session drives --live end-to-end: scaled targets, live limits enforced, live order-id prefix, posts addressed to the live channel",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Live rebalance reporting: live ledger, live snapshots, live-channel daily summary",
+      "description": "As the operator, I want live fills and daily state written to the Live Notion databases and summarized in the live channel, including a paper-vs-live comparison when both traded.",
+      "acceptanceCriteria": [
+        "--live writes each order/fill to Trade Ledger (Live) and the daily row to Account Snapshots (Live) (US-011 config keys); paper runs keep writing only to the paper databases",
+        "Daily summary posted to the live channel includes: orders, fills, skipped/deferred buys (insufficient_buying_power lines), equity, allocation pct in force, breaker state line, and universe-divergence warnings (advisory, never abort — same as paper)",
+        "When the paper account also produced a snapshot the same day, the live summary appends a one-line same-day paper-vs-live P/L comparison; absent paper data, the line is omitted without error",
+        "Missing live Notion config keys cause --live to refuse to run at all (mirror of the existing missing-Trade-Ledger refusal), with a clear message",
+        "Tests with fake Notion recorder and fake Slack cover ledger routing, summary content, and the comparison line's presence/absence",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "reconcile.py and flatten.py --live",
+      "description": "As the operator, I want the audit and emergency-flatten tools to work against the live account so real-money incidents have the same tooling as paper.",
+      "acceptanceCriteria": [
+        "ops/reconcile.py --live compares Trade Ledger (Live) against the live account (AlpacaClient with allow_live=True); exit-code contract unchanged (0 match / 1 mismatch / 2 comparison failed)",
+        "ops/flatten.py --live cancels and closes live positions; exit-code contract unchanged (0 confirmed flat / 1 submitted-not-confirmed / 2 operational failure)",
+        "Both default to paper without the flag, byte-for-byte; docstrings/CLI text no longer claim paper-only",
+        "Tests with fake clients cover both modes' wiring (URL + allow_live + ledger source selection)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Pred refresh enumerates both promoted slots",
+      "description": "As the system, I want the 04:45 ET exact-weights refresh to keep the live workspace fresh even when paper and live point at different workspaces, so live never trades stale signals.",
+      "acceptanceCriteria": [
+        "execution/pred_refresh.py enumerates the paper and live slots, dedupes by workspace path, and refreshes each distinct workspace sequentially; when both share a workspace exactly one refresh runs",
+        "A live-workspace refresh failure posts to the live channel; paper failures keep posting to #quant-research; the stale-pred guard is untouched (live rebalance aborts on stale pred)",
+        "Exit-code semantics preserved: 0 on refreshed / already-fresh / nothing-promoted (either slot empty is fine; both empty is nothing-promoted)",
+        "The staleness notice no longer hardcodes 'paper rebalance' (pred_refresh.py:531)",
+        "Tests cover: both slots same workspace (one refresh), different workspaces (two refreshes), live-only failure routing",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "GPU pipeline and write-ups are channel- and slot-aware",
+      "description": "As the operator, I want GPU runs started from the live channel to report there, and comparison charts/write-ups to say which promoted slot they compare against, so nothing mislabels real-money state.",
+      "acceptanceCriteria": [
+        "Channel travels with thread_ts through orchestrator/gpu_backend.py, the pipeline status file, and ops/gpu_pipeline.py; loop digests, completion summary, chart upload, and the Notion write-up link post to the originating channel",
+        "The 'promoted ({ws}, live paper)' label (ops/gpu_pipeline.py:294) is replaced with slot-aware wording; the candidate-vs-promoted comparison names the slot compared against, and when paper and live slots differ the completion summary shows the candidate against both",
+        "ops/notion_summary.py's prompt no longer asserts 'trades a paper account'; it receives and states the account context",
+        "ops/gpu_watchdog.py alerts post to the channel that owns the run (falls back to the paper channel when unknown)",
+        "ConversationCore.gpu remains None-default; only app.py wires the real GpuBackend (no test may construct a real backend — 2026-08-06 droplet incident)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "OneCLI scripts: rdq-exec-live identity and four-direction isolation probes",
+      "description": "As the operator, I want setup and check scripts that create the live identity and prove isolation in both directions, so a misconfiguration is caught by a probe rather than a trade.",
+      "acceptanceCriteria": [
+        "ops/setup_onecli.sh adds identity rdq-exec-live with host allowlist exactly: api.alpaca.markets api.notion.com financialmodelingprep.com (no paper host); the current hard die on the live host is replaced by a rule that only rdq-exec-live may hold it (any other identity assigned the live host still dies)",
+        "ops/check_onecli.sh proves all four directions: rdq-exec-live -> live host authenticates (2xx); rdq-exec-paper -> live host fails; rdq-exec-live -> paper host fails; rdq-orchestrator -> live host fails; probes are skipped-with-warning (not failed) when rdq-exec-live has no vaulted secrets yet, so the script stays runnable before the operator's final step",
+        "ops/CLAUDE.md's 'never register rdq-exec-live' rule rewritten to 'only rdq-exec-live, only via setup_onecli.sh; live secrets on no other identity'",
+        "shellcheck passes on both scripts; any existing script-structure tests updated and passing",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "rdq-rebalance-live systemd units + health wiring",
+      "description": "As the operator, I want the live rebalance scheduled like paper's so it runs unattended once armed.",
+      "acceptanceCriteria": [
+        "ops/rdq-rebalance-live.service (oneshot, no [Install]) runs onecli run --agent rdq-exec-live -- .venv/bin/python -m execution.rebalance --live with NO_PROXY=slack.com, After=network-online.target rdq-data-refresh.service rdq-pred-refresh.service",
+        "ops/rdq-rebalance-live.timer fires Mon..Fri 08:10 America/New_York, Persistent=false, WantedBy=timers.target",
+        "Both files added to install_services.sh UNITS and the matching ops/health.sh list; tests/test_services.py and tests/test_health.py cross-checks pass",
+        "ops/health.sh output includes the live timer and live breaker/halt state alongside paper's",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Runbook Live section, docs, and go-live checklist",
+      "description": "As the operator, I want the real-money emergency procedures and the exact go-live order of operations written down before the first live order.",
+      "acceptanceCriteria": [
+        "ops/runbook.md gains a Live section: halt live from Slack; halt from the shell (exact live halt file path); flatten live (ops/flatten.py --live one-liner under rdq-exec-live); demote from Slack; rotate live keys in OneCLI; 'paper incident must not touch live (and vice versa)' note; tests/test_flatten.py required-sections check extended and passing",
+        "The operator checklist from tasks/prd-live-trading.md §6 (Alpaca live onboarding/funding/keys, OneCLI vaulting + check_onecli probes, SLACK_LIVE_CHANNEL_ID, Notion LIVE page sharing, go-live steps) is copied into ops/runbook.md as the FINAL manual step after all code ships",
+        "Go-live order of operations documented: deploy all stories -> install_services + daemon-reload + restart rdq-orchestrator -> operator §6 tasks -> review limits.live.json/breaker.live.json/allocation -> one promote-to-live message -> observe first 08:10 ET rebalance -> ops/reconcile.py --live",
+        "README.md, PLAN.md Phase 6, and docs/decisions.md record the 2026-08-10 decisions (direct-to-live, no confirmation, full channel parity, conservative guardrails) as superseding 2026-08-05's paper-first/two-step decisions",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "End-to-end live-path dry run in fixture mode (final pre-go-live gate)",
+      "description": "As the operator, I want the complete --live code path proven end-to-end against fixtures before I fund the account, so my manual Alpaca setup is the only remaining step.",
+      "acceptanceCriteria": [
+        "An integration test drives run_rebalance with --live semantics end-to-end against a fake HTTP session (realistic /v2/account, /v2/positions, /v2/orders, /v2/calendar payloads), a temp state DB with a live slot, temp live guardrail configs, and fake Slack/Notion recorders — no network, no real accounts",
+        "The test asserts: targets scaled to allocation pct, live limits and breaker consulted at live paths, orders carry the rdq-live- prefix, every submitted order has a Trade Ledger (Live) row (1:1 reconciliation of ledger vs submitted), daily snapshot row written, summary posted to the live channel",
+        "A second scenario exercises a refusal path end-to-end (live halt file present -> exit 0, no orders, halt line posted to the live channel)",
+        "A short section in ops/runbook.md names this test as the pre-go-live gate and the command to run it",
+        "Full test suite (make check) passes — this story is the final automated gate; everything after it is the operator's manual Alpaca/OneCLI/Slack/Notion setup from the runbook checklist",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

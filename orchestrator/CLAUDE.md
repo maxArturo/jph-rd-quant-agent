@@ -14,7 +14,11 @@
   adding `CREATE ... IF NOT EXISTS` statements to `_SCHEMA` (migration reruns
   on every startup). Dedup/uniqueness lives in the schema (runs.thread_ts PK
   → `DuplicateRunError`; pending_interactions.interaction_key UNIQUE → insert
-  returns `None`), so restarts can't double-post.
+  returns `None`), so restarts can't double-post. The DB runs in WAL mode
+  with a 30s busy timeout (both set in `_connect`, WAL persists in the file)
+  so cross-process writers (GPU pipeline unit, CLI promotes) queue instead of
+  raising 'database is locked' — keep any new sqlite connection in this repo
+  on the same settings.
 
 - All orchestrator LLM calls go through `orchestrator/llm.py` (`ModelRouter`):
   `judgment()` = claude-fable-5 (streamed, server-side refusal fallback to

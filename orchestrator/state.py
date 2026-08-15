@@ -7,7 +7,10 @@ EXISTS``) and runs on every startup.
 
 Concurrency model: each helper opens a short-lived connection, so a
 ``StateStore`` instance is safe to share across threads (the Bolt handlers
-and the background poller never share a sqlite3 connection).
+and the background poller never share a sqlite3 connection). The database
+runs in WAL mode with a 30s busy timeout so writers in other processes
+(the transient GPU pipeline unit, CLI promotes) queue instead of failing
+with 'database is locked'.
 """
 
 from __future__ import annotations
@@ -218,9 +221,16 @@ class StateStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        # timeout=30 doubles as PRAGMA busy_timeout=30000: concurrent writers
+        # (orchestrator threads, the transient GPU pipeline unit, CLI
+        # promotes) block instead of raising 'database is locked'.
+        with closing(sqlite3.connect(self.db_path, timeout=30)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
+            # WAL lets readers proceed during a write. The mode is persistent
+            # in the DB file, so this is a cheap no-op after the first switch
+            # (and safely converts a pre-existing delete-mode DB in place).
+            conn.execute("PRAGMA journal_mode = WAL")
             with conn:  # commit on success, rollback on exception
                 yield conn
 

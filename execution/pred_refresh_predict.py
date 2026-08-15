@@ -57,7 +57,8 @@ def load_model_cpu(path: Path):
     torch tensors reduce through torch.storage._load_from_bytes, so routing
     that one symbol through torch.load(map_location="cpu") is sufficient.
     """
-    import torch
+    # torch exists only inside the qlib docker image this script runs in.
+    import torch  # pyright: ignore[reportMissingImports]
 
     class _CPUUnpickler(pickle.Unpickler):
         def find_class(self, module: str, name: str):
