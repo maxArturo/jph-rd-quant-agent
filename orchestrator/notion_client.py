@@ -160,6 +160,29 @@ class NotionClient:
             if not page.get("has_more") or cursor is None:
                 return found
 
+    def list_block_children(self, block_id: str) -> list[dict[str, Any]]:
+        """GET /v1/blocks/{id}/children: return ALL child blocks (paginates).
+
+        Raw block dicts, unfiltered — callers pick out what they need (e.g.
+        ops.notion_summary.parse_run_summary reads the json code blocks).
+        """
+        blocks: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            query = f"?page_size={DEFAULT_PAGE_SIZE}"
+            if cursor is not None:
+                query += f"&start_cursor={cursor}"
+            page = self._request("GET", f"/v1/blocks/{block_id}/children{query}", None)
+            results = page.get("results", [])
+            if not isinstance(results, list):
+                raise NotionError(
+                    f"expected a 'results' list from block children, got: {results!r:.200}"
+                )
+            blocks.extend(results)
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or cursor is None:
+                return blocks
+
     def update_page(
         self,
         page_id: str,

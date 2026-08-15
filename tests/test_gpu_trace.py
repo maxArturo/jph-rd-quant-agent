@@ -17,6 +17,7 @@ from ops.gpu_trace import (
     remap_path,
     run_exit_code,
     workspace_factors,
+    workspace_model,
     workspace_window,
 )
 
@@ -202,6 +203,39 @@ class TestWorkspaceFactors:
         ws.mkdir()
         (ws / "combined_factors_df.parquet").write_bytes(b"junk")
         assert workspace_factors(str(ws)) is None
+
+
+class TestWorkspaceModel:
+    def test_reads_model_class(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "conf.yaml").write_text("task:\n    model:\n        class: LGBModel\n")
+        assert workspace_model(str(ws)) == "LGBModel"
+
+    def test_prefers_sota_conf_over_baseline(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "conf_baseline.yaml").write_text("task:\n    model:\n        class: LGBModel\n")
+        (ws / "conf_sota_factors_model.yaml").write_text(
+            "task:\n    model:\n        class: GeneralPTNN\n"
+        )
+        assert workspace_model(str(ws)) == "GeneralPTNN"
+
+    def test_tolerates_jinja_placeholders(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "conf.yaml").write_text(
+            "data_start: {{ start_date }}\ntask:\n    model:\n        class: LGBModel\n"
+        )
+        assert workspace_model(str(ws)) == "LGBModel"
+
+    def test_degrades_to_none(self, tmp_path: Path) -> None:
+        assert workspace_model(None) is None
+        assert workspace_model(str(tmp_path / "missing")) is None
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "conf.yaml").write_text("strategy: only\n")  # no task.model.class
+        assert workspace_model(str(ws)) is None
 
 
 class TestCli:

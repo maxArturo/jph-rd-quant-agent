@@ -215,8 +215,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "orchestrator/run_memory.py build_digest: Notion strategy-notes rows (newest 10 by Run Date) -> run_summary JSON entries + incumbent section from local state (factors/model via new gpu_trace.workspace_model/metrics/window/promoted_at). Never raises; 15s Notion budget checked before each request; per-row JSON gaps and full Notion outages degrade to local runs/directives (directive + status, mutual-prefix directive matching); deterministic, oldest-first truncation at 4000 chars; read-only DB guard. New NotionClient.list_block_children. E2E: real Notion (5 rows, incumbent GeneralPTNN section, 2.9s) and bare-python 401 fallback (10 local runs, 2.2s) both verified live."
     },
     {
       "id": "US-015",

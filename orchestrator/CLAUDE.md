@@ -98,6 +98,25 @@
   records `.request(method, url, json=, headers=)` — a superset of the
   test_fmp.py GET-only fake).
 
+- Run memory (US-014) lives in `orchestrator/run_memory.py`:
+  `build_digest(db_path, client)` composes the prior-run digest (Notion
+  Strategy Notes `run_summary` JSON per row + incumbent section from local
+  state/workspace artifacts) that US-015 injects into RDQ_USER_INSTRUCTION.
+  It NEVER raises and never stalls a launch: every failure degrades (Notion
+  down / a row without parseable JSON falls back to local runs/directives,
+  directive + status only), total Notion time is budgeted (15s, checked
+  before each request), output is deterministic and truncates oldest-first
+  at max_chars (4000). It opens state.sqlite READ-ONLY (guards `is_file()` —
+  StateStore(path) would create the db) and runs with real Notion access
+  only inside the orchestrator process / under `onecli run --agent
+  rdq-orchestrator`; anywhere else it just degrades to local data. Gotcha
+  discovered live: the Notion row's Directive property is the FULL run
+  instruction while the local directive objective may be a shorter prefix
+  (and Notion clips rich_text at 2000 chars), so run matching uses mutual
+  whitespace-normalized prefix, not equality. Tests stub the client at the
+  method boundary (query_db / list_block_children) and serve blocks produced
+  by the REAL US-013 writer so reader and writer can't drift.
+
 - Lifecycle recording into Notion goes through `orchestrator/notion_recorder.py`
   (`NotionRecorder`, US-027) — the single write funnel for Research Ideas /
   Hypothesis Log / Backtest Results. It is best-effort BY DESIGN: every

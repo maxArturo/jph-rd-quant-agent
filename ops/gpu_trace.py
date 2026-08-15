@@ -145,6 +145,36 @@ def workspace_factors(workspace: str | None) -> list[str] | None:
     return names or None
 
 
+def workspace_model(workspace: str | None) -> str | None:
+    """Model class name (``task.model.class``) from a workspace's conf yaml(s).
+
+    Confs may disagree (baseline vs SOTA variants), so files whose name
+    mentions ``sota`` are preferred — that conf is the one the promoted
+    result actually ran. None when no conf yields a model class.
+    """
+    if not workspace:
+        return None
+    ws = Path(workspace).expanduser()
+    confs = sorted(ws.glob("conf*.yaml"))
+    ordered = [p for p in confs if "sota" in p.name] + [p for p in confs if "sota" not in p.name]
+    if not ordered:
+        return None
+    import yaml  # lazy: same reason as workspace_metrics
+    from jinja2 import Environment, Undefined  # confs keep their jinja placeholders
+
+    env = Environment(undefined=Undefined, autoescape=False)
+    for conf in ordered:
+        try:
+            data = yaml.safe_load(env.from_string(conf.read_text()).render())
+        except Exception:  # noqa: BLE001 — unreadable conf degrades, never raises
+            continue
+        model = ((data or {}).get("task") or {}).get("model") or {}
+        name = model.get("class") if isinstance(model, dict) else None
+        if name:
+            return str(name)
+    return None
+
+
 def loop_reports(trace_dir: Path, remap: tuple[str, str] | None = None) -> list[LoopReport]:
     reports: list[LoopReport] = []
     loop_dirs: list[tuple[int, Path]] = []

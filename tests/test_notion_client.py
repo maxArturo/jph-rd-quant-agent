@@ -145,6 +145,33 @@ def test_query_db_omits_filter_and_sorts_when_unset() -> None:
     assert session.calls[0]["json"] == {"page_size": 100}
 
 
+# ------------------------------------------------------- list_block_children
+
+
+def test_list_block_children_paginates_and_returns_raw_blocks() -> None:
+    block = {"type": "code", "code": {"language": "json", "rich_text": []}}
+    client, session, _ = make_client(
+        [
+            query_result([{"id": "b-1", **block}], has_more=True, cursor="cur-2"),
+            query_result([{"id": "b-2", "type": "paragraph"}]),
+        ]
+    )
+
+    blocks = client.list_block_children("page-1")
+
+    assert [b["id"] for b in blocks] == ["b-1", "b-2"]
+    first, second = session.calls
+    assert first["method"] == "GET"
+    assert first["url"] == f"{BASE_URL}/v1/blocks/page-1/children?page_size=100"
+    assert "start_cursor=cur-2" in second["url"]
+
+
+def test_list_block_children_rejects_non_list_results() -> None:
+    client, _, _ = make_client([FakeResponse(200, {"results": "nope"})])
+    with pytest.raises(NotionError, match="results"):
+        client.list_block_children("page-1")
+
+
 # ---------------------------------------------------------------- update_page
 
 
