@@ -29,8 +29,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "PATH line added to the unit; shutil.which guard notifies Slack and exits 1; verified on-box: unit start exit 0, doctl check runs under the unit PATH, guard fires with crippled PATH."
     },
     {
       "id": "US-003",

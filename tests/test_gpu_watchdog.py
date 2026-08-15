@@ -26,6 +26,7 @@ def fake_doctl(monkeypatch, returncode: int) -> list[list[str]]:
         return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="")
 
     monkeypatch.setattr(gpu_watchdog.subprocess, "run", run)
+    monkeypatch.setattr(gpu_watchdog.shutil, "which", lambda _cmd: "/usr/bin/doctl")
     return calls
 
 
@@ -56,6 +57,15 @@ class TestMain:
     def test_no_state_file_is_quiet_success(self, tmp_path: Path) -> None:
         rc = gpu_watchdog.main(["--state-file", str(tmp_path / "absent.env"), "--no-slack"])
         assert rc == 0
+
+    def test_missing_doctl_is_loud_failure(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """No doctl on PATH -> notify + exit 1, never FileNotFoundError (US-012)."""
+        state = write_state(tmp_path)
+        monkeypatch.setattr(gpu_watchdog.shutil, "which", lambda _cmd: None)
+        rc = gpu_watchdog.main(["--state-file", str(state), "--no-slack"])
+        assert rc == 1
+        assert "doctl" in capsys.readouterr().err
+        assert state.exists()  # state kept so the next healthy tick re-checks
 
     def test_gone_droplet_cleans_stale_state(self, tmp_path: Path, monkeypatch) -> None:
         state = write_state(tmp_path)

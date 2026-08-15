@@ -91,6 +91,13 @@
   (tests/test_services.py asserts every listed unit file exists).
 - Use `%h` for home paths; `WantedBy=default.target` (user manager has no
   multi-user.target); put `StartLimitIntervalSec` in `[Unit]`, not `[Service]`.
+- The user manager's default PATH is minimal (`/usr/bin:/bin`) — any unit (or
+  systemd-run transient) that shells out to doctl/onecli must set
+  `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` (see
+  rdq-gpu-watchdog.service and gpu_backend.py's --setenv). A subprocess call
+  to a missing binary raises FileNotFoundError BEFORE any Slack notify —
+  guard entrypoints with `shutil.which` and fail loud (gpu_watchdog.py
+  pattern).
 - `onecli run` injects HTTP(S)_PROXY process-wide but PRESERVES a pre-set
   NO_PROXY — any service wrapping `onecli run` must `Environment=` a NO_PROXY
   exemption for hosts that may not transit the proxy (Slack: `slack.com`;

@@ -18,3 +18,14 @@ Started: Sat Aug 15 12:50:59 PM UTC 2026
   - sqlite3 `timeout=` connect kwarg IS the busy timeout (maps to busy_timeout ms) — no separate PRAGMA needed, but assert via `PRAGMA busy_timeout`.
   - Live-box note: the on-disk orchestrator/state.sqlite flips to WAL the first time the deployed code opens it; remember rdq-orchestrator needs a restart after deploy for this to take effect (memory: deploy-vs-running-process).
 ---
+## 2026-08-15 13:10 UTC - US-002
+- Fixed the GPU billing watchdog PATH bug: ops/rdq-gpu-watchdog.service now sets Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin (doctl lives in ~/.local/bin; user-manager default PATH omits it). ops/gpu_watchdog.py gains a shutil.which("doctl") guard that posts a :rotating_light: Slack notice and exits 1 instead of dying on FileNotFoundError before any notify.
+- Tests: tests/test_services.py new TestGpuWatchdogUnits (unit+timer exist, PATH line, systemd-analyze verify); tests/test_gpu_backend.py test_launch_injects_path_for_doctl asserts the --setenv=PATH injection on pipeline transient units; tests/test_gpu_watchdog.py test_missing_doctl_is_loud_failure (+ fake_doctl now patches shutil.which so tests stay hermetic).
+- Files changed: ops/rdq-gpu-watchdog.service, ops/gpu_watchdog.py, tests/test_services.py, tests/test_gpu_backend.py, tests/test_gpu_watchdog.py, ops/CLAUDE.md.
+- Verified: make check green (1068 passed / 3 skipped). On-box: daemon-reload + systemctl --user start rdq-gpu-watchdog exits 0 (ExecMainStatus=0, Environment shows the new PATH). Droplet-state check exercised under the unit's exact PATH via a temp state file (doctl ran, bogus droplet detected gone, state cleaned); guard verified with PATH=/usr/bin:/bin -> notice + exit 1. No real worker.env existed, nothing live touched.
+- **Learnings for future iterations:**
+  - The unit files in ops/ are SYMLINKED into ~/.config/systemd/user — editing the repo file + daemon-reload is enough, no reinstall.
+  - systemctl --user from agent shells needs XDG_RUNTIME_DIR=/run/user/$(id -u) exported first.
+  - `systemctl --user show <unit> -p Environment` reflects per-unit Environment= lines after daemon-reload (unlike show-environment).
+  - To safely exercise the watchdog's doctl path on-box, point --state-file at a temp worker.env with a bogus DROPLET_ID: doctl get fails -> stale-state cleanup path, no real resources touched. Real state lives at ~/rdq-runs/gpu_worker/worker.env (absent today).
+---

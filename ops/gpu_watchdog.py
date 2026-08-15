@@ -16,6 +16,7 @@ All lifecycle mechanics go through ops/gpu_worker/gpu_worker.sh.
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -70,6 +71,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     state = read_state(args.state_file)
     droplet_id = state.get("DROPLET_ID", "?")
+
+    if shutil.which("doctl") is None:
+        # The whole point of this unit is billing protection — a missing doctl
+        # must be loud, not a FileNotFoundError before any notify is reachable.
+        notify(
+            f":rotating_light: GPU watchdog cannot find doctl on PATH — droplet "
+            f"{droplet_id} is UNCHECKED and may still be billing; fix the PATH in "
+            "ops/rdq-gpu-watchdog.service (needs ~/.local/bin)",
+            args.no_slack,
+        )
+        return 1
 
     exists = subprocess.run(
         ["doctl", "compute", "droplet", "get", droplet_id, "--format", "ID", "--no-header"],

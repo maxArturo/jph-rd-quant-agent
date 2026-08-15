@@ -21,6 +21,8 @@ REBALANCE_UNIT = REPO_ROOT / "ops" / "rdq-rebalance.service"
 REBALANCE_TIMER = REPO_ROOT / "ops" / "rdq-rebalance.timer"
 SWEEP_UNIT = REPO_ROOT / "ops" / "rdq-sweep.service"
 SWEEP_TIMER = REPO_ROOT / "ops" / "rdq-sweep.timer"
+GPU_WATCHDOG_UNIT = REPO_ROOT / "ops" / "rdq-gpu-watchdog.service"
+GPU_WATCHDOG_TIMER = REPO_ROOT / "ops" / "rdq-gpu-watchdog.timer"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
 
@@ -347,6 +349,27 @@ class TestSweepUnits:
     def test_systemd_analyze_verify(self) -> None:
         _systemd_analyze_verify(SWEEP_UNIT)
         _systemd_analyze_verify(SWEEP_TIMER)
+
+
+class TestGpuWatchdogUnits:
+    def test_exist(self) -> None:
+        assert GPU_WATCHDOG_UNIT.is_file()
+        assert GPU_WATCHDOG_TIMER.is_file()
+
+    def test_path_reaches_doctl(self) -> None:
+        """AC US-002: doctl lives in ~/.local/bin — without this PATH line the
+        watchdog crashed with FileNotFoundError on every tick that had work."""
+        assert (
+            "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+            in GPU_WATCHDOG_UNIT.read_text()
+        )
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(GPU_WATCHDOG_UNIT)
+        _systemd_analyze_verify(GPU_WATCHDOG_TIMER)
 
 
 class TestInstallScript:

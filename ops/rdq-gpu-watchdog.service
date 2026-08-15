@@ -15,4 +15,7 @@ Description=RD-Agent(Q) orphaned GPU worker watchdog (fetch+destroy leaked burst
 [Service]
 Type=oneshot
 WorkingDirectory=%h/rd-agent-q
+# doctl lives in ~/.local/bin; the user manager's minimal PATH omits it
+# (same injection gpu_backend.py does for transient pipeline units).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/rd-agent-q/.venv/bin/python -m ops.gpu_watchdog --max-hours 24

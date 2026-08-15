@@ -47,6 +47,15 @@ class TestGpuBackend:
         assert "--instruction" in cmd and "focus on volume" in cmd
         assert "--loop_n" in cmd and "7" in cmd
 
+    def test_launch_injects_path_for_doctl(self, tmp_path: Path) -> None:
+        """Transient units get the user manager's minimal PATH — the pipeline
+        needs ~/.local/bin injected or doctl/onecli are unreachable (US-002)."""
+        runner = RecordingRunner()
+        backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
+        backend.launch("1.2")
+        expected = f"--setenv=PATH={Path.home() / '.local/bin'}:/usr/local/bin:/usr/bin:/bin"
+        assert expected in runner.calls[0]
+
     def test_launch_omits_default_universe(self, tmp_path: Path) -> None:
         runner = RecordingRunner()
         backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
