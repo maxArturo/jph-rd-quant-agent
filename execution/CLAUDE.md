@@ -97,6 +97,20 @@
   touches it). A corrupt/unreadable HWM file raises `BreakerStateError`
   (refuse to trade) — never "fix" it by silently re-seeding; that disarms
   the drawdown kill switch.
+- `execution/divergence.py` (US-016) is the daily realized-vs-backtest drift
+  check: expected daily return is HAIRCUT (`haircut × backtest mean`, config
+  section `divergence:` in orchestrator/config.yaml); z over the trailing
+  `window_days`; warn on `z < warn_z`, auto-halt (write the breaker halt
+  file) on `z < halt_z` OR drawdown since promotion strictly over backtest
+  `|MDD| × mdd_tolerance`. It NEVER overwrites an existing halt file (the
+  operator's note wins) and touches no other state (not the HWM). Warmup
+  (< window_days realized days) and nothing-promoted are SILENT exits 0 —
+  only warn/halt/failure post to Slack (it runs daily; quiet days must not
+  spam). Unlike the gate's degrade-per-field loaders, `load_backtest_stats`
+  raises on ANY gap (missing ret.pkl, zero variance) — a tracker on a
+  partial distribution silently disarms the halt. The broker dependency is
+  the `PortfolioReader` protocol (get_portfolio_history only) — tests inject
+  a fake; runs as rdq-exec-paper like the rebalancer.
 - pred.pkl = mlflow artifact at `mlruns/<exp>/<run>/artifacts/pred.pkl`,
   MultiIndex (datetime, instrument), first column is the score (upstream uses
   `.iloc[:, 0]` too). Newest mtime wins when a workspace holds several runs.

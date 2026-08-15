@@ -26,3 +26,16 @@ promotion_gate:
   allow_first: false
   confirm_ir_margin: 1.0
   auto_promote: true
+# Divergence tracker (US-016, read by execution/divergence.py): daily
+# realized-vs-backtest drift check on the promoted strategy. Expected daily
+# return = haircut × backtest mean (backtests flatter live); over the trailing
+# window_days trading days z = (realized − expected) / (σ·√window_days).
+# z < warn_z posts a Slack warning; z < halt_z OR drawdown since promotion
+# over backtest |MDD| × mdd_tolerance writes the breaker halt file (the
+# rebalancer's kill switch) and posts a rotating_light notice.
+divergence:
+  haircut: 0.5
+  warn_z: -2.0
+  halt_z: -3.0
+  mdd_tolerance: 1.25
+  window_days: 20

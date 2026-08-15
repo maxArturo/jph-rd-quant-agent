@@ -247,8 +247,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "execution/divergence.py: pure evaluate_divergence (haircut mu_adj, trailing-window z, drawdown vs |MDD|×tolerance, strict-< z thresholds / at-limit-passes drawdown) + loud load_backtest_stats + divergence: config section. Halt writes the breaker halt file (never overwrites an operator note); warmup/nothing-promoted silent. E2E on real account: warmup live, ok z=0.14 dd 2.83%/20.15% on a backdated DB copy, forced halt writes file + rotating_light."
     },
     {
       "id": "US-017",
