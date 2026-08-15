@@ -389,6 +389,24 @@ def test_refresh_self_check_runs_the_rebalancer_gate(tmp_path: Path) -> None:
     assert "predictions stale" in notice
 
 
+def test_refresh_self_check_applies_store_staleness_bound(tmp_path: Path) -> None:
+    """US-016: a frozen store fails the refresh self-check even when the
+    re-predict lands a cross-section on the store's own last trading day."""
+    workspace, db_path, store_path = promoted_env(tmp_path)
+    notices: list[str] = []
+    rc = run_pred_refresh(
+        notices.append,
+        as_of=AS_OF + dt.timedelta(days=9),  # store calendar ends 9 calendar days back
+        db_path=db_path,
+        store_path=store_path,
+        runner=fresh_writer(workspace, day=FRESH_DAY),
+    )
+    assert rc == 1
+    (notice,) = notices
+    assert "pred refresh FAILED" in notice
+    assert "store stale relative to today" in notice
+
+
 def test_refresh_short_circuits_when_already_fresh(tmp_path: Path) -> None:
     workspace, db_path, store_path = promoted_env(tmp_path)
     write_pred(workspace, {FRESH_DAY: {"AAPL": 1.0}})

@@ -24,6 +24,7 @@ from execution.signal import (
     load_strategy_params,
     locate_pred,
     main,
+    store_calendar_end,
     topk_dropout_holdings,
 )
 
@@ -392,8 +393,42 @@ def test_last_trading_day_missing_calendar(tmp_path: Path) -> None:
 def test_assert_fresh_accepts_current_and_rejects_stale(tmp_path: Path) -> None:
     calendar = write_calendar(tmp_path / "day.txt", ["2026-07-07", "2026-07-08"])
     assert_fresh(dt.date(2026, 7, 8), dt.date(2026, 7, 9), calendar)
-    with pytest.raises(SignalError, match="stale"):
+    with pytest.raises(SignalError, match="predictions stale relative to store"):
         assert_fresh(dt.date(2026, 7, 7), dt.date(2026, 7, 9), calendar)
+
+
+def test_store_calendar_end(tmp_path: Path) -> None:
+    calendar = write_calendar(tmp_path / "day.txt", ["2026-07-06", "2026-07-07", "2026-07-08"])
+    assert store_calendar_end(calendar) == dt.date(2026, 7, 8)
+    empty = write_calendar(tmp_path / "empty.txt", [])
+    with pytest.raises(SignalError, match="empty"):
+        store_calendar_end(empty)
+
+
+def test_assert_fresh_store_lag_boundary(tmp_path: Path) -> None:
+    """US-016: store end exactly 5 calendar days behind as_of passes (long
+    weekend + holiday); one day beyond fails even when pred matches the store's
+    own last trading day (the self-certifying frozen-store case)."""
+    calendar = write_calendar(tmp_path / "day.txt", ["2026-07-07", "2026-07-08"])
+    # Lag exactly 5: 07-08 store end, as_of 07-13.
+    assert_fresh(dt.date(2026, 7, 8), dt.date(2026, 7, 13), calendar)
+    # Lag 6: pred == last store trading day, but the store itself is stale.
+    with pytest.raises(SignalError, match="store stale relative to today"):
+        assert_fresh(dt.date(2026, 7, 8), dt.date(2026, 7, 14), calendar)
+
+
+def test_assert_fresh_store_lag_configurable(tmp_path: Path) -> None:
+    calendar = write_calendar(tmp_path / "day.txt", ["2026-07-08"])
+    assert_fresh(dt.date(2026, 7, 8), dt.date(2026, 7, 20), calendar, max_store_lag_days=12)
+    with pytest.raises(SignalError, match="store stale relative to today"):
+        assert_fresh(dt.date(2026, 7, 8), dt.date(2026, 7, 20), calendar, max_store_lag_days=11)
+
+
+def test_extract_targets_frozen_store_aborts(tmp_path: Path) -> None:
+    """A store frozen 6+ days ago cannot self-certify its own last day as fresh."""
+    workspace, calendar = fixture_workspace(tmp_path, {"2026-07-08": {"A": 1.0, "B": 2.0}})
+    with pytest.raises(SignalError, match="store stale relative to today"):
+        extract_targets(workspace, [], as_of=dt.date(2026, 7, 20), calendar_path=calendar)
 
 
 # ------------------------------------------------------ extract_targets

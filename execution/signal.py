@@ -33,6 +33,11 @@ from typing import Any, cast
 
 DEFAULT_CALENDAR_PATH = Path("~/.qlib/qlib_data/us_data/calendars/day.txt")
 
+# Absolute store-staleness bound (US-016): the store's last calendar day may
+# trail as_of by at most this many CALENDAR days. 5 tolerates a long weekend
+# plus a holiday; a frozen store trips it on the next rebalance after that.
+DEFAULT_MAX_STORE_LAG_DAYS = 5
+
 
 class SignalError(Exception):
     """Any condition that must abort signal extraction (no partial output)."""
@@ -226,8 +231,8 @@ def load_latest_cross_section(pred_path: Path) -> tuple[dt.date, Any]:
     return pred_date, cross
 
 
-def last_trading_day(as_of: dt.date, calendar_path: Path = DEFAULT_CALENDAR_PATH) -> dt.date:
-    """Most recent trading day on/before as_of, per the store calendar."""
+def _read_calendar(calendar_path: Path) -> list[dt.date]:
+    """All trading days in the store calendar file."""
     calendar_path = calendar_path.expanduser()
     if not calendar_path.is_file():
         raise SignalError(f"trading calendar not found: {calendar_path}")
@@ -240,20 +245,51 @@ def last_trading_day(as_of: dt.date, calendar_path: Path = DEFAULT_CALENDAR_PATH
             days.append(dt.date.fromisoformat(line[:10]))
         except ValueError as exc:
             raise SignalError(f"bad calendar line in {calendar_path}: {line!r}") from exc
-    past = [d for d in days if d <= as_of]
+    if not days:
+        raise SignalError(f"trading calendar is empty: {calendar_path}")
+    return days
+
+
+def last_trading_day(as_of: dt.date, calendar_path: Path = DEFAULT_CALENDAR_PATH) -> dt.date:
+    """Most recent trading day on/before as_of, per the store calendar."""
+    past = [d for d in _read_calendar(calendar_path) if d <= as_of]
     if not past:
         raise SignalError(f"no trading day on/before {as_of} in {calendar_path}")
     return max(past)
 
 
-def assert_fresh(pred_date: dt.date, as_of: dt.date, calendar_path: Path) -> None:
-    """Abort if the latest prediction is older than the last trading day."""
+def store_calendar_end(calendar_path: Path = DEFAULT_CALENDAR_PATH) -> dt.date:
+    """The store's last built trading day (final calendar entry)."""
+    return max(_read_calendar(calendar_path))
+
+
+def assert_fresh(
+    pred_date: dt.date,
+    as_of: dt.date,
+    calendar_path: Path,
+    max_store_lag_days: int = DEFAULT_MAX_STORE_LAG_DAYS,
+) -> None:
+    """Abort if the store or the latest prediction is stale.
+
+    Two distinct failures: the store's own calendar trailing as_of by more
+    than max_store_lag_days CALENDAR days (a frozen store's last trading day
+    stops advancing, so it would otherwise self-certify old predictions as
+    fresh), and predictions older than the store's last trading day.
+    """
+    store_end = store_calendar_end(calendar_path)
+    lag = (as_of - store_end).days
+    if lag > max_store_lag_days:
+        raise SignalError(
+            f"store stale relative to today: store calendar ends {store_end}, "
+            f"{lag} calendar days behind {as_of} (bound {max_store_lag_days}) — "
+            f"the data store itself is not updating; refresh the store before trading"
+        )
     last_td = last_trading_day(as_of, calendar_path)
     if pred_date < last_td:
         raise SignalError(
-            f"predictions stale: latest cross-section is {pred_date} but the last "
-            f"trading day on/before {as_of} is {last_td} — refresh the store and "
-            f"regenerate predictions before trading"
+            f"predictions stale relative to store: latest cross-section is {pred_date} "
+            f"but the last trading day on/before {as_of} is {last_td} — refresh the "
+            f"store and regenerate predictions before trading"
         )
 
 
@@ -319,6 +355,7 @@ def extract_targets(
     params: StrategyParams | None = None,
     as_of: dt.date | None = None,
     calendar_path: Path = DEFAULT_CALENDAR_PATH,
+    max_store_lag_days: int = DEFAULT_MAX_STORE_LAG_DAYS,
 ) -> TargetBook:
     """workspace pred.pkl -> fresh, equal-weight TargetBook (or SignalError)."""
     if params is None:
@@ -327,7 +364,7 @@ def extract_targets(
         as_of = dt.date.today()
     pred_path = locate_pred(workspace)
     pred_date, scores = load_latest_cross_section(pred_path)
-    assert_fresh(pred_date, as_of, calendar_path)
+    assert_fresh(pred_date, as_of, calendar_path, max_store_lag_days=max_store_lag_days)
     holdings = topk_dropout_holdings(scores, current_holdings, params)
     weights = equal_weight_targets(holdings)
     return TargetBook(pred_date=pred_date, weights=weights, params=params, pred_path=pred_path)
@@ -347,6 +384,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--as-of", type=dt.date.fromisoformat, default=None, help="YYYY-MM-DD (default: today)"
     )
     parser.add_argument("--calendar", type=Path, default=DEFAULT_CALENDAR_PATH)
+    parser.add_argument(
+        "--max-store-lag-days",
+        type=int,
+        default=DEFAULT_MAX_STORE_LAG_DAYS,
+        help="max calendar days the store calendar may trail as-of (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if (args.topk is None) != (args.n_drop is None):
@@ -363,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             params=params,
             as_of=args.as_of,
             calendar_path=args.calendar,
+            max_store_lag_days=args.max_store_lag_days,
         )
     except SignalError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

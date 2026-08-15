@@ -99,7 +99,13 @@
 - Freshness rule: latest pred cross-section date must be >= the last store
   calendar entry on/before as_of (`~/.qlib/qlib_data/us_data/calendars/
   day.txt`). Predictions are made FROM day T FOR T+1, so pred dated the last
-  completed trading day is fresh for a pre-open rebalance.
+  completed trading day is fresh for a pre-open rebalance. `assert_fresh`
+  ALSO enforces an absolute store bound (US-016): the calendar's final entry
+  may trail as_of by at most `max_store_lag_days` CALENDAR days (default 5 =
+  long weekend + holiday) — a frozen store must not self-certify its own last
+  day as fresh. The two failures carry distinct messages ("store stale
+  relative to today" vs "predictions stale relative to store"); pred_refresh's
+  self-check calls the same function, so it inherits the bound.
 - `execution/rebalance.py` is the pipeline assembly (US-034): market calendar
   -> promoted load -> signal -> diff -> buying-power cap -> gate -> breaker
   -> submit -> poll fills. `run_rebalance()` returns the process exit code —

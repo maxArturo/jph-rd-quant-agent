@@ -58,8 +58,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "assert_fresh gains a store_calendar_end bound (default 5 calendar days, max_store_lag_days param + CLI flag); distinct store-stale vs pred-stale messages; pred_refresh inherits via its direct assert_fresh calls. Boundary/beyond/frozen-store tests added; live store verified passing at lag 2."
     },
     {
       "id": "US-005",
