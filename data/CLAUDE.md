@@ -32,11 +32,19 @@
   rdagent). `qlib.init(provider_uri=..., region="us")` + `D.features` is the read path;
   import qlib lazily (multi-second import).
 - Universes: `data/make_universe.py` writes `instruments/<name>.txt` into an EXISTING store
-  (rows are `SYMBOL\tstart\tend` with spans copied from `all.txt`; name `all` is reserved).
-  Built-in universe configs live in `data/config.yaml` (`us_liquid` = min ADV + min price
-  filters, defaults to every store ticker; `sp500` = committed snapshot
-  `data/sp500_tickers.txt`, refresh command in the yaml comment). Qlib resolves a universe
-  via `D.instruments(market="<name>")` — the market string IS the instruments filename.
+  (rows are `SYMBOL\tstart\tend`; name `all` is reserved). Built-in universe configs live
+  in `data/config.yaml` (`us_liquid` = min ADV + min price filters, defaults to every
+  store ticker; `sp500` = committed snapshot `data/sp500_tickers.txt`, refresh command in
+  the yaml comment). Qlib resolves a universe via `D.instruments(market="<name>")` — the
+  market string IS the instruments filename.
+- Universe membership modes (US-023): `mode: pit` (us_liquid's default) re-evaluates
+  ADV/price on each month's FIRST trading day with one-period entry/exit hysteresis (a
+  flip needs the opposite signal on 2 consecutive evaluations) and emits MULTIPLE
+  span rows per symbol; `mode: last_window` (default elsewhere, `--mode` overrides) is the
+  legacy full-span filter used by frozen `*_promoted_*` snapshots. Anything parsing a
+  universe file must dedup symbols (`set` of column 0) — multi-row symbols are legal.
+  PIT span ends are clamped to the ticker's own `all.txt` end, and evaluations tolerate
+  a shorter-than-window early history (legacy parity).
 - Liquidity math exploits the store's field conventions: stored close * stored volume ==
   RAW daily dollar volume (factors cancel), and raw price on the last day = close / factor.
   Don't "fix" filters to de-adjust first.

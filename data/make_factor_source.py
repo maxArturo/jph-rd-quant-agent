@@ -87,7 +87,8 @@ def read_universe_symbols(store: Path, universe: str) -> list[str]:
             f"universe '{universe}' has no instruments file at {path} - "
             "create it first with data/make_universe.py"
         )
-    symbols = [line.split("\t")[0] for line in path.read_text().splitlines() if line.strip()]
+    # A set: PIT universes may hold multiple membership-span rows per symbol.
+    symbols = {line.split("\t")[0] for line in path.read_text().splitlines() if line.strip()}
     if not symbols:
         raise FactorSourceError(f"instruments file {path} is empty")
     return sorted(symbols)

@@ -8,15 +8,22 @@
 #                   last day for that ticker is below this
 #   adv_window    - trading days in the ADV average (default 20)
 #   tickers_file  - default ticker list, path relative to this file
+#   mode          - membership mode: last_window (default; filter on the most
+#                   recent window, full-span rows) or pit (point-in-time:
+#                   monthly re-evaluation with one-period hysteresis, span
+#                   rows). CLI --mode overrides.
 # Universes without filters keep every requested ticker that exists in the store.
 universes:
   us_liquid:
     # Broad liquidity/price-filtered default (roughly Russell-1000-ish) so the
     # top-k strategy cannot rank into illiquid microcaps. With no --tickers it
-    # considers every ticker in the store.
+    # considers every ticker in the store. Point-in-time so backtests stop
+    # admitting names by today's liquidity retroactively (US-023); frozen
+    # promoted snapshots (us_liquid_promoted_*) stay on last_window.
     min_adv_usd: 20000000
     min_price: 5.0
     adv_window: 20
+    mode: pit
   sp500:
     # Benchmarking universe. Snapshot of S&P 500 constituents fetched from FMP
     # /stable/sp500-constituent on 2026-07-08 (504 symbols incl. dual share

@@ -355,8 +355,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "mode key (config.yaml us_liquid: pit; --mode CLI override) on make_universe: PIT = monthly first-trading-day evals of trailing ADV/raw price with one-period entry/exit hysteresis, span-format rows via new write_instrument_rows (legacy write_instruments_file wraps it); span ends clamp to the ticker's all.txt end; PIT without filters refuses. make_factor_source dedups span rows. E2E on a symlinked mirror of the live store: 589 tickers / 720 spans / 5s; every live member retained; live instruments/us_liquid.txt untouched (rollout = US-024)."
     },
     {
       "id": "US-024",
