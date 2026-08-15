@@ -14,7 +14,7 @@
 #   gpu_worker.sh tunnel                # (re)start reverse tunnel + write proxy env
 #   gpu_worker.sh check                 # remote run_us_quant.sh --check (RDQ_LAUNCHER=direct)
 #   gpu_worker.sh run [--loop_n N] [--all_duration DUR] [--test-end YYYY-MM-DD]  # launch in remote tmux
-#   gpu_worker.sh snapshot              # bake worker into rdq-gpu-base-* image (fast boots)
+#   gpu_worker.sh snapshot              # bake worker into rdq-gpu-base-<hash>-* image
 #   gpu_worker.sh ssh <cmd...>          # arbitrary remote command (worker SSH opts)
 #   gpu_worker.sh status                # droplet / tunnel / run / GPU utilization
 #   gpu_worker.sh fetch                 # rsync results back under the state dir
@@ -435,23 +435,35 @@ EOF
   note "follow with:  $(basename "$0") status   |   ssh root@${DROPLET_IP} tail -f ${RUN_LOG}"
 }
 
+# Keep in sync with SNAPSHOT_PREFIX in ops/gpu_snapshot.py.
 SNAPSHOT_PREFIX="rdq-gpu-base"
 
 latest_snapshot_id() {
-  # Newest private image named ${SNAPSHOT_PREFIX}-* (name sorts by date suffix).
-  doctl compute image list --format ID,Name --no-header 2>/dev/null \
-    | awk -v p="${SNAPSHOT_PREFIX}-" 'index($2, p) == 1 { print $1, $2 }' \
-    | sort -k2 | tail -1 | awk '{print $1}'
+  # Region-aware (US-022): snapshots are regional, so a size-plan fallback
+  # into another region must not select an image that isn't there. Selection
+  # lives in ops/gpu_snapshot.py (one offline-testable implementation);
+  # RDQ_GPU_SNAPSHOT_HASH, when set, additionally requires the worker-inputs
+  # hash embedded in the image name. Any failure degrades to empty (= boot
+  # the default image).
+  local args=(select --region "${RDQ_GPU_REGION}")
+  [[ -n "${RDQ_GPU_SNAPSHOT_HASH:-}" ]] && args+=(--hash "${RDQ_GPU_SNAPSHOT_HASH}")
+  (cd "${REPO_ROOT}" && .venv/bin/python -m ops.gpu_snapshot "${args[@]}" 2>/dev/null) || true
 }
 
 cmd_snapshot() {
   # Bake the bootstrapped worker into a DO image so future provisions skip
   # the 16.5GB docker-image ship + venv build (~20 min -> ~3 min boot).
   # Regional: usable for provisions in the SAME region the worker runs in.
+  # The name embeds the worker-inputs hash (US-022) so provision can tell a
+  # current image from a stale one by name alone.
   load_state
   ensure_doctl
+  local inputs_hash="${RDQ_GPU_SNAPSHOT_HASH:-}"
+  if [[ -z "${inputs_hash}" ]]; then
+    inputs_hash="$( (cd "${REPO_ROOT}" && .venv/bin/python -m ops.gpu_snapshot hash 2>/dev/null) || true)"
+  fi
   local name
-  name="${SNAPSHOT_PREFIX}-$(date -u +%Y%m%d-%H%M)"
+  name="${SNAPSHOT_PREFIX}-${inputs_hash:+${inputs_hash}-}$(date -u +%Y%m%d-%H%M)"
   note "powering off ${DROPLET_ID} for a consistent snapshot"
   doctl compute droplet-action power-off "${DROPLET_ID}" --wait >/dev/null
   note "taking snapshot ${name} (several minutes)"
@@ -463,17 +475,10 @@ cmd_snapshot() {
     sleep 5
   done
   remote true 2>/dev/null || fail "worker did not come back after snapshot (droplet still exists)"
-  # Keep only the newest base image — older ones just accrue storage cost.
-  local keep old_ids
-  keep="$(latest_snapshot_id)"
-  old_ids="$(doctl compute image list --format ID,Name --no-header \
-    | awk -v p="${SNAPSHOT_PREFIX}-" -v keep="${keep}" \
-        'index($2, p) == 1 && $1 != keep { print $1 }')"
-  local image_id
-  for image_id in ${old_ids}; do
-    note "pruning old base image ${image_id}"
-    doctl compute image delete -f "${image_id}" || true
-  done
+  # Prune superseded base images, keeping the newest 2 (one rollback boot);
+  # storage is ~$0.06/GiB/mo and provision ignores stale-hash images anyway.
+  (cd "${REPO_ROOT}" && .venv/bin/python -m ops.gpu_snapshot prune) \
+    || note "prune failed (non-fatal) — superseded base images may accrue storage cost"
   note "snapshot ${name} ready — future provisions in this region boot from it"
 }
 

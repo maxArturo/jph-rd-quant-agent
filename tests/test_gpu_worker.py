@@ -94,6 +94,23 @@ class TestScriptContract:
         heredoc = text.split("cat > /root/rdq-launch.sh")[1].split("\nEOF")[0]
         assert "${test_end_line}" in heredoc
 
+    def test_snapshot_selection_is_region_aware_and_delegated(self) -> None:
+        """US-022: image selection must live in ops/gpu_snapshot.py (one
+        offline-tested implementation) and must be keyed on the target region
+        — snapshots are regional, and a size-plan fallback into another region
+        must not select an image that isn't there."""
+        text = SCRIPT.read_text()
+        assert "ops.gpu_snapshot" in text
+        assert '--region "${RDQ_GPU_REGION}"' in text
+
+    def test_snapshot_name_embeds_worker_inputs_hash(self) -> None:
+        """US-022: the bake names the image rdq-gpu-base-<hash>-<ts> so
+        provision can tell current from stale by name alone; pruning (keep the
+        newest 2) is delegated to ops.gpu_snapshot."""
+        text = SCRIPT.read_text()
+        assert '${SNAPSHOT_PREFIX}-${inputs_hash:+${inputs_hash}-}' in text
+        assert "ops.gpu_snapshot prune" in text
+
     def test_tunnel_never_persists_token_locally(self) -> None:
         """The proxy URL (with auth token) may be written only to the worker;
         nothing should redirect it into the local state dir."""

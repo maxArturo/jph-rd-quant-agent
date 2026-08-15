@@ -58,12 +58,22 @@ availability and fails with the live table; the pipeline additionally walks
 RDQ_GPU_SIZE=gpu-6000adax1-48gb RDQ_GPU_REGION=tor1 ops/gpu_worker/gpu_worker.sh provision
 ```
 
-**Base snapshots (fast boots):** run the pipeline once with `--snapshot` (or
-`gpu_worker.sh snapshot` on a bootstrapped worker) to bake an
-`rdq-gpu-base-<ts>` image — provision auto-boots the newest one, cutting the
-~20 min image-ship bootstrap to a ~3 min delta sync. Snapshots are regional
-(usable where they were taken), cost ~$0.06/GiB/mo, and only the newest is
-kept. Re-snapshot after `local_qlib:latest` or venv-dependency changes.
+**Base snapshots (fast boots, automatic since US-022):** the pipeline bakes
+the bootstrapped worker into an `rdq-gpu-base-<hash>-<ts>` image, where
+`<hash>` is a short digest over the worker-affecting inputs
+(`research/PINNED_COMMIT`, `gpu_worker.sh`, the Makefile venv targets, a
+structural store marker — computed by `ops/gpu_snapshot.py`). At launch it
+boots from the newest image whose **hash and region both match** (~3 min
+instead of the ~20 min image-ship bootstrap); when none matches it
+full-bootstraps and bakes a fresh hash-tagged image at teardown (before
+destroy), pruning superseded images down to the newest 2. A bake failure
+never fails the run — the next run just bootstraps again. Manual overrides:
+`--snapshot bake` forces a rebake at teardown, `--no-snapshot` ignores
+snapshots entirely; `gpu_worker.sh snapshot` bakes by hand on a bootstrapped
+worker. Snapshots are regional and cost ~$0.06/GiB/mo. Note the inputs hash
+does NOT cover `local_qlib:latest` — after rebuilding that image, force a
+`--snapshot bake` run (bootstrap only ships the docker image when the worker
+lacks one).
 
 ## Slack-first flow (the normal path)
 
@@ -88,7 +98,7 @@ what you agree on in the thread steers the hypotheses.
 
 ```sh
 .venv/bin/python -m ops.gpu_pipeline --loop_n 10 \
-    [--universe <name>] [--instruction "..."] [--snapshot] [--no-notion]
+    [--universe <name>] [--instruction "..."] [--snapshot bake | --no-snapshot] [--no-notion]
 ```
 
 Runs the WHOLE lifecycle: provision (falling through `RDQ_GPU_SIZE_PLAN`

@@ -122,6 +122,23 @@
   `universe_tickers` via hash_instruments (both canonicalize identically —
   verified matching on the real pair 2026-08-15). Status file gains
   `gate` (verdict dict or {"error": ...}) + `auto_promoted` fields.
+- Base snapshots (US-022, `ops/gpu_snapshot.py`): worker boots are keyed on a
+  short worker-inputs hash (research/PINNED_COMMIT + gpu_worker.sh + the
+  Makefile venv targets + a STRUCTURAL store marker — field/calendar names
+  only; store CONTENT rolls daily and must never churn the hash) embedded in
+  the image name `rdq-gpu-base-<hash>-<ts>`. Selection is hash+REGION matched
+  (snapshots are regional — the size-plan fallback must never boot an image
+  that isn't in its region); no match = full bootstrap + auto-rebake at
+  teardown (before destroy), pruning to the newest 2 images. All
+  selection/prune logic lives in gpu_snapshot.py; gpu_worker.sh DELEGATES
+  (`python -m ops.gpu_snapshot select|hash|prune`) so there is exactly one
+  offline-testable implementation — never re-grow doctl parsing in the shell.
+  Boot-mode facts a run needs later must be captured at launch
+  (booted_from_snapshot rides the status file). Bake/selection failures are
+  ALWAYS degrade-paths (full bootstrap / Slack warning), never run failures.
+  The hash does NOT cover `local_qlib:latest` — after rebuilding it, force
+  `--snapshot bake` (bootstrap only ships docker images to workers that lack
+  one). Kill-switches: `--snapshot bake` / `--no-snapshot`.
 - Global run mutual exclusion (US-020, `ops/run_lock.py`): exactly ONE GPU
   run may exist at a time — gpu_worker.sh keys everything off a single
   worker.env, so a second pipeline's teardown would DESTROY the first run's

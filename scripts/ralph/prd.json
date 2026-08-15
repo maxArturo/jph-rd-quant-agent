@@ -340,8 +340,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New ops/gpu_snapshot.py owns worker_inputs_hash (PINNED_COMMIT + gpu_worker.sh + Makefile venv targets + STRUCTURAL store marker), hash+region selection, prune-keep-2; name rdq-gpu-base-<hash>-<ts>. Pipeline selects per size-plan region at provision (no match = stock image, never stale snapshot) and auto-bakes at teardown before destroy (bake/selection failures degrade, never fail the run); run-start Slack states boot mode. gpu_worker.sh delegates select/hash/prune to the python module (region-aware latest_snapshot_id); --snapshot bake / --no-snapshot overrides documented in both runbooks. E2E vs real doctl: 0 base images, select empty exit 0, prune no-op; hash 07b012d45126."
     },
     {
       "id": "US-023",

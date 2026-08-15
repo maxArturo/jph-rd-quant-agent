@@ -18,7 +18,13 @@ ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
    universe-parity input. Both land in the status file and the run-start
    Slack message. Computed BEFORE provisioning so a broken store costs $0.
 1. provision  — tries each (size, region) in RDQ_GPU_SIZE_PLAN until one has
-   stock (GPU availability fluctuates; a sold-out size 422s otherwise).
+   stock (GPU availability fluctuates; a sold-out size 422s otherwise). The
+   boot image is chosen per region (US-022, ops/gpu_snapshot.py): the newest
+   rdq-gpu-base snapshot whose worker-inputs hash AND region both match boots
+   the worker in ~3 min; no match = the stock AI/ML image + full bootstrap,
+   with a fresh hash-tagged snapshot baked at teardown (superseded images
+   pruned, newest 2 kept). --snapshot bake forces a rebake; --no-snapshot
+   ignores snapshots entirely. A bake failure never fails the run.
 2. bootstrap + tunnel + check.
 3. run --loop_n N --test-end <computed>, then poll the worker (ops.gpu_trace
    over SSH) every --poll seconds; each completed loop is posted to Slack as
@@ -99,7 +105,10 @@ class PipelineOptions:
     universe: str | None = None  # confirmed custom universe (artifacts must be materialized)
     instruction: str | None = None  # research directive, seeded into the loop's plan
     status_file: Path | None = None  # live JSON the bot's check_research_status reads
-    snapshot: bool = False  # bake an rdq-gpu-base image after check (fast future boots)
+    # Base-snapshot mode (US-022): "auto" boots from a hash-matching image and
+    # rebakes at teardown when none matched; "bake" forces a teardown rebake;
+    # "off" (--no-snapshot) ignores snapshots entirely.
+    snapshot_mode: str = "auto"
     no_notion: bool = False  # skip the plain-language Notion write-up
     confirm_days: int = DEFAULT_CONFIRM_DAYS  # trading days reserved past TEST_END (US-008)
     lock_file: Path | None = None  # global run lock (US-020); None = run_lock.DEFAULT_LOCK_FILE
@@ -281,14 +290,45 @@ def worker_sh(
     return result
 
 
-def provision_with_fallback(plan: list[tuple[str, str]], slack: SlackThread) -> tuple[str, str]:
+def snapshot_boot_image(region: str, inputs_hash: str | None) -> str | None:
+    """Id of the newest base snapshot matching hash AND region (US-022), or
+    None = boot the stock image. Selection failures degrade to None — a doctl
+    hiccup must cost a full bootstrap, never the launch."""
+    if inputs_hash is None:
+        return None
+    try:
+        from ops import gpu_snapshot
+
+        image = gpu_snapshot.select_snapshot(gpu_snapshot.list_base_images(), inputs_hash, region)
+    except Exception as exc:  # noqa: BLE001 — degrade to full bootstrap
+        print(f"snapshot selection failed ({exc}) — full bootstrap", file=sys.stderr)
+        return None
+    return image.id if image else None
+
+
+def provision_with_fallback(
+    plan: list[tuple[str, str]], slack: SlackThread, inputs_hash: str | None = None
+) -> tuple[str, str, bool]:
+    """(size, region, booted_from_snapshot). The boot image is chosen PER
+    REGION — snapshots are regional, and a size-plan fallback into another
+    region must never boot an image that isn't there. No hash match = the
+    stock AI/ML image explicitly (never a stale-hash snapshot)."""
+    from ops.gpu_snapshot import DEFAULT_GPU_IMAGE
+
     last_error = ""
     for size, region in plan:
+        image = snapshot_boot_image(region, inputs_hash)
         result = worker_sh(
-            "provision", env={"RDQ_GPU_SIZE": size, "RDQ_GPU_REGION": region}, check=False
+            "provision",
+            env={
+                "RDQ_GPU_SIZE": size,
+                "RDQ_GPU_REGION": region,
+                "RDQ_GPU_IMAGE": image or DEFAULT_GPU_IMAGE,
+            },
+            check=False,
         )
         if result.returncode == 0:
-            return size, region
+            return size, region, image is not None
         last_error = result.stderr.strip()
         if NO_STOCK_MARKER in last_error:
             slack.post(f":hourglass: {size} has no stock in {region} — trying the next size")
@@ -559,9 +599,15 @@ def build_run_args(options: PipelineOptions, dates: RunDates) -> list[str]:
     return run_args
 
 
-def format_run_start(options: PipelineOptions, dates: RunDates, instrument_hash: str) -> str:
+def format_run_start(
+    options: PipelineOptions,
+    dates: RunDates,
+    instrument_hash: str,
+    boot_note: str | None = None,
+) -> str:
     """Run-start Slack message — states the rolling window the operator can't
-    otherwise see (TEST_END no longer lives in any file)."""
+    otherwise see (TEST_END no longer lives in any file) and how the worker
+    booted (snapshot vs full bootstrap, US-022)."""
     return (
         f":microscope: research loop launched — budget {options.loop_n} hypotheses"
         f"{', universe ' + options.universe if options.universe else ''}"
@@ -569,8 +615,63 @@ def format_run_start(options: PipelineOptions, dates: RunDates, instrument_hash:
         f"Test window ends {dates.test_end} (rolls with the store); confirmation window "
         f"{dates.confirm_start} → {dates.store_end} ({dates.confirm_days} trading days "
         f"reserved, unseen by the search) · universe hash `{instrument_hash}`\n"
-        "Per-loop digests will follow in this thread"
+        + (f"{boot_note}\n" if boot_note else "")
+        + "Per-loop digests will follow in this thread"
     )
+
+
+def snapshot_boot_note(
+    options: PipelineOptions, booted_from_snapshot: bool, inputs_hash: str | None
+) -> str:
+    """One run-start line stating the boot mode (US-022)."""
+    if options.reuse_worker:
+        return "Worker: reused existing (snapshot logic not applied)"
+    if booted_from_snapshot:
+        forced = " — forced rebake at teardown" if options.snapshot_mode == "bake" else ""
+        return f"Worker: booted from snapshot (inputs hash `{inputs_hash}`){forced}"
+    if options.snapshot_mode == "off":
+        return "Worker: full bootstrap (base snapshots disabled)"
+    if inputs_hash is None:
+        return "Worker: full bootstrap (worker-inputs hash unavailable — no snapshot this run)"
+    return (
+        f"Worker: full bootstrap (inputs changed — rebaking snapshot `{inputs_hash}` at teardown)"
+    )
+
+
+def rebake_needed(
+    snapshot_mode: str, booted_from_snapshot: bool, bootstrapped: bool, reused: bool = False
+) -> bool:
+    """Bake at teardown when this run paid a full bootstrap under auto mode,
+    or when --snapshot bake forced one. Never for --no-snapshot, a worker
+    that never finished bootstrap, or a reused worker under auto (its boot
+    predates this run — nothing drifted)."""
+    if not bootstrapped or snapshot_mode == "off":
+        return False
+    if snapshot_mode == "bake":
+        return True
+    return not booted_from_snapshot and not reused
+
+
+def bake_base_snapshot(slack: SlackThread, inputs_hash: str) -> bool:
+    """US-022: bake the bootstrapped worker into a hash-tagged base image at
+    teardown (before destroy). NEVER raises — the run's results are already
+    fetched by now; a bake failure just means the next run bootstraps in full
+    and retries (Slack warning only). cmd_snapshot prunes superseded images
+    (keep newest 2) via ops.gpu_snapshot."""
+    slack.post(
+        ":camera: baking a fresh base snapshot before destroy "
+        "(a few minutes; future runs boot from it in ~3 min)"
+    )
+    result = worker_sh("snapshot", env={"RDQ_GPU_SNAPSHOT_HASH": inputs_hash}, check=False)
+    if result.returncode == 0:
+        slack.post(f":white_check_mark: base snapshot baked (inputs hash `{inputs_hash}`)")
+        return True
+    tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
+    slack.post(
+        f":warning: base snapshot bake failed ({tail[0] if tail else 'no output'}) — "
+        "non-fatal; the next run will bootstrap in full and rebake"
+    )
+    return False
 
 
 ROLLBACK_COMMAND = ".venv/bin/python -m ops.rollback_promotion --yes"
@@ -819,38 +920,64 @@ def run_pipeline(options: PipelineOptions) -> int:
     started = time.monotonic()
     trace_dir = None
     exit_code: int | None = None
+    inputs_hash: str | None = None
+    booted_from_snapshot = False
+    bootstrapped = False
     try:
         # US-008: dates + universe hash come first — a stale store or missing
         # instrument list must fail before any droplet starts billing.
         dates = compute_run_dates(confirm_days=options.confirm_days)
         instrument_hash = resolve_instrument_hash(options.universe or "us_liquid")
+        if options.snapshot_mode != "off":
+            try:
+                from ops.gpu_snapshot import worker_inputs_hash
+
+                inputs_hash = worker_inputs_hash()
+            except Exception as exc:  # noqa: BLE001 — no hash = no snapshot use OR bake
+                print(
+                    f"worker-inputs hash failed ({exc}) — snapshots off this run",
+                    file=sys.stderr,
+                )
         status_file.update(
             test_end=dates.test_end,
             confirmation_window=[dates.confirm_start, dates.store_end],
             confirm_days=dates.confirm_days,
             instrument_hash=instrument_hash,
+            snapshot_inputs_hash=inputs_hash,
         )
         if options.reuse_worker:
             slack.post(":recycle: reusing the existing GPU worker")
+            bootstrapped = True
         else:
             status_file.update(stage="provisioning")
-            size, region = provision_with_fallback(options.size_plan, slack)
+            size, region, booted_from_snapshot = provision_with_fallback(
+                options.size_plan, slack, inputs_hash
+            )
+            boot = "delta-sync bootstrap" if booted_from_snapshot else "full bootstrap"
             slack.post(
                 f":rocket: GPU worker up: {size} in {region} "
-                f"(~${PRICE_PER_HOUR.get(size, 0):.2f}/hr) — bootstrapping"
+                f"(~${PRICE_PER_HOUR.get(size, 0):.2f}/hr) — {boot}"
             )
-            status_file.update(stage="bootstrapping", worker=f"{size} in {region}")
+            status_file.update(
+                stage="bootstrapping",
+                worker=f"{size} in {region}",
+                booted_from_snapshot=booted_from_snapshot,
+            )
             worker_sh("bootstrap")
+            bootstrapped = True
         status_file.update(stage="tunnel")
         worker_sh("tunnel")
         worker_sh("check")
-        if options.snapshot:
-            slack.post(":camera: baking the worker into a base snapshot (future boots ~3 min)")
-            status_file.update(stage="snapshot")
-            worker_sh("snapshot")
         worker_sh(*build_run_args(options, dates))
         status_file.update(stage="running")
-        slack.post(format_run_start(options, dates, instrument_hash))
+        slack.post(
+            format_run_start(
+                options,
+                dates,
+                instrument_hash,
+                snapshot_boot_note(options, booted_from_snapshot, inputs_hash),
+            )
+        )
 
         posted: set[int] = set()
         status: dict = {}
@@ -961,6 +1088,16 @@ def run_pipeline(options: PipelineOptions) -> int:
     finally:
         if options.thread_ts:
             finalize_run_row(options.thread_ts, trace_dir, exit_code)
+        # US-022: bake BEFORE destroy — results are already fetched, so a bake
+        # failure is a Slack warning, never a run failure.
+        if (
+            inputs_hash is not None
+            and not options.keep_worker
+            and rebake_needed(
+                options.snapshot_mode, booted_from_snapshot, bootstrapped, options.reuse_worker
+            )
+        ):
+            bake_base_snapshot(slack, inputs_hash)
         if options.keep_worker:
             slack.post(":warning: --keep-worker set — droplet still BILLING; destroy manually")
         else:
@@ -975,7 +1112,9 @@ def run_pipeline(options: PipelineOptions) -> int:
         run_lock.release_lock(lock_path(options), lock_unit)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_options(argv: list[str] | None = None) -> PipelineOptions:
+    """Parse pipeline argv into options — split from main() so tests can
+    assert what a GpuBackend.launch command line actually configures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loop_n", type=int, default=10)
     parser.add_argument("--all_duration", default=None, help="rdagent wall-clock budget, e.g. 12h")
@@ -993,7 +1132,18 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.environ.get("RDQ_CONFIRM_DAYS", DEFAULT_CONFIRM_DAYS)),
         help="trading days reserved past TEST_END as the confirmation window",
     )
-    parser.add_argument("--snapshot", action="store_true", help="bake a base image after check")
+    parser.add_argument(
+        "--snapshot",
+        choices=("auto", "bake"),
+        default="auto",
+        help="base-snapshot mode: auto = boot from a worker-inputs-hash-matching image and "
+        "rebake at teardown when none matched; bake = force a teardown rebake",
+    )
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="ignore base snapshots entirely (full bootstrap, no bake)",
+    )
     parser.add_argument("--no-notion", action="store_true", help="skip the Notion write-up")
     parser.add_argument("--keep-worker", action="store_true")
     parser.add_argument("--reuse-worker", action="store_true", help="skip provision/bootstrap")
@@ -1004,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated SIZE:REGION fallback order",
     )
     args = parser.parse_args(argv)
-    options = PipelineOptions(
+    return PipelineOptions(
         loop_n=args.loop_n,
         all_duration=args.all_duration,
         poll_seconds=args.poll_seconds,
@@ -1017,11 +1167,14 @@ def main(argv: list[str] | None = None) -> int:
         universe=args.universe,
         instruction=args.instruction,
         status_file=args.status_file,
-        snapshot=args.snapshot,
+        snapshot_mode="off" if args.no_snapshot else args.snapshot,
         no_notion=args.no_notion,
         confirm_days=args.confirm_days,
     )
-    return run_pipeline(options)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run_pipeline(build_options(argv))
 
 
 if __name__ == "__main__":

@@ -72,6 +72,20 @@ class TestGpuBackend:
         expected = f"--setenv=PATH={Path.home() / '.local/bin'}:/usr/local/bin:/usr/bin:/bin"
         assert expected in runner.calls[0]
 
+    def test_launch_args_get_snapshot_auto_mode(self, tmp_path: Path) -> None:
+        """US-022: Slack-launched runs get base-snapshot auto-use by default —
+        the exact argv launch() builds must parse to snapshot_mode 'auto'."""
+        from ops.gpu_pipeline import build_options
+
+        runner = RecordingRunner()
+        backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)
+        backend.launch("1.2", loop_n=3)
+        cmd = runner.calls[0]
+        pipeline_argv = cmd[cmd.index("ops.gpu_pipeline") + 1 :]
+        options = build_options(pipeline_argv)
+        assert options.snapshot_mode == "auto"
+        assert options.loop_n == 3
+
     def test_launch_omits_default_universe(self, tmp_path: Path) -> None:
         runner = RecordingRunner()
         backend = GpuBackend(status_file=tmp_path / "s.json", runner=runner)

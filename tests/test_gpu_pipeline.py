@@ -14,7 +14,9 @@ from ops.gpu_pipeline import (
     SlackThread,
     StatusFile,
     acquire_pipeline_lock,
+    bake_base_snapshot,
     build_notion_context,
+    build_options,
     build_run_args,
     compute_run_dates,
     format_final_summary,
@@ -23,12 +25,17 @@ from ops.gpu_pipeline import (
     gate_and_promote,
     incumbent_report,
     parse_size_plan,
+    provision_with_fallback,
+    rebake_needed,
     reportable,
     resolve_instrument_hash,
     run_pipeline,
     run_status,
+    snapshot_boot_image,
+    snapshot_boot_note,
     worker_sh,
 )
+from ops.gpu_snapshot import DEFAULT_GPU_IMAGE
 from ops.promotion_gate import hash_instruments
 from orchestrator.state import StateStore
 from tests.test_promote_fetched import make_store as make_instrument_store
@@ -726,3 +733,136 @@ class TestPipelineLock:
         assert run_pipeline(options) == 1
         assert run_lock.read_lock(tmp_path / "run.lock") is None  # released in finally
         assert json.loads((tmp_path / "status.json").read_text())["stage"] == "failed"
+
+
+class TestSnapshotBootFlow:
+    """US-022: hash-matched snapshot boot, rebake-on-drift, bake at teardown."""
+
+    HASH = "f" * 12
+
+    def test_provision_selects_hash_matching_snapshot_per_region(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        calls: list[tuple[tuple[str, ...], dict]] = []
+
+        def fake_worker_sh(*args: str, env: dict | None = None, check: bool = True):
+            calls.append((args, dict(env or {})))
+            if env and env["RDQ_GPU_REGION"] == "tor1":
+                return subprocess.CompletedProcess(
+                    list(args), 1, stdout="", stderr="size not currently available in tor1"
+                )
+            return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+        def fake_select(region: str, inputs_hash: str | None) -> str | None:
+            assert inputs_hash == self.HASH
+            return "777" if region == "nyc2" else None
+
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", fake_worker_sh)
+        monkeypatch.setattr("ops.gpu_pipeline.snapshot_boot_image", fake_select)
+        slack = RecordingSlack()
+        size, region, booted = provision_with_fallback(
+            [("gpu-a", "tor1"), ("gpu-a", "nyc2")], slack, self.HASH
+        )
+        assert (size, region, booted) == ("gpu-a", "nyc2", True)
+        # tor1 had no hash match -> explicit stock image (never a stale snapshot);
+        # nyc2 matched -> the snapshot id.
+        assert calls[0][1]["RDQ_GPU_IMAGE"] == DEFAULT_GPU_IMAGE
+        assert calls[1][1]["RDQ_GPU_IMAGE"] == "777"
+
+    def test_provision_without_hash_uses_stock_image(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        envs: list[dict] = []
+
+        def fake_worker_sh(*args: str, env: dict | None = None, check: bool = True):
+            envs.append(dict(env or {}))
+            return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", fake_worker_sh)
+        _, _, booted = provision_with_fallback([("gpu-a", "tor1")], RecordingSlack(), None)
+        assert booted is False
+        assert envs[0]["RDQ_GPU_IMAGE"] == DEFAULT_GPU_IMAGE
+
+    def test_selection_failure_degrades_to_full_bootstrap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken_list(runner=None):  # noqa: ANN001
+            raise RuntimeError("doctl down")
+
+        monkeypatch.setattr("ops.gpu_snapshot.list_base_images", broken_list)
+        assert snapshot_boot_image("tor1", self.HASH) is None
+
+    def test_rebake_decision_matrix(self) -> None:
+        # Full bootstrap under auto -> rebake; snapshot boot -> no rebake.
+        assert rebake_needed("auto", False, True) is True
+        assert rebake_needed("auto", True, True) is False
+        # bake forces; off never bakes; unbootstrapped never bakes.
+        assert rebake_needed("bake", True, True) is True
+        assert rebake_needed("off", False, True) is False
+        assert rebake_needed("auto", False, False) is False
+        # A reused worker's boot predates this run — auto never rebakes it.
+        assert rebake_needed("auto", False, True, reused=True) is False
+        assert rebake_needed("bake", False, True, reused=True) is True
+
+    def test_boot_note_variants(self) -> None:
+        booted = snapshot_boot_note(PipelineOptions(), True, self.HASH)
+        assert "booted from snapshot" in booted and self.HASH in booted
+        pending = snapshot_boot_note(PipelineOptions(), False, self.HASH)
+        assert "full bootstrap" in pending and "rebaking" in pending
+        off = snapshot_boot_note(PipelineOptions(snapshot_mode="off"), False, None)
+        assert "disabled" in off
+        no_hash = snapshot_boot_note(PipelineOptions(), False, None)
+        assert "hash unavailable" in no_hash
+        reused = snapshot_boot_note(PipelineOptions(reuse_worker=True), False, None)
+        assert "reused" in reused
+        forced = snapshot_boot_note(PipelineOptions(snapshot_mode="bake"), True, self.HASH)
+        assert "forced rebake" in forced
+
+    def test_run_start_message_states_boot_mode(self) -> None:
+        dates = RunDates(
+            test_end="2026-06-12",
+            confirm_start="2026-06-15",
+            store_end="2026-08-13",
+            confirm_days=42,
+        )
+        options = PipelineOptions()
+        note = snapshot_boot_note(options, True, self.HASH)
+        text = format_run_start(options, dates, "abcd1234", note)
+        assert "booted from snapshot" in text
+        assert "Per-loop digests" in text
+
+    def test_bake_success_ships_hash_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        envs: list[dict] = []
+
+        def fake_worker_sh(*args: str, env: dict | None = None, check: bool = True):
+            envs.append(dict(env or {}))
+            assert args == ("snapshot",)
+            return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", fake_worker_sh)
+        slack = RecordingSlack()
+        assert bake_base_snapshot(slack, self.HASH) is True
+        assert envs[0]["RDQ_GPU_SNAPSHOT_HASH"] == self.HASH
+        assert any("baked" in post for post in slack.posts)
+
+    def test_bake_failure_warns_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        def fake_worker_sh(*args: str, env: dict | None = None, check: bool = True):
+            return subprocess.CompletedProcess(list(args), 1, stdout="", stderr="power-off hung")
+
+        monkeypatch.setattr("ops.gpu_pipeline.worker_sh", fake_worker_sh)
+        slack = RecordingSlack()
+        assert bake_base_snapshot(slack, self.HASH) is False
+        assert any("bake failed" in post and "power-off hung" in post for post in slack.posts)
+
+    def test_build_options_snapshot_modes(self) -> None:
+        assert build_options(["--loop_n", "1"]).snapshot_mode == "auto"
+        assert build_options(["--snapshot", "bake"]).snapshot_mode == "bake"
+        assert build_options(["--no-snapshot"]).snapshot_mode == "off"

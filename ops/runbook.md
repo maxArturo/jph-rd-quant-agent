@@ -266,3 +266,16 @@ tunneled through the OneCLI proxy, which drops long-lived connections.
 deafness recurs, verify that override is still in place before hunting
 elsewhere. Messages sent while the bot was deaf are **not replayed** —
 resend them.
+
+### GPU base snapshots (US-022)
+
+Research runs boot from the newest `rdq-gpu-base-<hash>-<ts>` image whose
+worker-inputs hash **and** region match (selection/prune logic:
+`ops/gpu_snapshot.py`; full mechanics in ops/gpu_worker/README.md). When
+inputs drift, the run full-bootstraps and rebakes automatically at teardown —
+no operator action. Manual overrides on `python -m ops.gpu_pipeline`:
+`--snapshot bake` forces a rebake (use after rebuilding `local_qlib:latest`,
+which the hash does not cover); `--no-snapshot` ignores snapshots entirely.
+Inspect state with `.venv/bin/python -m ops.gpu_snapshot hash` and
+`... select --region tor1 [--hash <hash>]`; a bake failure is a Slack
+warning only — the next run bootstraps in full and retries.
