@@ -89,8 +89,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "python -m ops.rollback_promotion (dry-run default, --to, --keep-snapshot for pinned-universe snapshots); re-promotes from the history entry's RECORDED config; snapshot before pointer flip; sweep protects last-3 history workspaces (REASON_RECENT_PROMOTION). E2E-verified on a live-DB copy."
     },
     {
       "id": "US-007",
