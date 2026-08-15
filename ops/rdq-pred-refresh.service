@@ -27,6 +27,8 @@
 # Logs:     journalctl --user -u rdq-pred-refresh.service
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) morning prediction refresh (promoted workspace, exact-weights re-predict)
 After=network-online.target rdq-data-refresh.service
 Wants=network-online.target

@@ -13,6 +13,8 @@
 # Logs:     journalctl --user -u rdq-orchestrator.service -f
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) Slack orchestrator (Socket Mode bot via rdq-orchestrator OneCLI identity)
 After=network-online.target
 Wants=network-online.target

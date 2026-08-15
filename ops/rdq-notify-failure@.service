@@ -1,0 +1,28 @@
+# RD-Agent(Q) unit-failure Slack notifier — templated systemd user unit
+# (US-018).
+#
+# Every rdq-*.service carries OnFailure=rdq-notify-failure@%n.service, so a
+# start-failure or crash instantiates this template with the failed unit's
+# full name as the instance (%i) and posts "unit <name> failed" plus the
+# last journal lines to the ops Slack channel. Slack goes direct with the
+# repo .env token (gpu_watchdog pattern): Slack traffic is never routed
+# through the OneCLI proxy (docs/decisions.md 2026-07-08), so no onecli
+# wrapper and no NO_PROXY dance are needed here.
+#
+# NO OnFailure line on this template, on purpose: a notifier that cannot
+# notify must die quietly in the journal, never recurse. No [Install]
+# section either — it is only ever activated via OnFailure=.
+#
+# Install:  ops/install_services.sh
+# Test:     systemd-run --user --unit=rdq-notify-test -p Type=oneshot \
+#             -p OnFailure=rdq-notify-failure@rdq-notify-test.service.service \
+#             /bin/false
+# Logs:     journalctl --user -u 'rdq-notify-failure@*'
+
+[Unit]
+Description=RD-Agent(Q) failure notifier for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+ExecStart=%h/rd-agent-q/.venv/bin/python -m ops.notify_failure %i

@@ -14,6 +14,8 @@
 # Logs:     journalctl --user -u rdq-data-refresh.service
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) incremental Qlib store refresh (FMP via rdq-exec-paper OneCLI identity)
 After=network-online.target
 Wants=network-online.target

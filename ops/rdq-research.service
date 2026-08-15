@@ -19,6 +19,8 @@
 # Logs:     journalctl --user -u rdq-research.service -f
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) research control plane (rdagent server_ui on 127.0.0.1:19899 via rdq-research OneCLI identity)
 After=network-online.target
 Wants=network-online.target

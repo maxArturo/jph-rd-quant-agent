@@ -10,6 +10,8 @@
 # Logs:     journalctl --user -u rdq-gpu-watchdog.service -n 50
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) orphaned GPU worker watchdog (fetch+destroy leaked burst droplets)
 
 [Service]

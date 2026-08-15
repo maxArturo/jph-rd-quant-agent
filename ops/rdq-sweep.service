@@ -19,6 +19,8 @@
 # Logs:     journalctl --user -u rdq-sweep.service
 
 [Unit]
+# Crash or start-failure posts to Slack via the templated notifier (US-018).
+OnFailure=rdq-notify-failure@%n.service
 Description=RD-Agent(Q) weekly workspace retention sweep (protects promoted + SOTA workspaces)
 
 [Service]

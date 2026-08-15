@@ -25,6 +25,7 @@ GPU_WATCHDOG_UNIT = REPO_ROOT / "ops" / "rdq-gpu-watchdog.service"
 GPU_WATCHDOG_TIMER = REPO_ROOT / "ops" / "rdq-gpu-watchdog.timer"
 DIVERGENCE_UNIT = REPO_ROOT / "ops" / "rdq-divergence.service"
 DIVERGENCE_TIMER = REPO_ROOT / "ops" / "rdq-divergence.timer"
+NOTIFY_TEMPLATE = REPO_ROOT / "ops" / "rdq-notify-failure@.service"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
 
@@ -436,6 +437,47 @@ class TestDivergenceUnits:
     def test_systemd_analyze_verify(self) -> None:
         _systemd_analyze_verify(DIVERGENCE_UNIT)
         _systemd_analyze_verify(DIVERGENCE_TIMER)
+
+
+class TestNotifyFailureUnits:
+    """US-018: templated OnFailure Slack notifier wired into every rdq service."""
+
+    def test_template_exists(self) -> None:
+        assert NOTIFY_TEMPLATE.is_file()
+
+    def test_runs_notify_failure_module_on_the_instance(self) -> None:
+        text = NOTIFY_TEMPLATE.read_text()
+        assert "Type=oneshot" in text
+        assert "python -m ops.notify_failure %i" in text
+
+    def test_template_never_recurses_or_installs(self) -> None:
+        """A notifier that cannot notify must not re-trigger itself; it is
+        only ever activated via OnFailure=, never enabled."""
+        unit_lines = [
+            line
+            for line in NOTIFY_TEMPLATE.read_text().splitlines()
+            if not line.startswith("#")
+        ]
+        assert not any(line.startswith("OnFailure=") for line in unit_lines)
+        assert "[Install]" not in unit_lines
+
+    def test_every_rdq_service_has_onfailure(self) -> None:
+        services = sorted((REPO_ROOT / "ops").glob("rdq-*.service"))
+        real_services = [unit for unit in services if "@" not in unit.name]
+        assert len(real_services) >= 8, [unit.name for unit in services]
+        for unit in real_services:
+            assert re.search(
+                r"^OnFailure=rdq-notify-failure@%n\.service$", unit.read_text(), re.MULTILINE
+            ), f"{unit.name} missing OnFailure=rdq-notify-failure@%n.service"
+
+    def test_installed_by_install_script(self) -> None:
+        assert "rdq-notify-failure@.service" in INSTALL.read_text()
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(NOTIFY_TEMPLATE)
 
 
 class TestInstallScript:

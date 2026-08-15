@@ -1,7 +1,7 @@
 {
   "project": "rd-agent-q",
   "branchName": "ralph/loop-hardening",
-  "description": "Loop Hardening (tasks/prd-loop-hardening.md) — auto-promotion gate with enforced parity and confirmation window, run memory via Notion run_summary JSON, rolling TEST_END, live-vs-backtest divergence tracker with auto-halt, PIT universe filter, mechanical ops fixes, and full server_ui removal.",
+  "description": "Loop Hardening (tasks/prd-loop-hardening.md) \u2014 auto-promotion gate with enforced parity and confirmation window, run memory via Notion run_summary JSON, rolling TEST_END, live-vs-backtest divergence tracker with auto-halt, PIT universe filter, mechanical ops fixes, and full server_ui removal.",
   "userStories": [
     {
       "id": "US-001",
@@ -20,7 +20,7 @@
     {
       "id": "US-002",
       "title": "Fix GPU billing watchdog PATH so doctl is found",
-      "description": "As an operator, I want the hourly watchdog to actually run doctl so an orphaned GPU droplet cannot bill indefinitely — it has crashed with FileNotFoundError on every tick that had work to do. [PRD US-012]",
+      "description": "As an operator, I want the hourly watchdog to actually run doctl so an orphaned GPU droplet cannot bill indefinitely \u2014 it has crashed with FileNotFoundError on every tick that had work to do. [PRD US-012]",
       "acceptanceCriteria": [
         "ops/rdq-gpu-watchdog.service sets Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin (matching the injection orchestrator/gpu_backend.py already does for pipeline units)",
         "ops/gpu_watchdog.py posts a Slack notice and exits non-zero when doctl is not on PATH, instead of crashing before any notify is reachable",
@@ -44,7 +44,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Both env files chmod 600 on-box; health.sh section 4 audits modes (600-or-stricter, RDQ_ENV_FILES test override); on-box run shows both PASS. Pre-existing unrelated finding: tailscale serve :8443 -> jph-master-tracker :3200 not in allowlist — operator decision left open."
+      "notes": "Both env files chmod 600 on-box; health.sh section 4 audits modes (600-or-stricter, RDQ_ENV_FILES test override); on-box run shows both PASS. Pre-existing unrelated finding: tailscale serve :8443 -> jph-master-tracker :3200 not in allowlist \u2014 operator decision left open."
     },
     {
       "id": "US-004",
@@ -107,7 +107,7 @@
       ],
       "priority": 7,
       "passes": true,
-      "notes": "ops/promotion_gate.py: pure evaluate_gate (parity: window/market/instrument-hash/topk-n_drop/costs; criteria: IR strict > incumbent×1.05, |MDD| <= incumbent×1.25 at-limit-passes, IC strict > min_ic; allow_first waives comparison not IC) + load_metric_bundle (degrades field-by-field) + hash_instruments (canonical universe hash for US-008) + promotion_gate: config section. load_cost_params added to execution/signal.py. E2E-verified on the real promoted workspace pair (honest FAIL: old e05ad9b4 beats IR bar, breaches MDD tolerance)."
+      "notes": "ops/promotion_gate.py: pure evaluate_gate (parity: window/market/instrument-hash/topk-n_drop/costs; criteria: IR strict > incumbent\u00d71.05, |MDD| <= incumbent\u00d71.25 at-limit-passes, IC strict > min_ic; allow_first waives comparison not IC) + load_metric_bundle (degrades field-by-field) + hash_instruments (canonical universe hash for US-008) + promotion_gate: config section. load_cost_params added to execution/signal.py. E2E-verified on the real promoted workspace pair (honest FAIL: old e05ad9b4 beats IR bar, breaches MDD tolerance)."
     },
     {
       "id": "US-008",
@@ -123,7 +123,7 @@
       ],
       "priority": 8,
       "passes": true,
-      "notes": "gpu_pipeline computes RDQ_TEST_END = store end − confirm_days (42, --confirm-days/RDQ_CONFIRM_DAYS) trading days BEFORE provisioning; status file records test_end/confirmation_window/confirm_days/instrument_hash (hash_instruments over the store list); run-start Slack states the window+hash; gpu_worker.sh run --test-end exports RDQ_TEST_END; run_us_quant.sh check_test_end_lag fails both modes >90 days behind store end. Live-verified: test_end 2026-06-12, window 2026-06-15→2026-08-13, hash 6fbafedc13ed9a52."
+      "notes": "gpu_pipeline computes RDQ_TEST_END = store end \u2212 confirm_days (42, --confirm-days/RDQ_CONFIRM_DAYS) trading days BEFORE provisioning; status file records test_end/confirmation_window/confirm_days/instrument_hash (hash_instruments over the store list); run-start Slack states the window+hash; gpu_worker.sh run --test-end exports RDQ_TEST_END; run_us_quant.sh check_test_end_lag fails both modes >90 days behind store end. Live-verified: test_end 2026-06-12, window 2026-06-15\u21922026-08-13, hash 6fbafedc13ed9a52."
     },
     {
       "id": "US-009",
@@ -138,7 +138,7 @@
       ],
       "priority": 9,
       "passes": true,
-      "notes": "ops/confirm_window.py: confirmation_returns(ws, start, end) -> WindowReturns (net+gross daily returns, evaluated window, repredicted flag) + annualized_ir. Docker re-predict (US-049 machinery, test_end=window end) skipped when the newest pred already covers the needed signal days; every gap raises ConfirmWindowError. E2E: incumbent read-only + forced real-docker on e05ad9b4 (reproduces the backtested pred EXACTLY, spearman 1.0). Verification also exposed a PRE-EXISTING live incident: c9587797's snapshot re-predict is degenerate (parquet-based snapshot conf; 419/581 scores ~0) — see progress log + Slack alert 2026-08-15."
+      "notes": "ops/confirm_window.py: confirmation_returns(ws, start, end) -> WindowReturns (net+gross daily returns, evaluated window, repredicted flag) + annualized_ir. Docker re-predict (US-049 machinery, test_end=window end) skipped when the newest pred already covers the needed signal days; every gap raises ConfirmWindowError. E2E: incumbent read-only + forced real-docker on e05ad9b4 (reproduces the backtested pred EXACTLY, spearman 1.0). Verification also exposed a PRE-EXISTING live incident: c9587797's snapshot re-predict is degenerate (parquet-based snapshot conf; 419/581 scores ~0) \u2014 see progress log + Slack alert 2026-08-15."
     },
     {
       "id": "US-010",
@@ -146,7 +146,7 @@
       "description": "As an operator, I want promotion to require out-of-search-sample evidence: the candidate must beat the incumbent on the reserved confirmation window. [PRD US-008 part 2]",
       "acceptanceCriteria": [
         "Gate evaluates both candidate and incumbent on the confirmation window via the US-009 helper; pass additionally requires candidate confirmation-window IR strictly greater than incumbent's (no margin on this leg; configurable under promotion_gate:)",
-        "Technical failure of confirmation evaluation (re-predict error) returns pass=False with reason 'confirmation_unavailable' — never silently skipped",
+        "Technical failure of confirmation evaluation (re-predict error) returns pass=False with reason 'confirmation_unavailable' \u2014 never silently skipped",
         "Confirmation results for both windows and both strategies appear in the Slack verdict block",
         "Tests cover: confirmation pass, confirmation fail, technical failure blocks promotion",
         "Typecheck passes (make check: ruff + pyright + pytest)"
@@ -170,7 +170,7 @@
       ],
       "priority": 11,
       "passes": true,
-      "notes": "gate_and_promote stage (never raises) wired last in run_pipeline; promotes via new promote_fetched.promote_workspace (snapshot BEFORE pointer flip — failure blocks promotion with nothing written), source=auto_gate + verdict in promotion_history; auto_promote kill-switch added to GateConfig/config.yaml; incumbent parity hash from its recorded universe_tickers. 6 scenario tests; E2E on a live-DB copy: honest FAIL (MDD + confirmation_unavailable on the real c9587797 incident), nothing promoted."
+      "notes": "gate_and_promote stage (never raises) wired last in run_pipeline; promotes via new promote_fetched.promote_workspace (snapshot BEFORE pointer flip \u2014 failure blocks promotion with nothing written), source=auto_gate + verdict in promotion_history; auto_promote kill-switch added to GateConfig/config.yaml; incumbent parity hash from its recorded universe_tickers. 6 scenario tests; E2E on a live-DB copy: honest FAIL (MDD + confirmation_unavailable on the real c9587797 incident), nothing promoted."
     },
     {
       "id": "US-012",
@@ -248,7 +248,7 @@
       ],
       "priority": 16,
       "passes": true,
-      "notes": "execution/divergence.py: pure evaluate_divergence (haircut mu_adj, trailing-window z, drawdown vs |MDD|×tolerance, strict-< z thresholds / at-limit-passes drawdown) + loud load_backtest_stats + divergence: config section. Halt writes the breaker halt file (never overwrites an operator note); warmup/nothing-promoted silent. E2E on real account: warmup live, ok z=0.14 dd 2.83%/20.15% on a backdated DB copy, forced halt writes file + rotating_light."
+      "notes": "execution/divergence.py: pure evaluate_divergence (haircut mu_adj, trailing-window z, drawdown vs |MDD|\u00d7tolerance, strict-< z thresholds / at-limit-passes drawdown) + loud load_backtest_stats + divergence: config section. Halt writes the breaker halt file (never overwrites an operator note); warmup/nothing-promoted silent. E2E on real account: warmup live, ok z=0.14 dd 2.83%/20.15% on a backdated DB copy, forced halt writes file + rotating_light."
     },
     {
       "id": "US-017",
@@ -277,8 +277,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "rdq-notify-failure@.service template (python -m ops.notify_failure %i; no OnFailure/[Install] on purpose) + OnFailure=rdq-notify-failure@%n.service on all 8 rdq services; in install UNITS. Verified on-box: transient /bin/false unit with OnFailure produced the real Slack post (journal tail included), then cleaned up."
     },
     {
       "id": "US-019",
@@ -302,7 +302,7 @@
       "description": "As an operator, I want a second research run refused while one is active so it can never trigger destroy of the first run's droplet. [PRD US-013]",
       "acceptanceCriteria": [
         "A global lock (e.g. ~/rdq-runs/gpu_worker/run.lock containing thread_ts + unit name) is acquired by ops/gpu_pipeline.py at start and released in its finally block",
-        "ConversationCore.start_research checks the global lock (not just this thread's run) and refuses with a message naming the active run's thread — the false 'queued behind it' text is removed",
+        "ConversationCore.start_research checks the global lock (not just this thread's run) and refuses with a message naming the active run's thread \u2014 the false 'queued behind it' text is removed",
         "stop_run only acts when the requesting thread owns the lock; otherwise refuses naming the owning thread",
         "A stale lock (owning unit no longer active) is broken automatically with a Slack note",
         "Tests cover: acquire/refuse/release, stale-lock break, stop-run ownership",

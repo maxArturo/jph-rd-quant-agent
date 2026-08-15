@@ -24,6 +24,7 @@ UNITS=(
   rdq-gpu-watchdog.timer
   rdq-divergence.service
   rdq-divergence.timer
+  rdq-notify-failure@.service
 )
 
 mkdir -p "$UNIT_DIR"

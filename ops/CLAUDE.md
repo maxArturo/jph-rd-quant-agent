@@ -243,6 +243,17 @@
 - From non-login shells (agents, cron) set
   `XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user` /
   `systemd-analyze --user verify`, or they can't reach the user manager.
+- Failure notification (US-018): every `rdq-*.service` carries
+  `OnFailure=rdq-notify-failure@%n.service` — a NEW service must add the line
+  (tests/test_services.py globs ops/rdq-*.service and asserts it). The
+  template (`rdq-notify-failure@.service` → `python -m ops.notify_failure %i`)
+  posts "unit <name> failed" + journal tail to Slack; it deliberately has NO
+  OnFailure of its own (no recursion) and no [Install]. Template units with
+  `@` are invisible to the health.sh/install cross-check regexes
+  (`rdq-[a-z-]+\.(service|timer)`), so they don't need a health.sh list entry.
+  Verify one on-box with `systemd-run --user --unit=<name> -p Type=oneshot
+  -p OnFailure='rdq-notify-failure@<name>.service.service' /bin/false`, then
+  `systemctl --user reset-failed <name>.service`.
 - `rdq-research.service` duplicates the US run environment from
   `ops/run_us_quant.sh` `wire_env` (dates under all three QLIB_* prefixes,
   factor-source folders, APP_TPL, hook-class paths) — fin_quant runs spawned
