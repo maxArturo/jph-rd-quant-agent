@@ -19,6 +19,7 @@ import pytest
 
 from ops.sweep import (
     REASON_PROMOTED,
+    REASON_RECENT_PROMOTION,
     REASON_SOTA,
     SweepError,
     build_plan,
@@ -26,6 +27,7 @@ from ops.sweep import (
     main,
     newest_mtime,
     promoted_workspace,
+    recent_promotion_workspaces,
     sota_workspaces,
 )
 from orchestrator.state import StateStore
@@ -156,7 +158,54 @@ class TestPromotedWorkspace:
             promoted_workspace(db)
 
 
+class TestRecentPromotionWorkspaces:
+    def test_missing_db_means_no_history(self, tmp_path: Path) -> None:
+        assert recent_promotion_workspaces(tmp_path / "absent.sqlite") == set()
+        assert not (tmp_path / "absent.sqlite").exists()
+
+    def test_reads_the_newest_limit_entries(self, tmp_path: Path) -> None:
+        db = tmp_path / "state.sqlite"
+        store = StateStore(db)
+        workspaces = [tmp_path / f"ws_{i}" for i in range(4)]
+        for workspace in workspaces:
+            workspace.mkdir()
+            store.set_promoted_strategy(str(workspace), {"topk": 5})
+
+        recent = recent_promotion_workspaces(db)
+        assert recent == {w.resolve() for w in workspaces[1:]}  # last 3, oldest dropped
+
+    def test_unreadable_db_raises(self, tmp_path: Path) -> None:
+        db = tmp_path / "state.sqlite"
+        db.write_bytes(b"garbage, not sqlite")
+        with pytest.raises(SweepError, match="refusing to sweep"):
+            recent_promotion_workspaces(db)
+
+
 class TestBuildPlan:
+    def test_last_three_promotion_history_workspaces_protected(
+        self, run_root: Path, tmp_path: Path
+    ) -> None:
+        """AC US-006: rollback targets (last 3 history entries) survive the
+        sweep however old; older history entries do not."""
+        ancient, previous2, previous1, current = (
+            make_workspace(run_root, name, OLD)
+            for name in ("ws_ancient", "ws_prev2", "ws_prev1", "ws_current")
+        )
+        db = tmp_path / "state.sqlite"
+        store = StateStore(db)
+        for workspace in (ancient, previous2, previous1, current):
+            store.set_promoted_strategy(str(workspace), {"topk": 5})
+
+        plan = build_plan(run_root, state_db=db, now=NOW)
+
+        assert plan.protected == {
+            current: REASON_PROMOTED,
+            previous1: REASON_RECENT_PROMOTION,
+            previous2: REASON_RECENT_PROMOTION,
+        }
+        assert [a.path for a in plan.delete] == [ancient]
+
+
     def test_old_unprotected_deleted_sota_and_promoted_never(
         self, run_root: Path, tmp_path: Path
     ) -> None:

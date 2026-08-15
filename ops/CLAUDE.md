@@ -66,6 +66,16 @@
   (snapshot_pred_refresh + promoted_strategy row, conf-derived market per
   US-023) minus the Notion writes (thread-keyed; manual reminder printed).
   Never creates state.sqlite; dry-run by default.
+- `python -m ops.rollback_promotion [--to <ws>] [--yes]` (US-006) re-promotes
+  a prior promotion_history entry using that entry's RECORDED config (never
+  re-derives from the workspace conf) and appends a new history row (source
+  'cli', gate_verdict carries the rollback marker). Snapshot re-run happens
+  BEFORE the pointer flip so a failure leaves the current promotion intact;
+  `--keep-snapshot` preserves an operator-pinned conf_pred_refresh.yaml (a
+  frozen *_promoted_* universe would otherwise be regenerated away). Rollback
+  targets stay restorable because sweep.py protects the workspaces of the
+  last `RECENT_PROMOTIONS_KEPT` (3) history entries — if you raise/lower
+  that, remember it bounds how far back rollback can reach on disk.
 - `rdq-gpu-watchdog.{service,timer}` (hourly oneshot, in install_services
   UNITS + health.sh lists): warns on idle workers, fetch+destroys workers
   older than --max-hours 24. Stateless per tick; deletes stale worker.env

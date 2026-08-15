@@ -6,7 +6,9 @@ workspaces). This sweep deletes the ones nothing can ever need again:
 
 - workspace dirs older than ``--days`` that are neither the PROMOTED
   strategy's workspace (the ``promoted_strategy`` row in the orchestrator's
-  SQLite — what the nightly rebalancer trades) nor a SOTA workspace,
+  SQLite — what the nightly rebalancer trades) nor one of the last
+  ``RECENT_PROMOTIONS_KEPT`` promotion_history workspaces (US-006 rollback
+  targets) nor a SOTA workspace,
 - mlflow run dirs (``<workspace>/mlruns/<exp>/<run>``) older than ``--days``
   inside surviving unprotected workspaces.
 
@@ -49,7 +51,13 @@ _LOOP_DIR_RE = re.compile(r"^Loop_\d+$")
 
 # Protection reasons (report labels; tests assert on them).
 REASON_PROMOTED = "promoted"
+REASON_RECENT_PROMOTION = "recent promotion"
 REASON_SOTA = "SOTA"
+
+# How many promotion_history entries keep their workspaces sweep-proof
+# (US-006: ops.rollback_promotion can only restore a workspace that still
+# exists on disk).
+RECENT_PROMOTIONS_KEPT = 3
 
 
 class SweepError(RuntimeError):
@@ -107,6 +115,28 @@ def promoted_workspace(db_path: Path = DEFAULT_DB_PATH) -> Path | None:
     if promoted is None:
         return None
     return Path(promoted.workspace_path).expanduser().resolve()
+
+
+def recent_promotion_workspaces(
+    db_path: Path = DEFAULT_DB_PATH, limit: int = RECENT_PROMOTIONS_KEPT
+) -> set[Path]:
+    """Workspaces of the most recent ``limit`` promotion_history entries.
+
+    These stay sweep-proof so ops.rollback_promotion always has somewhere to
+    roll back to. Same guard rails as promoted_workspace: never create the
+    DB, and a present-but-unreadable DB aborts the sweep.
+    """
+    db_path = Path(db_path).expanduser()
+    if not db_path.is_file():
+        return set()
+    try:
+        history = StateStore(db_path).list_promotion_history(limit=limit)
+    except Exception as exc:
+        raise SweepError(
+            f"cannot read promotion history from {db_path} ({exc}); "
+            "refusing to sweep without it"
+        ) from exc
+    return {Path(entry.workspace_path).expanduser().resolve() for entry in history}
 
 
 def _loop_dir_of(pkl_file: Path) -> Path | None:
@@ -222,6 +252,8 @@ def build_plan(
     pinned = promoted_workspace(state_db)
     if pinned is not None:
         protected_paths.add(pinned)
+    recent_promotions = recent_promotion_workspaces(state_db)
+    protected_paths |= recent_promotions
     protected_paths |= sota_workspaces(discover_trace_roots(run_root))
 
     delete: list[SweepAction] = []
@@ -233,10 +265,14 @@ def build_plan(
                 continue
             resolved = candidate.resolve()
             if _is_protected(resolved, protected_paths):
-                promoted_here = pinned is not None and (
+                if pinned is not None and (
                     pinned == resolved or pinned.is_relative_to(resolved)
-                )
-                protected[candidate] = REASON_PROMOTED if promoted_here else REASON_SOTA
+                ):
+                    protected[candidate] = REASON_PROMOTED
+                elif _is_protected(resolved, recent_promotions):
+                    protected[candidate] = REASON_RECENT_PROMOTION
+                else:
+                    protected[candidate] = REASON_SOTA
                 continue
             mtime = newest_mtime(candidate)
             if mtime < cutoff:
