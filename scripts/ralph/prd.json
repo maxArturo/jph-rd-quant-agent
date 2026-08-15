@@ -262,8 +262,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "rdq-divergence.{service,timer}: Mon..Fri 16:30 America/New_York, After=rdq-rebalance.service, Persistent=true (safety monitor catches up on boot), runs execution.divergence as rdq-exec-paper with NO_PROXY=slack.com. In install UNITS + health.sh TIMERS/ONESHOTS. On-box: linked, timer active (next fire Mon 16:30 ET), manual start exit 0 with honest warmup in journal."
     },
     {
       "id": "US-018",

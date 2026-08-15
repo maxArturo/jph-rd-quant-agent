@@ -1,0 +1,24 @@
+# Weekday post-close trigger for rdq-divergence.service (US-017).
+#
+# 16:30 America/New_York — half an hour after the close, so Alpaca's
+# portfolio history already includes today's session when the tracker
+# computes realized returns. Explicitly timezone-qualified so US DST shifts
+# never drift the run relative to the 16:00 ET close. After= on the service
+# orders it behind a still-running rebalance, though the schedules never
+# overlap (rebalance fires pre-open).
+#
+# Persistent=true: this is a safety monitor, not a trading act — a check
+# missed while the box was down should fire on boot (late is better than
+# never; the run is read-only apart from the halt file and re-evaluates
+# as-of today, so a catch-up run is harmless).
+
+[Unit]
+Description=Weekday 16:30 America/New_York trigger for the divergence tracker
+
+[Timer]
+OnCalendar=Mon..Fri 16:30 America/New_York
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

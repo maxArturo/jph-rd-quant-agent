@@ -23,6 +23,8 @@ SWEEP_UNIT = REPO_ROOT / "ops" / "rdq-sweep.service"
 SWEEP_TIMER = REPO_ROOT / "ops" / "rdq-sweep.timer"
 GPU_WATCHDOG_UNIT = REPO_ROOT / "ops" / "rdq-gpu-watchdog.service"
 GPU_WATCHDOG_TIMER = REPO_ROOT / "ops" / "rdq-gpu-watchdog.timer"
+DIVERGENCE_UNIT = REPO_ROOT / "ops" / "rdq-divergence.service"
+DIVERGENCE_TIMER = REPO_ROOT / "ops" / "rdq-divergence.timer"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUN_US_QUANT = REPO_ROOT / "ops" / "run_us_quant.sh"
 
@@ -386,6 +388,56 @@ class TestGpuWatchdogUnits:
         _systemd_analyze_verify(GPU_WATCHDOG_TIMER)
 
 
+class TestDivergenceUnits:
+    def test_exist(self) -> None:
+        assert DIVERGENCE_UNIT.is_file()
+        assert DIVERGENCE_TIMER.is_file()
+
+    def test_runs_divergence_under_exec_paper_identity(self) -> None:
+        """The tracker reads Alpaca portfolio history — same injected paper
+        credentials as the rebalancer, and the same oneshot conventions."""
+        text = DIVERGENCE_UNIT.read_text()
+        assert "onecli run --agent rdq-exec-paper" in text
+        assert "python -m execution.divergence" in text
+        assert "Type=oneshot" in text
+        assert "WorkingDirectory=%h/rd-agent-q" in text
+        # timer-driven oneshot convention: enable the timer, not the service
+        assert "[Install]" not in [line.strip() for line in text.splitlines()]
+
+    def test_slack_bypasses_onecli_proxy(self) -> None:
+        """Warn/halt/failure notices go to Slack, which must never transit
+        the OneCLI proxy (docs/decisions.md)."""
+        text = DIVERGENCE_UNIT.read_text()
+        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+
+    def test_ordered_after_rebalance(self) -> None:
+        """AC US-017: a still-running rebalance must finish before the
+        divergence check reads the book it just traded."""
+        after = re.search(r"^After=(.+)$", DIVERGENCE_UNIT.read_text(), re.MULTILINE)
+        assert after and "rdq-rebalance.service" in after.group(1)
+
+    def test_timer_weekday_postclose_new_york(self) -> None:
+        days, hhmm = timer_schedule(DIVERGENCE_TIMER)
+        assert days == "Mon..Fri"
+        assert hhmm == "16:30"  # post-close so today's session is in the history
+        # safety monitor: a check missed while the box was down fires on boot
+        assert "Persistent=true" in DIVERGENCE_TIMER.read_text()
+        assert "WantedBy=timers.target" in DIVERGENCE_TIMER.read_text()
+
+    def test_scheduled_after_rebalance_timer(self) -> None:
+        """The daily order is rebalance (pre-open) then divergence (post-close)."""
+        _, rebalance_time = timer_schedule(REBALANCE_TIMER)
+        _, divergence_time = timer_schedule(DIVERGENCE_TIMER)
+        assert rebalance_time < divergence_time
+
+    @pytest.mark.skipif(
+        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
+    )
+    def test_systemd_analyze_verify(self) -> None:
+        _systemd_analyze_verify(DIVERGENCE_UNIT)
+        _systemd_analyze_verify(DIVERGENCE_TIMER)
+
+
 class TestInstallScript:
     def test_exists_and_executable(self) -> None:
         assert INSTALL.is_file()
@@ -403,6 +455,8 @@ class TestInstallScript:
         assert "rdq-rebalance.timer" in text
         assert "rdq-sweep.service" in text
         assert "rdq-sweep.timer" in text
+        assert "rdq-divergence.service" in text
+        assert "rdq-divergence.timer" in text
         assert ".config/systemd/user" in text
         assert "daemon-reload" in text
 

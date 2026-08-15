@@ -22,6 +22,8 @@ UNITS=(
   rdq-sweep.timer
   rdq-gpu-watchdog.service
   rdq-gpu-watchdog.timer
+  rdq-divergence.service
+  rdq-divergence.timer
 )
 
 mkdir -p "$UNIT_DIR"

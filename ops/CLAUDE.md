@@ -197,6 +197,13 @@
   UNITS + health.sh lists): warns on idle workers, fetch+destroys workers
   older than --max-hours 24. Stateless per tick; deletes stale worker.env
   when the droplet is already gone.
+- `rdq-divergence.{service,timer}` (US-017): weekday 16:30 America/New_York
+  post-close run of `execution.divergence` as rdq-exec-paper (portfolio
+  history read needs the Alpaca secrets) with NO_PROXY=slack.com;
+  After=rdq-rebalance.service. Persistent=true ON PURPOSE — it's a safety
+  monitor, so a missed check fires on boot (unlike the rebalance timer).
+  Quiet days are silent exit 0 (warmup/ok/nothing-promoted), so the journal,
+  not Slack, is where a healthy run shows up.
 
 ## Python in ops/
 

@@ -1,0 +1,33 @@
+# RD-Agent(Q) daily live-vs-backtest divergence check (US-016/US-017).
+#
+# Runs `python -m execution.divergence` under the rdq-exec-paper OneCLI
+# identity (the proxy injects the Alpaca paper secrets — the tracker reads
+# portfolio history only, it never trades). The module compares trailing
+# realized returns against the promoted strategy's HAIRCUT backtest
+# expectation: :warning: Slack post on drift (z < warn_z), breaker halt file
+# + :rotating_light: on severe breach (z < halt_z or drawdown past the MDD
+# tolerance). Warmup (< window_days realized days) and nothing-promoted are
+# silent exit-0 days — only warn/halt/failure post, so a quiet daily run
+# makes no noise.
+#
+# Slack notices must NOT transit the OneCLI proxy (docs/decisions.md
+# 2026-07-08); onecli preserves a pre-set NO_PROXY and urllib suffix-matches
+# it, covering *.slack.com.
+#
+# Started by rdq-divergence.timer (weekday post-close, America/New_York);
+# no [Install] section on purpose — enable the TIMER, not this service.
+#
+# Install:  ops/install_services.sh
+# Enable:   systemctl --user enable --now rdq-divergence.timer
+# Logs:     journalctl --user -u rdq-divergence.service
+
+[Unit]
+Description=RD-Agent(Q) daily divergence check (Alpaca paper via rdq-exec-paper OneCLI identity)
+After=network-online.target rdq-rebalance.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/rd-agent-q
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
+ExecStart=%h/.local/bin/onecli run --agent rdq-exec-paper -- %h/rd-agent-q/.venv/bin/python -m execution.divergence
