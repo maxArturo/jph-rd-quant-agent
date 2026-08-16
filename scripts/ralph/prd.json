@@ -397,8 +397,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Unit deleted from repo + install_services.sh/health.sh; 19899 kept forbidden in health.sh (port must stay dark). On-box: stopped, unit+enablement symlinks and the out-of-repo resources.conf drop-in removed, daemon-reloaded, ss shows 19899 not listening. TestResearchUnit removed; run_us_quant script-half checks preserved as TestRunUsQuantScript; GPU backend/pipeline tests pass untouched (67)."
     },
     {
       "id": "US-027",
