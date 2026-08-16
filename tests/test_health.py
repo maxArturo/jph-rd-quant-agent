@@ -21,7 +21,7 @@ EXPOSE = REPO_ROOT / "ops" / "expose_traces.sh"
 INSTALL = REPO_ROOT / "ops" / "install_services.sh"
 RUNBOOK = REPO_ROOT / "ops" / "runbook.md"
 
-LONG_RUNNING = ["rdq-orchestrator.service", "rdq-research.service"]
+LONG_RUNNING = ["rdq-orchestrator.service"]
 TIMERS = [
     "rdq-data-refresh.timer",
     "rdq-pred-refresh.timer",
@@ -44,7 +44,6 @@ ONESHOTS = [
 ]
 
 HEALTHY_SS = (
-    "LISTEN 0 128 127.0.0.1:19899 0.0.0.0:* users:((\"python\",pid=4242,fd=3))\n"
     "LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n"
     "LISTEN 0 4096 100.68.23.10:443 0.0.0.0:*\n"
     "LISTEN 0 4096 100.68.23.10:3100 0.0.0.0:*\n"
@@ -104,7 +103,7 @@ def make_stub_box(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         script.chmod(0o755)
     (stub_dir / "ss.txt").write_text(HEALTHY_SS)
     (stub_dir / "serve.txt").write_text(HEALTHY_SERVE)
-    (stub_dir / "mainpid_rdq-research.service").write_text("4242\n")
+    (stub_dir / "mainpid_rdq-orchestrator.service").write_text("4242\n")
     env_files = []
     for name in ("root.env", "research.env"):
         env_file = stub_dir / name
@@ -235,7 +234,8 @@ class TestFailureModes:
         assert "FAIL  loopback port 19900" in result.stdout
 
     def test_19899_tailnet_bind_fails(self, tmp_path: Path) -> None:
-        """server_ui has no allowed serve mapping — even a tailnet bind fails."""
+        """The retired server_ui port has no allowed serve mapping — even a
+        tailnet bind fails (US-026: the port must stay dark)."""
         stub_dir, env = make_stub_box(tmp_path)
         (stub_dir / "ss.txt").write_text(HEALTHY_SS + "LISTEN 0 128 100.68.23.10:19899 0.0.0.0:*\n")
         result = run_health(env)

@@ -289,15 +289,15 @@
   Verify one on-box with `systemd-run --user --unit=<name> -p Type=oneshot
   -p OnFailure='rdq-notify-failure@<name>.service.service' /bin/false`, then
   `systemctl --user reset-failed <name>.service`.
-- `rdq-research.service` duplicates the US run environment from
-  `ops/run_us_quant.sh` `wire_env` (dates under all three QLIB_* prefixes,
-  factor-source folders, APP_TPL, hook-class paths) — fin_quant runs spawned
-  via server_ui `/upload` inherit the SERVICE environment, not the wrapper's.
-  When changing wire_env, change the unit too;
-  `tests/test_services.py::test_unit_dates_match_run_us_quant_defaults`
-  enforces the date sync. After editing any unit: `daemon-reload` + restart,
-  then check `/proc/<MainPID>/environ` — `systemctl show-environment` does
-  NOT reflect per-unit Environment= lines.
+- `rdq-research.service` (the server_ui control plane) was DECOMMISSIONED in
+  US-026: unit deleted from the repo, symlink + out-of-repo
+  `rdq-research.service.d/resources.conf` drop-in removed on-box, port 19899
+  dark (health.sh keeps 19899 in REPO_PORTS/FORBIDDEN_SERVE_PORT so any
+  reappearance fails the audit). The `rdq-research` OneCLI IDENTITY still
+  exists (setup/check_onecli.sh, run_us_quant.sh local mode) — that's
+  separate from the service. After editing any unit: `daemon-reload` +
+  restart, then check `/proc/<MainPID>/environ` — `systemctl
+  show-environment` does NOT reflect per-unit Environment= lines.
 - OneCLI has TWO injection mechanisms: vaulted secrets (host-pattern matched,
   managed by `onecli secrets`/`agents set-secrets`, what setup_onecli.sh
   assigns) and app connections (OAuth connectors, e.g. Notion). App

@@ -7,8 +7,8 @@
 #      not in the "failed" state (inactive/dead is their healthy resting state).
 #   2. No repo-owned process listens on a non-loopback interface (ss audit of
 #      the PIDs inside each rdq-* service cgroup), and the repo's reserved
-#      ports (19899 server_ui, 19900 trace viewer) are loopback-only no matter
-#      who owns them.
+#      ports (19899 retired server_ui — decommissioned US-026, 19900 trace
+#      viewer) are loopback-only no matter who owns them.
 #   3. `tailscale serve status` matches the PLAN.md §1 port table: every
 #      mapping tailnet-only, never funnel, :19899 never exposed, :19900 (when
 #      enabled via ops/expose_traces.sh) proxying exactly http://127.0.0.1:19900,
@@ -22,7 +22,6 @@ set -uo pipefail
 # Long-running services (Restart=always) that must be active.
 LONG_RUNNING=(
   rdq-orchestrator.service
-  rdq-research.service
 )
 # Timers that must be active (waiting counts as active).
 TIMERS=(
@@ -57,7 +56,8 @@ declare -A ALLOWED_SERVE=(
 )
 # Repo-reserved ports that must be loopback-only regardless of owning process.
 REPO_PORTS=(19899 19900)
-# server_ui must never be tailscale-served (flask-cors advisories; PLAN.md).
+# Retired server_ui port (service decommissioned, US-026): nothing may ever
+# listen on or serve it again.
 FORBIDDEN_SERVE_PORT=19899
 
 # systemctl --user needs the user manager socket from non-login shells.

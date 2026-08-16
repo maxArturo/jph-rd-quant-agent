@@ -12,7 +12,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNIT = REPO_ROOT / "ops" / "rdq-orchestrator.service"
-RESEARCH_UNIT = REPO_ROOT / "ops" / "rdq-research.service"
 REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-data-refresh.service"
 REFRESH_TIMER = REPO_ROOT / "ops" / "rdq-data-refresh.timer"
 PRED_REFRESH_UNIT = REPO_ROOT / "ops" / "rdq-pred-refresh.service"
@@ -75,8 +74,8 @@ class TestOrchestratorUnit:
 
         onecli run injects HTTP(S)_PROXY process-wide, so the unit must exempt
         slack.com (urllib suffix-matches NO_PROXY, covering *.slack.com) and
-        the local control-plane hosts (rdagent server_ui :19899, OneCLI
-        management/approvals :10254/:10255 — US-039).
+        the local control-plane hosts (OneCLI management/approvals
+        :10254/:10255 — US-039).
         """
         text = UNIT.read_text()
         for var in ("NO_PROXY", "no_proxy"):
@@ -95,116 +94,34 @@ class TestOrchestratorUnit:
         _systemd_analyze_verify(UNIT)
 
 
-class TestResearchUnit:
-    def test_exists(self) -> None:
-        assert RESEARCH_UNIT.is_file()
+class TestRunUsQuantScript:
+    """ops/run_us_quant.sh is the GPU worker's launch script (RDQ_LAUNCHER=direct).
 
-    def test_runs_server_ui_under_onecli_identity(self) -> None:
-        text = RESEARCH_UNIT.read_text()
-        assert "onecli run --agent rdq-research" in text
-        assert "python -m research.server_ui" in text
-
-    def test_restart_always(self) -> None:
-        assert "Restart=always" in RESEARCH_UNIT.read_text()
-
-    def test_no_proxy_covers_loopback_and_tailnet(self) -> None:
-        """AC: NO_PROXY covers 127.0.0.1, localhost, and the tailnet range —
-        loopback control traffic must not transit the OneCLI proxy."""
-        text = RESEARCH_UNIT.read_text()
-        assert (
-            'Environment="NO_PROXY=127.0.0.1,localhost,100.64.0.0/10"'
-            ' "no_proxy=127.0.0.1,localhost,100.64.0.0/10"'
-        ) in text
-
-    def test_documents_no_tailscale_exposure(self) -> None:
-        """AC: the unit comments must state it is NOT exposed via tailscale
-        serve (PLAN.md port table: server_ui stays dark)."""
-        text = RESEARCH_UNIT.read_text()
-        assert "NOT exposed via tailscale serve" in text
-        assert "PLAN.md" in text
-
-    def test_state_dirs_outside_repo(self) -> None:
-        text = RESEARCH_UNIT.read_text()
-        assert 'Environment="UI_TRACE_FOLDER=%h/rdq-runs/server_ui/traces"' in text
-
-    def test_installable_user_unit(self) -> None:
-        text = RESEARCH_UNIT.read_text()
-        assert "[Install]" in text
-        assert "WantedBy=default.target" in text
-        assert "WorkingDirectory=%h/rd-agent-q" in text
-
-    def test_us_run_env_wiring(self) -> None:
-        """US-020: fin_quant runs spawned via /upload must inherit the US-market
-        environment, or they silently backtest with rdagent's CN defaults."""
-        text = RESEARCH_UNIT.read_text()
-        assert "FACTOR_CoSTEER_DATA_FOLDER=%h/rdq-data/factor_source/us_liquid/data_folder" in text
-        assert (
-            "FACTOR_CoSTEER_DATA_FOLDER_DEBUG="
-            "%h/rdq-data/factor_source/us_liquid/data_folder_debug"
-        ) in text
-        assert "APP_TPL=%h/rd-agent-q/research/app_tpl" in text
-        assert (
-            "QLIB_QUANT_FACTOR_HYPOTHESIS2EXPERIMENT="
-            "research.us_quant.USQlibFactorHypothesis2Experiment"
-        ) in text
-        assert (
-            "QLIB_QUANT_MODEL_HYPOTHESIS2EXPERIMENT="
-            "research.us_quant.USQlibModelHypothesis2Experiment"
-        ) in text
-        assert "WORKSPACE_PATH=%h/rdq-runs/server_ui/workspace" in text
-        # LLM backend env for spawned runs; NOT optional (no '-' prefix) so a
-        # missing file fails loudly instead of falling back to OpenAI defaults.
-        assert "EnvironmentFile=%h/rd-agent-q/research/.env" in text
-        assert "EnvironmentFile=-" not in text
+    The rdq-research.service unit that used to mirror its env wiring was
+    decommissioned in US-026; these keep the script half of those checks."""
 
     def test_execution_env_wiring(self) -> None:
-        """US-043: no conda on this box — backtests/model training must opt
-        into docker, and generated factor code must run with the venv python.
-        The unit and run_us_quant.sh wire_env must stay in sync."""
-        unit_text = RESEARCH_UNIT.read_text()
-        assert 'Environment="MODEL_CoSTEER_ENV_TYPE=docker"' in unit_text
-        assert (
-            'Environment="FACTOR_CoSTEER_PYTHON_BIN=%h/rd-agent-q/.venv/bin/python"'
-            in unit_text
-        )
-        assert 'Environment="QLIB_DOCKER_BUILD_FROM_DOCKERFILE=false"' in unit_text
-        assert 'Environment="LITELLM_DROP_PARAMS=true"' in unit_text
-        # MLflow >= 3.6 in local_qlib:latest refuses qlib's ./mlruns file
-        # store without this opt-out (QlibDockerConf.env_dict JSON).
-        assert (
-            'Environment="QLIB_DOCKER_ENV_DICT='
-            '{\\"MLFLOW_ALLOW_FILE_STORE\\":\\"true\\"}"'
-        ) in unit_text
+        """US-043: no conda on the worker — backtests/model training must opt
+        into docker, and generated factor code must run with the venv python."""
         script_text = RUN_US_QUANT.read_text()
         assert 'export MODEL_CoSTEER_ENV_TYPE="docker"' in script_text
         assert 'export FACTOR_CoSTEER_PYTHON_BIN="${PYTHON}"' in script_text
         assert 'export QLIB_DOCKER_BUILD_FROM_DOCKERFILE="false"' in script_text
         assert 'export LITELLM_DROP_PARAMS="true"' in script_text
+        # MLflow >= 3.6 in local_qlib:latest refuses qlib's ./mlruns file
+        # store without this opt-out (QlibDockerConf.env_dict JSON).
         assert (
             "export QLIB_DOCKER_ENV_DICT="
             "'{\"MLFLOW_ALLOW_FILE_STORE\":\"true\"}'"
         ) in script_text
 
-    def test_unit_dates_match_run_us_quant_defaults(self) -> None:
-        """The unit duplicates wire_env's date defaults (all three prefixes);
-        this catches drift between ops/run_us_quant.sh and the unit.
-
-        Since US-008 the hardcoded TEST_END is a FALLBACK only: GPU-path runs
-        get a launch-computed rolling RDQ_TEST_END from ops/gpu_pipeline.py,
-        and run_us_quant.sh refuses any test end more than 90 calendar days
-        behind the store calendar end (see test_stale_test_end_guard_present)."""
+    def test_date_defaults_present(self) -> None:
+        """wire_env must keep fallback defaults for all six window bounds."""
         script_defaults = dict(
             re.findall(r"RDQ_((?:TRAIN|VALID|TEST)_(?:START|END)):-(\d{4}-\d{2}-\d{2})",
                        RUN_US_QUANT.read_text())
         )
         assert len(script_defaults) == 6, script_defaults
-        unit_text = RESEARCH_UNIT.read_text()
-        for prefix in ("QLIB_QUANT", "QLIB_FACTOR", "QLIB_MODEL"):
-            for segment, date in script_defaults.items():
-                assert f'"{prefix}_{segment}={date}"' in unit_text, (
-                    f"{prefix}_{segment} missing or out of sync with "
-                    f"run_us_quant.sh default {date}"
-                )
 
     def test_stale_test_end_guard_present(self) -> None:
         """US-008: the fallback TEST_END rots as the store rolls forward —
@@ -214,12 +131,6 @@ class TestResearchUnit:
         assert "MAX_TEST_END_LAG_DAYS=90" in text
         assert "behind the store calendar end" in text
         assert text.count("check_test_end_lag") >= 3  # definition + both modes
-
-    @pytest.mark.skipif(
-        shutil.which("systemd-analyze") is None, reason="systemd-analyze not installed"
-    )
-    def test_systemd_analyze_verify(self) -> None:
-        _systemd_analyze_verify(RESEARCH_UNIT)
 
 
 class TestRefreshUnits:
@@ -581,7 +492,6 @@ class TestInstallScript:
     def test_links_units_and_reloads(self) -> None:
         text = INSTALL.read_text()
         assert "rdq-orchestrator.service" in text
-        assert "rdq-research.service" in text
         assert "rdq-data-refresh.service" in text
         assert "rdq-data-refresh.timer" in text
         assert "rdq-pred-refresh.service" in text
@@ -598,6 +508,8 @@ class TestInstallScript:
         assert "rdq-health.timer" in text
         assert ".config/systemd/user" in text
         assert "daemon-reload" in text
+        # decommissioned in US-026 — must never be relinked
+        assert "rdq-research.service" not in text
 
     def test_every_listed_unit_file_exists(self) -> None:
         """UNITS entries must point at real files in ops/ (catches rename drift)."""
