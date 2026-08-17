@@ -374,4 +374,10 @@
   actively-written workspaces never look old. It reads the promoted row via
   StateStore only when state.sqlite already EXISTS (StateStore(path) CREATES
   the db on init — always guard with `is_file()` from read-only callers, same
-  as execution/promoted.py).
+  as execution/promoted.py). It also prunes rdagent's CWD-relative repo
+  droppings (US-030, `repo_prune_actions`): `log/<ts>/` trace trees (aged by
+  newest mtime) and `pickle_cache/<fn>/` cache FILES (the function dirs stay)
+  under `--repo-root` (default: this checkout — tests calling `main()` must
+  pass a tmp `--repo-root` or they'll plan deletions in the real repo).
+  Nothing else in the checkout is ever touched; both dirs are gitignored
+  rdagent output, recreated on any local rdagent invocation.

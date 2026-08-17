@@ -457,8 +457,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "selector.log + git_ignore_folder/ removed (untracked cruft). sweep.py repo_prune_actions: log/<ts> trace trees (newest-mtime aged) + pickle_cache cache FILES (function dirs kept) under --repo-root (default: this checkout), same --days retention; execute() now unlinks file actions. On-box: real sweep exit 0, log/ 534->217 entries (62M->24M), pickle_cache 935->109 files (285M->202M), oldest survivor 2026-08-05 vs cutoff 2026-08-03."
     }
   ]
 }

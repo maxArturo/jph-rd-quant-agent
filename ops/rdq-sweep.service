@@ -6,7 +6,9 @@
 # strategy's workspace (promoted_strategy row in orchestrator/state.sqlite)
 # and SOTA workspaces (trace-log feedback decision) are never deleted, and
 # "age" is the newest mtime in the tree, so anything an active run still
-# writes to always looks fresh.
+# writes to always looks fresh. Also prunes rdagent's CWD-relative droppings
+# under the repo checkout (log/ trace trees, pickle_cache/ cache files) to
+# the same retention window (US-030).
 #
 # No onecli wrapper: the sweep is purely local (filesystem + SQLite read) —
 # it makes no network calls and needs no injected credentials.

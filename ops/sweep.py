@@ -10,7 +10,12 @@ workspaces). This sweep deletes the ones nothing can ever need again:
   ``RECENT_PROMOTIONS_KEPT`` promotion_history workspaces (US-006 rollback
   targets) nor a SOTA workspace,
 - mlflow run dirs (``<workspace>/mlruns/<exp>/<run>``) older than ``--days``
-  inside surviving unprotected workspaces.
+  inside surviving unprotected workspaces,
+- repo-root rdagent droppings (US-030): ``log/<run-ts>/`` trace trees and
+  ``pickle_cache/<function>/<hash>.{pkl,lock,zip}`` cache files under this
+  checkout older than ``--days``. Only those two directories are ever
+  touched; the pickle_cache function dirs themselves are kept (rdagent
+  re-creates them anyway, and keeping them makes the prune idempotent).
 
 SOTA is derived from the on-disk trace logs, the same FileStorage layout
 ``locate_artifacts`` reads: each loop logs its finished experiment under
@@ -25,7 +30,7 @@ Age = the NEWEST lstat mtime anywhere in the tree, so anything an active run
 is still writing into can never look old, whatever ``--days`` is.
 
 Usage (also ops/rdq-sweep.timer, weekly):
-    .venv/bin/python -m ops.sweep [--days N] [--dry-run]
+    .venv/bin/python -m ops.sweep [--days N] [--dry-run] [--repo-root DIR]
 
 Exit codes: 0 = swept (or nothing to do), 1 = operational failure.
 """
@@ -45,6 +50,10 @@ from orchestrator.state import DEFAULT_DB_PATH, StateStore
 
 DEFAULT_RUN_ROOT = Path("~/rdq-runs")
 DEFAULT_MAX_AGE_DAYS = 14.0
+
+# The checkout this module lives in — rdagent drops CWD-relative log/ traces
+# and pickle_cache/ entries here on every invocation (both gitignored).
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _SECONDS_PER_DAY = 86400.0
 _LOOP_DIR_RE = re.compile(r"^Loop_\d+$")
@@ -69,7 +78,7 @@ class SweepAction:
     """One directory tree the plan wants gone."""
 
     path: Path
-    kind: str  # "workspace" | "mlrun"
+    kind: str  # "workspace" | "mlrun" | "log trace" | "cache file"
     age_days: float
 
 
@@ -235,6 +244,55 @@ def _stale_mlruns(workspace: Path, cutoff: float, now: float) -> list[SweepActio
     return stale
 
 
+def repo_prune_actions(
+    repo_root: Path = DEFAULT_REPO_ROOT,
+    *,
+    max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    now: float | None = None,
+) -> list[SweepAction]:
+    """Stale rdagent droppings under the repo checkout (US-030).
+
+    Two directories, nothing else: ``log/`` (one trace tree per invocation —
+    pruned per entry, aged by the NEWEST mtime so an active run's trace never
+    looks old) and ``pickle_cache/`` (function-result cache — pruned per FILE
+    inside the per-function dirs, which themselves are kept). Absent dirs are
+    a no-op; symlinks are never followed or deleted.
+    """
+    repo_root = repo_root.expanduser().resolve()
+    if repo_root in (Path("/"), Path.home().resolve()):
+        raise SweepError(f"refusing to prune {repo_root} (unsafe repo root)")
+    now = time.time() if now is None else now
+    cutoff = now - max_age_days * _SECONDS_PER_DAY
+
+    actions: list[SweepAction] = []
+
+    def consider(path: Path, kind: str, mtime: float) -> None:
+        if mtime < cutoff:
+            age = (now - mtime) / _SECONDS_PER_DAY
+            actions.append(SweepAction(path=path, kind=kind, age_days=age))
+
+    log_root = repo_root / "log"
+    if log_root.is_dir() and not log_root.is_symlink():
+        for entry in sorted(log_root.iterdir()):
+            if entry.is_symlink():
+                continue
+            consider(entry, "log trace", newest_mtime(entry))
+
+    cache_root = repo_root / "pickle_cache"
+    if cache_root.is_dir() and not cache_root.is_symlink():
+        for entry in sorted(cache_root.iterdir()):
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir():
+                consider(entry, "cache file", entry.lstat().st_mtime)
+                continue
+            for cached in sorted(entry.iterdir()):
+                if cached.is_symlink() or cached.is_dir():
+                    continue
+                consider(cached, "cache file", cached.lstat().st_mtime)
+    return actions
+
+
 def build_plan(
     run_root: Path,
     *,
@@ -291,7 +349,10 @@ def execute(plan: SweepPlan, *, dry_run: bool) -> list[str]:
         if dry_run:
             continue
         try:
-            shutil.rmtree(action.path)
+            if action.path.is_dir() and not action.path.is_symlink():
+                shutil.rmtree(action.path)
+            else:
+                action.path.unlink()
         except OSError as exc:
             failures.append(f"failed to delete {action.path}: {exc}")
     return failures
@@ -321,6 +382,12 @@ def main(argv: list[str] | None = None) -> int:
         help="orchestrator SQLite holding the promoted strategy",
     )
     parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=DEFAULT_REPO_ROOT,
+        help="checkout whose log/ and pickle_cache/ droppings get pruned (default: this repo)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="print the plan without deleting anything"
     )
     args = parser.parse_args(argv)
@@ -329,14 +396,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     run_root = args.run_root.expanduser()
-    if not run_root.is_dir():
-        print(f"nothing to sweep: {run_root} does not exist")
-        return 0
     try:
-        plan = build_plan(run_root, max_age_days=args.days, state_db=args.state_db)
+        if run_root.is_dir():
+            plan = build_plan(run_root, max_age_days=args.days, state_db=args.state_db)
+        else:
+            print(f"nothing to sweep: {run_root} does not exist")
+            plan = SweepPlan(delete=[], protected={}, kept_recent=[])
+        repo_actions = repo_prune_actions(args.repo_root, max_age_days=args.days)
     except SweepError as exc:
         print(f"sweep aborted: {exc}", file=sys.stderr)
         return 1
+    plan = SweepPlan(
+        delete=[*plan.delete, *repo_actions],
+        protected=plan.protected,
+        kept_recent=plan.kept_recent,
+    )
 
     for path, reason in sorted(plan.protected.items()):
         print(f"protected ({reason}): {path}")

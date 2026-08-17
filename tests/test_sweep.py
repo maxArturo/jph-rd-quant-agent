@@ -18,16 +18,19 @@ from types import SimpleNamespace
 import pytest
 
 from ops.sweep import (
+    DEFAULT_MAX_AGE_DAYS,
     REASON_PROMOTED,
     REASON_RECENT_PROMOTION,
     REASON_SOTA,
     SweepError,
+    SweepPlan,
     build_plan,
     execute,
     main,
     newest_mtime,
     promoted_workspace,
     recent_promotion_workspaces,
+    repo_prune_actions,
     sota_workspaces,
 )
 from orchestrator.state import StateStore
@@ -313,6 +316,113 @@ class TestBuildPlan:
         assert plan.delete == []
 
 
+@pytest.fixture()
+def repo_root(tmp_path: Path) -> Path:
+    """A stand-in checkout with rdagent's CWD-relative droppings (US-030)."""
+    root = tmp_path / "repo"
+    (root / "log").mkdir(parents=True)
+    (root / "pickle_cache" / "utils.env.run").mkdir(parents=True)
+    return root
+
+
+def make_log_trace(repo_root: Path, name: str, mtime: float) -> Path:
+    trace = repo_root / "log" / name
+    (trace / "sub").mkdir(parents=True)
+    (trace / "sub" / "0001.pkl").write_bytes(b"x")
+    age_tree(trace, mtime)
+    return trace
+
+
+def make_cache_file(repo_root: Path, name: str, mtime: float) -> Path:
+    cached = repo_root / "pickle_cache" / "utils.env.run" / name
+    cached.write_bytes(b"x")
+    os.utime(cached, (mtime, mtime))
+    return cached
+
+
+class TestRepoPruneActions:
+    def test_stale_log_traces_and_cache_files_pruned(self, repo_root: Path) -> None:
+        old_trace = make_log_trace(repo_root, "2026-07-01_00-00-00-000000", OLD)
+        fresh_trace = make_log_trace(repo_root, "2026-08-14_00-00-00-000000", FRESH)
+        old_cache = make_cache_file(repo_root, "aa.pkl", OLD)
+        old_lock = make_cache_file(repo_root, "aa.lock", OLD)
+        fresh_cache = make_cache_file(repo_root, "bb.pkl", FRESH)
+
+        actions = repo_prune_actions(repo_root, now=NOW)
+        assert {a.path for a in actions} == {old_trace, old_cache, old_lock}
+        kinds = {a.path: a.kind for a in actions}
+        assert kinds[old_trace] == "log trace"
+        assert kinds[old_cache] == "cache file"
+        assert fresh_trace.is_dir() and fresh_cache.is_file()
+
+    def test_retention_boundary_at_cutoff_is_kept(self, repo_root: Path) -> None:
+        cutoff = NOW - DEFAULT_MAX_AGE_DAYS * 86400.0
+        make_log_trace(repo_root, "at_cutoff", cutoff)
+        make_cache_file(repo_root, "at.pkl", cutoff)
+        just_over_trace = make_log_trace(repo_root, "just_over", cutoff - 1)
+        just_over_cache = make_cache_file(repo_root, "over.pkl", cutoff - 1)
+
+        actions = repo_prune_actions(repo_root, now=NOW)
+        assert {a.path for a in actions} == {just_over_trace, just_over_cache}
+
+    def test_fresh_write_inside_old_trace_keeps_it(self, repo_root: Path) -> None:
+        trace = make_log_trace(repo_root, "active_run", OLD)
+        os.utime(trace / "sub" / "0001.pkl", (FRESH, FRESH))
+        assert repo_prune_actions(repo_root, now=NOW) == []
+
+    def test_cache_function_dirs_and_other_paths_untouched(self, repo_root: Path) -> None:
+        """Only entries INSIDE log/ and pickle_cache/<fn>/ are planned — the
+        function dirs themselves and everything else in the checkout stay."""
+        function_dir = repo_root / "pickle_cache" / "utils.env.run"
+        old_cache = make_cache_file(repo_root, "aa.pkl", OLD)
+        other = repo_root / "orchestrator"
+        other.mkdir()
+        (other / "state.sqlite").write_bytes(b"x")
+        stray = repo_root / "selector.log"
+        stray.write_text("x")
+        age_tree(repo_root, OLD)
+
+        actions = repo_prune_actions(repo_root, now=NOW)
+        assert [a.path for a in actions] == [old_cache]
+        assert function_dir.is_dir() and other.is_dir() and stray.is_file()
+
+    def test_missing_dirs_are_a_noop(self, tmp_path: Path) -> None:
+        assert repo_prune_actions(tmp_path / "bare_repo", now=NOW) == []
+
+    def test_symlinks_never_followed_or_planned(self, repo_root: Path, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "f.pkl").write_bytes(b"x")
+        age_tree(outside, OLD)
+        (repo_root / "log" / "linked").symlink_to(outside)
+        (repo_root / "pickle_cache" / "utils.env.run" / "l.pkl").symlink_to(outside / "f.pkl")
+
+        assert repo_prune_actions(repo_root, now=NOW) == []
+        assert (outside / "f.pkl").is_file()
+
+    def test_max_age_days_is_configurable(self, repo_root: Path) -> None:
+        cached = make_cache_file(repo_root, "aa.pkl", NOW - 5 * 86400.0)
+        assert repo_prune_actions(repo_root, max_age_days=7, now=NOW) == []
+        actions = repo_prune_actions(repo_root, max_age_days=2, now=NOW)
+        assert [a.path for a in actions] == [cached]
+
+    def test_refuses_unsafe_repo_root(self) -> None:
+        with pytest.raises(SweepError, match="unsafe repo root"):
+            repo_prune_actions(Path("/"), now=NOW)
+
+    def test_execute_unlinks_planned_files(self, repo_root: Path) -> None:
+        old_trace = make_log_trace(repo_root, "old", OLD)
+        old_cache = make_cache_file(repo_root, "aa.pkl", OLD)
+        actions = repo_prune_actions(repo_root, now=NOW)
+
+        plan = SweepPlan(delete=actions, protected={}, kept_recent=[])
+        assert execute(plan, dry_run=True) == []
+        assert old_trace.is_dir() and old_cache.is_file()
+        assert execute(plan, dry_run=False) == []
+        assert not old_trace.exists() and not old_cache.exists()
+        assert (repo_root / "pickle_cache" / "utils.env.run").is_dir()
+
+
 class TestExecuteAndCli:
     def test_dry_run_deletes_nothing(self, run_root: Path, tmp_path: Path) -> None:
         workspace = make_workspace(run_root, "ws_old", OLD)
@@ -333,7 +443,14 @@ class TestExecuteAndCli:
         log_loop(trace_dir(run_root), 0, experiment(sota), decision=True)
 
         code = main(
-            ["--run-root", str(run_root), "--state-db", str(tmp_path / "db.sqlite")]
+            [
+                "--run-root",
+                str(run_root),
+                "--state-db",
+                str(tmp_path / "db.sqlite"),
+                "--repo-root",
+                str(tmp_path / "repo"),
+            ]
         )
         out = capsys.readouterr().out
         assert code == 0
@@ -352,6 +469,8 @@ class TestExecuteAndCli:
                 str(run_root),
                 "--state-db",
                 str(tmp_path / "db.sqlite"),
+                "--repo-root",
+                str(tmp_path / "repo"),
                 "--dry-run",
             ]
         )
@@ -361,10 +480,55 @@ class TestExecuteAndCli:
         assert "would delete workspace" in out
         assert "nothing deleted" in out
 
+    def test_main_prunes_repo_droppings(
+        self, run_root: Path, repo_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        old_trace = make_log_trace(repo_root, "2026-07-01_00-00-00-000000", OLD)
+        fresh_trace = make_log_trace(repo_root, "2026-08-14_00-00-00-000000", FRESH)
+        old_cache = make_cache_file(repo_root, "aa.pkl", OLD)
+
+        code = main(
+            [
+                "--run-root",
+                str(run_root),
+                "--state-db",
+                str(tmp_path / "db.sqlite"),
+                "--repo-root",
+                str(repo_root),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert not old_trace.exists() and not old_cache.exists()
+        assert fresh_trace.is_dir()
+        assert "deleting log trace" in out
+        assert "deleting cache file" in out
+
+    def test_main_missing_run_root_still_prunes_repo(
+        self, repo_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        old_cache = make_cache_file(repo_root, "aa.pkl", OLD)
+        code = main(
+            [
+                "--run-root",
+                str(tmp_path / "absent"),
+                "--state-db",
+                str(tmp_path / "db.sqlite"),
+                "--repo-root",
+                str(repo_root),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "nothing to sweep" in out
+        assert not old_cache.exists()
+
     def test_main_missing_run_root_is_a_noop(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        code = main(["--run-root", str(tmp_path / "absent")])
+        code = main(
+            ["--run-root", str(tmp_path / "absent"), "--repo-root", str(tmp_path / "repo")]
+        )
         assert code == 0
         assert "nothing to sweep" in capsys.readouterr().out
 
