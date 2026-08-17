@@ -40,6 +40,15 @@ echo "Installing rdagent @ ${SHA} into ${VENV} ..."
 echo "Pinning pydantic-ai-slim to a 1.x release compatible with the rdagent pin ..."
 "${VENV}/bin/pip" install --quiet "pydantic-ai-slim[mcp,openai,prefect]==1.107.0"
 
+# rdagent also leaves litellm/openai/pydantic floating. A fresh bootstrap on
+# 2026-08-17 pulled a litellm whose Message model fails to build under
+# pydantic 2.13 (undefined ChatCompletionReasoningSummaryTextBlock forward
+# ref), killing every LLM call on the worker. Pin the trio to the exact
+# versions the control box runs `make check` against.
+# See docs/decisions.md (2026-08-17 research LLM-stack pin).
+echo "Pinning litellm/openai/pydantic to the control-box versions ..."
+"${VENV}/bin/pip" install --quiet "litellm==1.91.0" "openai==2.44.0" "pydantic==2.13.4"
+
 echo "Verifying import ..."
 "${VENV}/bin/python" -c "import rdagent; print('rdagent import OK, version:', getattr(rdagent, '__version__', 'unknown'))"
 # The CLI pulls in the full app graph (incl. pydantic_ai) — a stronger check.

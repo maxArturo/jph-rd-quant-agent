@@ -1034,3 +1034,29 @@ billing watchdog (`rdq-gpu-watchdog`, destroys orphaned droplets). This is
 accepted: runs are autonomous by design (US-045 decision carried over), and
 the cost exposure is bounded by the watchdog rather than by mid-run
 hypothesis-quality brakes.
+
+## 2026-08-17 — worker LLM-stack pin + install.sh joins the snapshot-inputs hash
+
+The first post-merge GPU run (thread 1786965372.029419) died at loop 0 in
+~2 minutes: the fresh bootstrap pulled the latest litellm, whose `Message`
+pydantic model fails to build under pydantic 2.13 (undefined
+`ChatCompletionReasoningSummaryTextBlock` forward ref), so every
+hypothesis-generation call raised until the 10-retry cap and the loop
+exited 1. The control box runs litellm 1.91.0 / openai 2.44.0 /
+pydantic 2.13.4 and constructs `ModelResponse` fine — the breakage was
+pure unpinned-transitive-dependency drift on the worker.
+
+Two changes:
+
+- `research/install.sh` now pins the trio (`litellm==1.91.0`,
+  `openai==2.44.0`, `pydantic==2.13.4`) — the exact versions the control
+  box runs `make check` against — after the rdagent install, same pattern
+  as the existing pydantic-ai-slim pin. Bump deliberately, with a decisions
+  entry, when rdagent's pin moves.
+- `ops/gpu_snapshot.py::worker_inputs_hash` now includes
+  `research/install.sh`. It was the one worker-defining file missing from
+  the US-022 hash inputs, which had two consequences: an install.sh fix
+  would not have invalidated stale snapshots, and the broken environment
+  baked at this run's teardown (hash `94c67dc3b2b0`) would have been
+  selected by every future run. The hash change orphans that snapshot by
+  construction; it was also deleted manually.

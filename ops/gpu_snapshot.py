@@ -104,6 +104,7 @@ def worker_inputs_hash(repo_root: Path = REPO_ROOT, store: Path | None = None) -
     store = store if store is not None else qlib_store_path()
     parts = [
         ("pinned_commit", (repo_root / "research" / "PINNED_COMMIT").read_text().strip()),
+        ("install_sh", (repo_root / "research" / "install.sh").read_text()),
         ("gpu_worker_sh", (repo_root / "ops" / "gpu_worker" / "gpu_worker.sh").read_text()),
         ("makefile_venv", _makefile_venv_targets((repo_root / "Makefile").read_text())),
         ("store_schema", store_schema_marker(store)),

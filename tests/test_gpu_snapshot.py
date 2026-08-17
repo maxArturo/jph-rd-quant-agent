@@ -44,11 +44,13 @@ def make_repo(
     pinned: str = "abc123",
     worker: str = "#!/usr/bin/env bash\necho v1\n",
     makefile: str = DEFAULT_MAKEFILE,
+    install: str = "#!/usr/bin/env bash\npip install rdagent\n",
 ) -> Path:
     repo = tmp_path / "repo"
     (repo / "research").mkdir(parents=True, exist_ok=True)
     (repo / "ops" / "gpu_worker").mkdir(parents=True, exist_ok=True)
     (repo / "research" / "PINNED_COMMIT").write_text(pinned + "\n")
+    (repo / "research" / "install.sh").write_text(install)
     (repo / "ops" / "gpu_worker" / "gpu_worker.sh").write_text(worker)
     (repo / "Makefile").write_text(makefile)
     return repo
@@ -89,6 +91,15 @@ class TestWorkerInputsHash:
         store = make_store(tmp_path)
         before = worker_inputs_hash(make_repo(tmp_path), store)
         after = worker_inputs_hash(make_repo(tmp_path, worker="#!/bin/bash\necho v2\n"), store)
+        assert before != after
+
+    def test_changes_on_install_script(self, tmp_path: Path) -> None:
+        """research/install.sh pins the worker's LLM stack — a pin change
+        must invalidate existing snapshots (2026-08-17 litellm incident)."""
+        store = make_store(tmp_path)
+        before = worker_inputs_hash(make_repo(tmp_path), store)
+        pinned = "#!/usr/bin/env bash\npip install rdagent litellm==1.91.0\n"
+        after = worker_inputs_hash(make_repo(tmp_path, install=pinned), store)
         assert before != after
 
     def test_changes_on_venv_target(self, tmp_path: Path) -> None:
