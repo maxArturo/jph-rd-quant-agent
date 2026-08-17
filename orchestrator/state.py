@@ -2,12 +2,13 @@
 
 Persists what must survive a process restart: refined research directives,
 thread-to-run mappings, the single promoted strategy (plus its append-only
-promotion history), and pending operator interactions. The schema migration
-is idempotent (plain ``CREATE ... IF NOT EXISTS``) and runs on every startup.
+promotion history), and legacy poller-era interaction rows (read-only since
+US-027). The schema migration is idempotent (plain ``CREATE ... IF NOT
+EXISTS``) and runs on every startup.
 
 Concurrency model: each helper opens a short-lived connection, so a
 ``StateStore`` instance is safe to share across threads (the Bolt handlers
-and the background poller never share a sqlite3 connection). The database
+and background threads never share a sqlite3 connection). The database
 runs in WAL mode with a 30s busy timeout so writers in other processes
 (the transient GPU pipeline unit, CLI promotes) queue instead of failing
 with 'database is locked'.
@@ -135,10 +136,9 @@ class Run:
     # Supervised runs gate each hypothesis on operator buttons (the pre-US-045
     # flow); unsupervised runs auto-approve and stop on their own budget.
     supervised: bool = False
-    # 'server_ui' = local trace polled by HypothesisPoller; 'gpu' = remote
-    # burst-droplet run driven by ops/gpu_pipeline (the poller must skip it,
-    # and session_path holds the pipeline status file until fetch rewrites it
-    # to the fetched trace dir).
+    # 'server_ui' = legacy local trace (poller-era rows); 'gpu' = remote
+    # burst-droplet run driven by ops/gpu_pipeline (session_path holds the
+    # pipeline status file until fetch rewrites it to the fetched trace dir).
     backend: str = "server_ui"
 
 
@@ -601,90 +601,18 @@ class StateStore:
             ).fetchone()
         return None if row is None else row["page_id"]
 
-    # -- pending interactions ---------------------------------------------------
-
-    def add_pending_interaction(
-        self, thread_ts: str, interaction_key: str, payload: dict[str, Any]
-    ) -> PendingInteraction | None:
-        """Insert a pending interaction; return None if the key already exists (dedup)."""
-        now = _utcnow()
-        try:
-            with self._connect() as conn:
-                cur = conn.execute(
-                    "INSERT INTO pending_interactions (thread_ts, interaction_key, payload,"
-                    " status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-                    (thread_ts, interaction_key, json.dumps(payload), now),
-                )
-                row_id = cur.lastrowid
-        except sqlite3.IntegrityError:
-            return None
-        assert row_id is not None
-        return PendingInteraction(
-            id=row_id,
-            thread_ts=thread_ts,
-            interaction_key=interaction_key,
-            payload=payload,
-            status="pending",
-            created_at=now,
-            resolved_at=None,
-        )
-
-    def get_pending_interaction(self, interaction_id: int) -> PendingInteraction | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM pending_interactions WHERE id = ?", (interaction_id,)
-            ).fetchone()
-        return None if row is None else _interaction_from_row(row)
-
-    def get_pending_interaction_by_key(self, interaction_key: str) -> PendingInteraction | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM pending_interactions WHERE interaction_key = ?",
-                (interaction_key,),
-            ).fetchone()
-        return None if row is None else _interaction_from_row(row)
-
-    def delete_pending_interaction(self, interaction_id: int) -> None:
-        """Free an interaction key (e.g. when the Slack post failed and must retry)."""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM pending_interactions WHERE id = ?", (interaction_id,))
-
-    def list_pending_interactions(
-        self, thread_ts: str | None = None, status: str = "pending"
-    ) -> list[PendingInteraction]:
-        query = "SELECT * FROM pending_interactions WHERE status = ?"
-        params: list[str] = [status]
-        if thread_ts is not None:
-            query += " AND thread_ts = ?"
-            params.append(thread_ts)
-        with self._connect() as conn:
-            rows = conn.execute(query + " ORDER BY id", params).fetchall()
-        return [_interaction_from_row(row) for row in rows]
+    # -- pending interactions (legacy, read-only) --------------------------------
+    #
+    # The hypothesis poller that wrote this table was removed in US-027 (the
+    # GPU pipeline drives runs end-to-end). The table and this reader stay so
+    # historic server_ui-era rows remain inspectable — never add a write path
+    # or a destructive migration for it.
 
     def list_interactions(self, thread_ts: str) -> list[PendingInteraction]:
-        """Every interaction of a thread, any status, oldest first.
-
-        The autonomous loop (US-045) derives its budget and failure-streak
-        state from this history instead of in-memory counters, so a restart
-        resumes with the same picture.
-        """
+        """Every recorded interaction of a thread, any status, oldest first."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM pending_interactions WHERE thread_ts = ? ORDER BY id",
                 (thread_ts,),
             ).fetchall()
         return [_interaction_from_row(row) for row in rows]
-
-    def resolve_pending_interaction(self, interaction_id: int, status: str) -> PendingInteraction:
-        """Mark an interaction resolved (status e.g. 'approved', 'edited', 'rejected')."""
-        with self._connect() as conn:
-            cur = conn.execute(
-                "UPDATE pending_interactions SET status = ?, resolved_at = ? WHERE id = ?",
-                (status, _utcnow(), interaction_id),
-            )
-            if cur.rowcount == 0:
-                raise KeyError(f"no pending interaction with id {interaction_id}")
-            row = conn.execute(
-                "SELECT * FROM pending_interactions WHERE id = ?", (interaction_id,)
-            ).fetchone()
-        return _interaction_from_row(row)

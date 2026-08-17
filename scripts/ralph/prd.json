@@ -412,8 +412,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "poller.py (874 lines) + test_poller.py deleted; app.py down to message handler + OneCLI approvals actions (InteractionHandler/PromotionHandler protocols, hypo_*/promote_* listeners, edit-reply interception all gone); promotion.py conversational-only (offer/confirmation blocks + cancel_promotion removed, request_promotion posts text); approve/reject hypothesis ToolSpecs + _cancel_open_interactions removed from conversation.py; state.py keeps pending_interactions readable via list_interactions only (schema intact, no destructive migration). E2E: real Bolt dispatch -> ConversationCore -> real PromotionFlow two-step promotion, zero Block Kit blocks, history source=conversation."
     },
     {
       "id": "US-028",

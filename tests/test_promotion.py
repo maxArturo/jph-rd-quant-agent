@@ -1,10 +1,11 @@
-"""US-033: strategy promotion flow.
+"""US-033: strategy promotion flow (conversational since US-027/US-044).
 
-Covers the Promote button on completed-run summaries, the confirmation step
-(restating universe, topk/n_drop, and headline metrics), the pinning of the
-promoted strategy (with a replacement notice), the Notion Decision Log write
-(mocked HTTP), Bolt routing of the three promotion actions, and the
-rebalancer entrypoint check that refuses to run without a promotion.
+Covers the confirmation step (restating universe, topk/n_drop, and headline
+metrics), the pinning of the promoted strategy (with a replacement notice),
+the Notion Decision Log write (mocked HTTP), and the rebalancer entrypoint
+check that refuses to run without a promotion. The PromotionFlow handlers
+are driven directly, exactly as ConversationCore's promote_run /
+confirm_promotion tools call them.
 """
 
 from __future__ import annotations
@@ -19,28 +20,37 @@ from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
 from execution.signal import SignalError, StrategyParams, load_strategy_params
 from orchestrator.notion_client import NotionClient
 from orchestrator.notion_recorder import NotionRecorder
-from orchestrator.poller import HypothesisPoller
-from orchestrator.promotion import (
-    ACTION_PROMOTE,
-    ACTION_PROMOTE_CANCEL,
-    ACTION_PROMOTE_CONFIRM,
-    PromotionFlow,
-)
-from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, RunStatus
+from orchestrator.promotion import PromotionFlow
+from orchestrator.rdagent_client import RunArtifacts
 from orchestrator.state import StateStore
 from tests.test_notion_client import FakeResponse, FakeSession
 from tests.test_notion_recorder import DBS, page_response
-from tests.test_poller import (
-    FINISHED_OK,
-    SESSION,
-    THREAD,
-    TRACE_ID,
-    FakeSlack,
-    RecordingSay,
-    StubRdAgent,
-    make_artifacts,
-)
-from tests.test_slack_app import CHANNEL, make_app
+from tests.test_summary import write_qlib_res_csv, write_ret_pkl
+
+THREAD = "1751900000.000100"
+SESSION = "/home/user/rdq-runs/server_ui/traces/Finance Whole Pipeline/2026-07-08_10-00-00-000000"
+
+
+class RecordingSay:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+def make_artifacts(tmp_path: Path, *, with_ret: bool = True) -> RunArtifacts:
+    """A real fixture workspace: qlib_res.csv (+ ret.pkl) on disk."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    csv = write_qlib_res_csv(workspace / "qlib_res.csv")
+    ret = write_ret_pkl(workspace / "ret.pkl") if with_ret else None
+    return RunArtifacts(
+        workspace_path=workspace,
+        qlib_res_csv=csv,
+        ret_pkl=ret,
+        source_pkl=workspace / "source.pkl",
+    )
 
 # A workspace conf shaped like the real us_templates ones (jinja placeholders
 # survive in real workspaces; load_strategy_params renders them tolerantly).
@@ -100,73 +110,11 @@ def make_flow(
     )
 
 
-# --- Promote button on the completion summary (poller) -----------------------
-
-
-def completion_slack(
-    store: StateStore, artifacts_or_exc: Any, status: RunStatus = FINISHED_OK
-) -> FakeSlack:
-    """Run one completion poll and return the FakeSlack that captured it."""
-    rd = StubRdAgent()
-    rd.status_by_trace[TRACE_ID] = status
-    slack = FakeSlack()
-
-    def locate(_session: str | Path) -> RunArtifacts:
-        if isinstance(artifacts_or_exc, Exception):
-            raise artifacts_or_exc
-        return artifacts_or_exc
-
-    HypothesisPoller(store, rd, slack, CHANNEL, locate=locate).poll_once()
-    return slack
-
-
 @pytest.fixture
 def running_store(tmp_path: Path) -> StateStore:
     s = StateStore(tmp_path / "state.sqlite")
     s.create_run(THREAD, SESSION, universe="us_liquid")
     return s
-
-
-def test_completed_run_summary_offers_promote_button(
-    running_store: StateStore, tmp_path: Path
-) -> None:
-    slack = completion_slack(running_store, promotable_artifacts(tmp_path))
-    (post,) = slack.posts
-    section, actions = post["blocks"]
-    assert section["text"]["text"] == post["text"]
-    (button,) = actions["elements"]
-    assert button["action_id"] == ACTION_PROMOTE
-    assert button["value"] == THREAD
-    assert button["text"]["text"] == "Promote to paper trading"
-
-
-def test_stopped_run_summary_offers_promote_button(
-    running_store: StateStore, tmp_path: Path
-) -> None:
-    # end_code -1 = operator stop — the only way an unbounded orchestrator run
-    # ever ends, so its summary must still offer promotion (US-044).
-    stopped = RunStatus(finished=True, end_code=-1, error_msg=None)
-    slack = completion_slack(running_store, promotable_artifacts(tmp_path), status=stopped)
-    (post,) = slack.posts
-    _section, actions = post["blocks"]
-    (button,) = actions["elements"]
-    assert button["action_id"] == ACTION_PROMOTE
-    assert button["value"] == THREAD
-
-
-def test_failed_run_summary_has_no_promote_button(
-    running_store: StateStore, tmp_path: Path
-) -> None:
-    failed = RunStatus(finished=True, end_code=2, error_msg="subprocess died")
-    slack = completion_slack(running_store, promotable_artifacts(tmp_path), status=failed)
-    (post,) = slack.posts
-    assert "blocks" not in post
-
-
-def test_summary_without_artifacts_has_no_promote_button(running_store: StateStore) -> None:
-    slack = completion_slack(running_store, ArtifactNotFoundError("no runner result"))
-    (post,) = slack.posts
-    assert "blocks" not in post
 
 
 # --- confirmation step --------------------------------------------------------
@@ -187,11 +135,6 @@ def test_request_promotion_restates_universe_params_and_metrics(
     assert str(tmp_path / "workspace") in text
     assert "*IC:* 0.0432" in text  # headline metrics restated (FIXTURE_METRICS)
     assert "*MDD:* -8.40%" in text
-    # Confirm/Cancel buttons carry the thread_ts.
-    _section, actions = call["blocks"]
-    by_id = {e["action_id"]: e for e in actions["elements"]}
-    assert set(by_id) == {ACTION_PROMOTE_CONFIRM, ACTION_PROMOTE_CANCEL}
-    assert all(e["value"] == THREAD for e in actions["elements"])
     # The confirmation alone promotes nothing.
     assert store.get_promoted_strategy() is None
 
@@ -457,15 +400,6 @@ def test_confirm_promotion_snapshot_failure_warns_but_promotes(
     assert "no docker logs" in call["text"]
 
 
-def test_cancel_promotion_changes_nothing(store: StateStore, tmp_path: Path) -> None:
-    flow = make_flow(store, promotable_artifacts(tmp_path))
-    say = RecordingSay()
-    flow.cancel_promotion(THREAD, say)
-    assert "cancelled" in say.calls[0]["text"]
-    assert "nothing was changed" in say.calls[0]["text"]
-    assert store.get_promoted_strategy() is None
-
-
 # --- Notion Decision Log (mocked HTTP) -------------------------------------------
 
 
@@ -516,42 +450,6 @@ def test_decision_log_replacement_detail(store: StateStore, tmp_path: Path) -> N
     (create, *_rest) = session.calls
     details = create["json"]["properties"]["Details"]["rich_text"][0]["text"]["content"]
     assert "Replaced: /old/workspace" in details
-
-
-# --- Bolt routing -----------------------------------------------------------------
-
-
-class FakePromotions:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-
-    def request_promotion(self, thread_ts: str, say: Any) -> None:
-        self.calls.append(("request_promotion", thread_ts))
-
-    def confirm_promotion(self, thread_ts: str, say: Any) -> None:
-        self.calls.append(("confirm_promotion", thread_ts))
-
-    def cancel_promotion(self, thread_ts: str, say: Any) -> None:
-        self.calls.append(("cancel_promotion", thread_ts))
-
-
-@pytest.mark.parametrize(
-    ("action_id", "method"),
-    [
-        (ACTION_PROMOTE, "request_promotion"),
-        (ACTION_PROMOTE_CONFIRM, "confirm_promotion"),
-        (ACTION_PROMOTE_CANCEL, "cancel_promotion"),
-    ],
-)
-def test_promotion_buttons_route_through_bolt(
-    monkeypatch: pytest.MonkeyPatch, action_id: str, method: str
-) -> None:
-    from tests.test_poller import dispatch_action
-
-    promotions = FakePromotions()
-    app, _client, _conversation = make_app(monkeypatch, promotions=promotions)
-    dispatch_action(app, action_id, value=THREAD)
-    assert promotions.calls == [(method, THREAD)]
 
 
 # --- rebalancer entrypoint check (execution/promoted.py) ---------------------------

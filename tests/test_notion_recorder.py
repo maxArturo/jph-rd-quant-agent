@@ -1,10 +1,10 @@
 """US-027: research runs recorded in Notion end-to-end.
 
 The recorder is unit-tested against a mocked Notion HTTP session (FakeSession
-from tests/test_notion_client.py), then each lifecycle hook is driven through
-the REAL ConversationCore (FakeClient tool scripts) and HypothesisPoller
-(StubRdAgent/FakeSlack from tests/test_poller.py) to prove the writes fire at
-the right points with the right payloads. No network anywhere.
+from tests/test_notion_client.py), then the conversational lifecycle hooks
+are driven through the REAL ConversationCore (FakeClient tool scripts) to
+prove the writes fire at the right points with the right payloads. No
+network anywhere.
 """
 
 from __future__ import annotations
@@ -25,14 +25,6 @@ from orchestrator.notion_recorder import (
     directive_details,
     load_notion_databases,
 )
-from orchestrator.poller import HypothesisPoller
-from orchestrator.rdagent_client import (
-    KIND_FEEDBACK,
-    KIND_HYPOTHESIS,
-    ArtifactNotFoundError,
-    RunArtifacts,
-    RunStatus,
-)
 from orchestrator.state import Directive, StateStore
 from tests.test_conversation import (
     RecordingSay,
@@ -44,19 +36,19 @@ from tests.test_conversation import (
 )
 from tests.test_llm import FakeClient
 from tests.test_notion_client import FakeResponse, FakeSession
-from tests.test_poller import (
-    FEEDBACK_CONTENT,
-    HYPO_CONTENT,
-    SESSION,
-    TRACE_ID,
-    FakeSlack,
-    StubRdAgent,
-    interaction,
-)
-from tests.test_summary import FIXTURE_METRICS, write_qlib_res_csv, write_ret_pkl
+from tests.test_summary import FIXTURE_METRICS
 
 THREAD = "1751900000.000100"
 CHANNEL = "C0TESTCHAN"
+
+# Shaped like a real upstream hypothesis-interaction payload (poller-era rows;
+# the recorder still accepts them for legacy Hypothesis Log pages).
+HYPO_CONTENT: dict[str, Any] = {
+    "hypothesis": "Adding 20-day momentum factors improves IC",
+    "reason": "Momentum persists in liquid US names",
+    "concise_reason": "momentum persists",
+    "action": "factor",
+}
 
 DBS = NotionDatabases(
     research_ideas="db-ideas",
@@ -405,21 +397,15 @@ def test_start_research_records_researching_status(tmp_path: Path) -> None:
     assert plain_text(props["Universe"], "rich_text") == "us_liquid"
 
 
-def test_stop_run_records_stopped_status_and_cancelled_hypotheses(tmp_path: Path) -> None:
+def test_stop_run_records_stopped_status(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Stopped."))
-    core, store, session = make_core(
-        tmp_path, client, [page_response("page-hypo"), page_response("page-idea")]
-    )
+    core, store, session = make_core(tmp_path, client, [page_response("page-idea")])
     store.create_run(THREAD, str(StubLauncher.TRACE_FOLDER / "t/1"), universe="us_liquid")
     store.set_notion_page("idea", THREAD, "page-idea")
-    store.set_notion_page("hypothesis", "k|1|hypothesis", "page-hypo")
-    assert store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}}) is not None
 
     core.handle_message(THREAD, "stop the run", say=RecordingSay())
 
-    cancelled, stopped = session.calls
-    assert cancelled["url"].endswith("/v1/pages/page-hypo")
-    assert cancelled["json"]["properties"]["Action"] == {"select": {"name": "cancelled"}}
+    (stopped,) = session.calls
     assert stopped["url"].endswith("/v1/pages/page-idea")
     assert stopped["json"]["properties"]["Status"] == {"select": {"name": "stopped"}}
 
@@ -438,166 +424,3 @@ def test_resume_run_records_researching_status(tmp_path: Path) -> None:
     (call,) = session.calls
     assert call["json"]["properties"]["Status"] == {"select": {"name": "researching"}}
 
-
-# --- lifecycle: hypothesis poller -----------------------------------------------------
-
-
-def make_poller(
-    tmp_path: Path,
-    responses: list[FakeResponse],
-    locate: Any = None,
-    supervised: bool = True,  # these tests exercise the button flow's recording
-) -> tuple[HypothesisPoller, StateStore, FakeSession, StubRdAgent, FakeSlack]:
-    recorder, store, session = make_recorder(tmp_path, responses)
-    store.create_run(THREAD, SESSION, universe="us_liquid", supervised=supervised)
-    store.set_notion_page("idea", THREAD, "page-idea")
-    rd = StubRdAgent()
-    slack = FakeSlack()
-    kwargs: dict[str, Any] = {"recorder": recorder}
-    if locate is not None:
-        kwargs["locate"] = locate
-    poller = HypothesisPoller(store, rd, slack, CHANNEL, **kwargs)
-    return poller, store, session, rd, slack
-
-
-def test_posted_hypothesis_records_hypothesis_log_row(tmp_path: Path) -> None:
-    poller, store, session, rd, slack = make_poller(tmp_path, [page_response("page-hypo")])
-    pending = interaction(KIND_HYPOTHESIS, HYPO_CONTENT)
-    rd.pending_by_trace[TRACE_ID] = [pending]
-
-    assert poller.poll_once() == 1
-
-    assert len(slack.posts) == 1  # Slack post still happened
-    (call,) = session.calls
-    props = call["json"]["properties"]
-    assert call["json"]["parent"]["database_id"] == "db-hypo"
-    assert plain_text(props["Hypothesis"], "title") == HYPO_CONTENT["hypothesis"]
-    assert plain_text(props["Interaction Key"], "rich_text") == pending.key
-    assert props["Action"] == {"select": {"name": "pending"}}
-    assert props["Idea"] == {"relation": [{"id": "page-idea"}]}
-    assert store.get_notion_page("hypothesis", pending.key) == "page-hypo"
-
-
-def test_autonomous_hypothesis_records_auto_approved_action(tmp_path: Path) -> None:
-    poller, store, session, rd, slack = make_poller(
-        tmp_path,
-        [page_response("page-hypo"), page_response("page-hypo")],
-        supervised=False,
-    )
-    pending = interaction(KIND_HYPOTHESIS, HYPO_CONTENT)
-    rd.pending_by_trace[TRACE_ID] = [pending]
-
-    assert poller.poll_once() == 1
-
-    assert rd.submitted == [(TRACE_ID, HYPO_CONTENT)]
-    create, update = session.calls
-    assert create["json"]["parent"]["database_id"] == "db-hypo"
-    assert update["method"] == "PATCH"
-    assert update["url"].endswith("/v1/pages/page-hypo")
-    assert update["json"]["properties"] == {"Action": {"select": {"name": "auto_approved"}}}
-    assert store.get_notion_page("hypothesis", pending.key) == "page-hypo"
-
-
-def test_approve_records_approved_action(tmp_path: Path) -> None:
-    poller, store, session, rd, _slack = make_poller(
-        tmp_path, [page_response("page-hypo"), page_response("page-hypo")]
-    )
-    pending = interaction(KIND_HYPOTHESIS, HYPO_CONTENT)
-    rd.pending_by_trace[TRACE_ID] = [pending]
-    poller.poll_once()
-    (row,) = store.list_pending_interactions(THREAD, status="pending")
-
-    poller.approve(row.id, RecordingSay())
-
-    update = session.calls[1]
-    assert update["method"] == "PATCH"
-    assert update["url"].endswith("/v1/pages/page-hypo")
-    assert update["json"]["properties"] == {"Action": {"select": {"name": "approved"}}}
-
-
-def test_edit_reply_records_edited_action_with_operator_input(tmp_path: Path) -> None:
-    poller, store, session, rd, _slack = make_poller(
-        tmp_path, [page_response("page-hypo"), page_response("page-hypo")]
-    )
-    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_HYPOTHESIS, HYPO_CONTENT)]
-    poller.poll_once()
-    (row,) = store.list_pending_interactions(THREAD, status="pending")
-    poller.request_edit(row.id, RecordingSay())
-
-    assert poller.consume_edit_reply(THREAD, "use 60d momentum instead", RecordingSay())
-
-    props = session.calls[1]["json"]["properties"]
-    assert props["Action"] == {"select": {"name": "edited"}}
-    assert plain_text(props["Operator Input"], "rich_text") == "use 60d momentum instead"
-
-
-def fixture_artifacts(tmp_path: Path) -> RunArtifacts:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    write_qlib_res_csv(workspace / "qlib_res.csv")
-    write_ret_pkl(workspace / "ret.pkl")
-    return RunArtifacts(
-        workspace_path=workspace,
-        qlib_res_csv=workspace / "qlib_res.csv",
-        ret_pkl=workspace / "ret.pkl",
-        source_pkl=workspace / "source.pkl",
-    )
-
-
-def test_feedback_records_backtest_results_row(tmp_path: Path) -> None:
-    artifacts = fixture_artifacts(tmp_path)
-    poller, _store, session, rd, _slack = make_poller(
-        tmp_path, [page_response("page-bt")], locate=lambda _p: artifacts
-    )
-    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, FEEDBACK_CONTENT, ts="t9")]
-
-    poller.poll_once()
-
-    assert rd.submitted == [(TRACE_ID, FEEDBACK_CONTENT)]  # auto-ack unaffected
-    (call,) = session.calls
-    body = call["json"]
-    assert body["parent"]["database_id"] == "db-bt"
-    props = body["properties"]
-    assert plain_text(props["Experiment"], "title") == "Experiment t9 — us_liquid"
-    assert props["IC"] == {"number": FIXTURE_METRICS["IC"]}
-    assert props["MDD"] == {
-        "number": FIXTURE_METRICS["1day.excess_return_with_cost.max_drawdown"]
-    }
-    assert isinstance(props["Sharpe"]["number"], float)  # derived from ret.pkl
-    assert props["SOTA"] == {"checkbox": True}  # FEEDBACK_CONTENT decision=True
-    assert plain_text(props["Workspace"], "rich_text") == str(artifacts.workspace_path)
-    assert plain_text(props["Universe"], "rich_text") == "us_liquid"
-    assert props["Idea"] == {"relation": [{"id": "page-idea"}]}
-
-
-def test_feedback_without_artifacts_skips_backtest_row(tmp_path: Path) -> None:
-    def locate(_p: Any) -> RunArtifacts:
-        raise ArtifactNotFoundError("nothing yet")
-
-    poller, _store, session, rd, _slack = make_poller(tmp_path, [], locate=locate)
-    rd.pending_by_trace[TRACE_ID] = [interaction(KIND_FEEDBACK, FEEDBACK_CONTENT)]
-
-    poller.poll_once()
-
-    assert rd.submitted == [(TRACE_ID, FEEDBACK_CONTENT)]  # ack still went through
-    assert session.calls == []
-
-
-def test_completion_records_terminal_idea_status(tmp_path: Path) -> None:
-    def locate(_p: Any) -> RunArtifacts:
-        raise ArtifactNotFoundError("gone")
-
-    poller, store, session, rd, slack = make_poller(
-        tmp_path, [page_response("page-idea")], locate=locate
-    )
-    rd.status_by_trace[TRACE_ID] = RunStatus(finished=True, end_code=0)
-
-    poller.poll_once()
-
-    run = store.get_run(THREAD)
-    assert run is not None and run.status == "completed"
-    assert len(slack.posts) == 1  # completion notice still posted
-    (call,) = session.calls
-    assert call["method"] == "PATCH"
-    assert call["url"].endswith("/v1/pages/page-idea")
-    assert call["json"]["properties"] == {"Status": {"select": {"name": "completed"}}}

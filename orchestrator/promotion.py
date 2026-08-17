@@ -1,18 +1,19 @@
 """Strategy promotion flow: only deliberate choices ever trade (US-033).
 
-A finished run's summary (completed, or deliberately stopped by the operator
-— see PROMOTABLE_STATUSES) carries a Promote button. Clicking it posts a
-confirmation that restates the universe, the TopkDropoutStrategy params
-(topk/n_drop read from the workspace's own qlib conf — the same values the
-rebalancer's signal extraction will trade), and the headline backtest
-metrics. Only the Confirm click promotes: it pins the workspace path + config
-into THE single ``promoted_strategy`` SQLite row (replacing any previous
-strategy, with a Slack notice naming what was replaced) and records a
-Decision Log row in Notion.
+Promotion is conversational (US-044; the Block Kit button flow was removed
+with the hypothesis poller in US-027): the operator asks in-thread, the
+ConversationCore's promote_run tool posts a confirmation that restates the
+universe, the TopkDropoutStrategy params (topk/n_drop read from the
+workspace's own qlib conf — the same values the rebalancer's signal
+extraction will trade), and the headline backtest metrics. Only an explicit
+second yes (the confirm_promotion tool) promotes: it pins the workspace
+path + config into THE single ``promoted_strategy`` SQLite row (replacing
+any previous strategy, with a Slack notice naming what was replaced) and
+records a Decision Log row in Notion.
 
-The candidate is re-derived from the run row + artifacts on every click
-(nothing is cached in memory or in button values beyond the thread_ts), so
-buttons keep working across orchestrator restarts.
+The candidate is re-derived from the run row + artifacts on every call
+(nothing is cached in memory beyond the thread_ts), so the two-step flow
+keeps working across orchestrator restarts.
 
 Confirming also snapshots everything the automated morning prediction
 refresh needs into the workspace (conf_pred_refresh.yaml + pred_refresh.env +
@@ -43,17 +44,8 @@ from orchestrator.state import PromotedStrategy, Run, StateStore
 
 logger = logging.getLogger(__name__)
 
-# slack_bolt's Say or any equivalent accepting (text=..., blocks=..., thread_ts=...).
+# slack_bolt's Say or any equivalent accepting (text=..., thread_ts=...).
 SayFn = Callable[..., Any]
-
-# Block Kit action ids (app.py registers a Bolt listener per id).
-# Button values carry the owning thread_ts — the run row is the durable state.
-ACTION_PROMOTE = "run_promote"
-ACTION_PROMOTE_CONFIRM = "promote_confirm"
-ACTION_PROMOTE_CANCEL = "promote_cancel"
-
-# runs.universe is always set by start_research; None only on pre-US-020 rows.
-FALLBACK_UNIVERSE = "us_liquid"
 
 # Run statuses whose artifacts may be promoted. 'stopped' is deliberate:
 # orchestrator-started runs are unbounded (they never complete on their own),
@@ -61,9 +53,6 @@ FALLBACK_UNIVERSE = "us_liquid"
 # refusing 'stopped' would make promotion unreachable from Slack. 'failed'
 # and 'running' stay refused (no coherent final artifacts to pin).
 PROMOTABLE_STATUSES = frozenset({"completed", "stopped"})
-
-# Slack section blocks cap text at 3000 chars.
-_MAX_SECTION_TEXT = 2900
 
 
 class PromotionError(RuntimeError):
@@ -118,38 +107,6 @@ def _mismatch_warning(candidate: PromotionCandidate) -> str:
     )
 
 
-def _section(text: str) -> dict[str, Any]:
-    if len(text) > _MAX_SECTION_TEXT:
-        text = text[: _MAX_SECTION_TEXT - 1] + "…"
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
-
-
-def _button(label: str, action_id: str, value: str, style: str | None = None) -> dict[str, Any]:
-    element: dict[str, Any] = {
-        "type": "button",
-        "text": {"type": "plain_text", "text": label},
-        "action_id": action_id,
-        "value": value,
-    }
-    if style is not None:
-        element["style"] = style
-    return element
-
-
-def promotion_offer_blocks(thread_ts: str, summary_text: str) -> list[dict[str, Any]]:
-    """The finished-run summary with its Promote button (posted by the poller)."""
-    return [
-        _section(summary_text),
-        {
-            "type": "actions",
-            "block_id": f"promote_offer_{thread_ts}",
-            "elements": [
-                _button("Promote to paper trading", ACTION_PROMOTE, thread_ts, style="primary")
-            ],
-        },
-    ]
-
-
 def confirmation_text(candidate: PromotionCandidate, previous: PromotedStrategy | None) -> str:
     """Restate exactly what a Confirm click will make the rebalancer trade."""
     universe_line = f"• *Universe:* `{candidate.universe}`"
@@ -201,31 +158,14 @@ def _incumbent_context(previous: PromotedStrategy) -> str | None:
     return " · ".join(parts) if parts else None
 
 
-def confirmation_blocks(
-    candidate: PromotionCandidate, previous: PromotedStrategy | None
-) -> list[dict[str, Any]]:
-    thread_ts = candidate.run.thread_ts
-    return [
-        _section(confirmation_text(candidate, previous)),
-        {
-            "type": "actions",
-            "block_id": f"promote_confirm_{thread_ts}",
-            "elements": [
-                _button("Confirm promotion", ACTION_PROMOTE_CONFIRM, thread_ts, style="primary"),
-                _button("Cancel", ACTION_PROMOTE_CANCEL, thread_ts),
-            ],
-        },
-    ]
-
-
 class PromotionFlow:
-    """Handles the Promote / Confirm / Cancel button clicks (Bolt listeners).
+    """Handles the conversational promote/confirm requests (US-044 tools).
 
     Share one instance per process. Every method re-derives the candidate
     from SQLite + the workspace artifacts, posts refusals in-thread, and
-    never raises into Bolt. ``locate`` and ``load_params`` are injectable for
-    tests (defaults resolve the real run artifacts and the workspace's own
-    qlib conf).
+    never raises into the caller. ``locate`` and ``load_params`` are
+    injectable for tests (defaults resolve the real run artifacts and the
+    workspace's own qlib conf).
     """
 
     def __init__(
@@ -250,24 +190,20 @@ class PromotionFlow:
             else DEFAULT_STORE_PATH.expanduser() / "instruments"
         )
 
-    # -- button handlers ------------------------------------------------------
+    # -- conversational handlers (ConversationCore tools call these) ----------
 
     def request_promotion(self, thread_ts: str, say: SayFn) -> None:
-        """Promote click: post the confirmation restating what would trade."""
+        """Promote request: post the confirmation restating what would trade."""
         try:
             candidate = self._candidate(thread_ts)
         except PromotionError as exc:
             say(text=f":no_entry: Cannot promote: {exc}", thread_ts=thread_ts)
             return
         previous = self._store.get_promoted_strategy()
-        say(
-            text=confirmation_text(candidate, previous),
-            blocks=confirmation_blocks(candidate, previous),
-            thread_ts=thread_ts,
-        )
+        say(text=confirmation_text(candidate, previous), thread_ts=thread_ts)
 
     def confirm_promotion(self, thread_ts: str, say: SayFn) -> None:
-        """Confirm click: pin the strategy, notify, and write the Decision Log."""
+        """Explicit second yes: pin the strategy, notify, write the Decision Log."""
         try:
             candidate = self._candidate(thread_ts)
         except PromotionError as exc:
@@ -322,12 +258,6 @@ class PromotionFlow:
                 thread_ts=thread_ts,
             )
             self._recorder.record_idea_status(thread_ts, "promoted")
-
-    def cancel_promotion(self, thread_ts: str, say: SayFn) -> None:
-        say(
-            text=":leftwards_arrow_with_hook: Promotion cancelled — nothing was changed.",
-            thread_ts=thread_ts,
-        )
 
     # -- internals -------------------------------------------------------------
 

@@ -3,7 +3,7 @@
 Fixtures mirror the real artifact shapes: qlib_res.csv is a pandas Series
 written by read_exp_res.py (metric name -> value, qlib's real recorder keys),
 ret.pkl is qlib's report_normal_1day.pkl portfolio DataFrame. The fixture
-builders are reused by tests/test_poller.py's completion tests.
+builders are reused by tests/test_promotion.py's workspace fixtures.
 """
 
 from __future__ import annotations

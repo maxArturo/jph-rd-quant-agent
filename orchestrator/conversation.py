@@ -26,7 +26,6 @@ from orchestrator.run_memory import Digest, compose_instruction
 from orchestrator.state import (
     Directive,
     DuplicateRunError,
-    PendingInteraction,
     Run,
     StateStore,
 )
@@ -144,20 +143,6 @@ class BrokerReader(Protocol):
     def get_portfolio_history(
         self, period: str = "1M", timeframe: str = "1D"
     ) -> PortfolioHistory: ...
-
-
-class HypothesisSteering(Protocol):
-    """What the hypothesis-decision tools need from HypothesisPoller.
-
-    The poller's button handlers already own the full submit/resolve/notify
-    dance (and post their own outcome to the thread) — the conversational
-    tools reuse them verbatim so a spoken "approve" and an Approve click are
-    the same code path.
-    """
-
-    def approve(self, interaction_id: int, say: SayFn) -> None: ...
-
-    def reject(self, interaction_id: int, say: SayFn) -> None: ...
 
 
 class PromotionManager(Protocol):
@@ -297,18 +282,6 @@ CHECK_PNL_SCHEMA: dict[str, Any] = {
     },
 }
 
-APPROVE_HYPOTHESIS_SCHEMA: dict[str, Any] = {
-    # No inputs: acts on the thread's oldest awaiting hypothesis (FIFO).
-    "type": "object",
-    "properties": {},
-}
-
-REJECT_HYPOTHESIS_SCHEMA: dict[str, Any] = {
-    # No inputs: acts on the thread's oldest awaiting hypothesis (FIFO).
-    "type": "object",
-    "properties": {},
-}
-
 PROMOTE_RUN_SCHEMA: dict[str, Any] = {
     # No inputs: promotes the thread's finished run.
     "type": "object",
@@ -418,20 +391,14 @@ def format_universe_ready(materialized: MaterializedUniverse) -> str:
     )
 
 
-def format_run_stopped(run: Run, cancelled_interactions: int) -> str:
+def format_run_stopped(run: Run) -> str:
     """Slack mrkdwn confirmation posted when the operator stops the run."""
-    text = (
+    return (
         ":octagonal_sign: *Research run stopped.*\n"
         f"*Session:* `{run.session_path}`\n"
         "Progress up to the last completed step is checkpointed — say the word"
         " and I'll resume it from there."
     )
-    if cancelled_interactions:
-        text += (
-            f"\n_{cancelled_interactions} open hypothesis prompt(s) above were"
-            " cancelled — the run will re-propose after a resume._"
-        )
-    return text
 
 
 def format_run_resumed(run: Run) -> str:
@@ -440,8 +407,7 @@ def format_run_resumed(run: Run) -> str:
         ":arrow_forward: *Research run resumed*\n"
         f"*Universe:* {run.universe}\n"
         f"*Session:* `{run.session_path}`\n"
-        "Picking up from the last checkpoint — new hypotheses will be posted"
-        " here for approval."
+        "Picking up from the last checkpoint."
     )
 
 
@@ -589,7 +555,6 @@ class ConversationCore:
         recorder: NotionRecorder | None = None,
         breaker: TradingBreaker | None = None,
         broker: BrokerReader | None = None,
-        interactions: HypothesisSteering | None = None,
         promotions: PromotionManager | None = None,
         gpu: GpuRunner | None = None,
         digest_builder: Callable[[], Digest] | None = None,
@@ -634,10 +599,9 @@ class ConversationCore:
         self._broker: BrokerReader = broker
         # Optional Notion audit trail (US-027); None disables recording.
         self._recorder = recorder
-        # Optional wiring to the poller's button handlers / promotion flow.
-        # None (tests, partial wiring) simply leaves the matching tools out of
-        # the loop — the model never sees a tool it cannot execute.
-        self._interactions = interactions
+        # Optional wiring to the promotion flow. None (tests, partial wiring)
+        # simply leaves the promotion tools out of the loop — the model never
+        # sees a tool it cannot execute.
         self._promotions = promotions
         self._histories: dict[str, list[dict[str, Any]]] = {}
 
@@ -663,9 +627,6 @@ class ConversationCore:
             self._check_orders_tool(),
             self._check_pnl_tool(),
         ]
-        if self._interactions is not None:
-            tools.append(self._approve_hypothesis_tool(thread_ts, say))
-            tools.append(self._reject_hypothesis_tool(thread_ts, say))
         if self._promotions is not None:
             tools.append(self._promote_run_tool(thread_ts, say))
             tools.append(self._confirm_promotion_tool(thread_ts, say))
@@ -937,9 +898,8 @@ class ConversationCore:
                     " start_research begins fresh. Confirm briefly to the operator."
                 )
             self._rdagent.stop(self._rdagent.trace_id_of(run.session_path))
-            cancelled = self._cancel_open_interactions(thread_ts)
             run = self._store.update_run_status(thread_ts, "stopped")
-            say(text=format_run_stopped(run, cancelled), thread_ts=thread_ts)
+            say(text=format_run_stopped(run), thread_ts=thread_ts)
             if self._recorder is not None:
                 self._recorder.record_idea_status(thread_ts, "stopped")
             logger.info("stopped research run %s for thread %s", run.session_path, thread_ts)
@@ -1000,8 +960,8 @@ class ConversationCore:
             logger.info("resumed research run %s for thread %s", run.session_path, thread_ts)
             return (
                 "The run was resumed from its stored session and its row is"
-                " 'running' again, so hypothesis polling is re-activated; the"
-                " resume notice was posted. Confirm briefly to the operator."
+                " 'running' again; the resume notice was posted. Confirm"
+                " briefly to the operator."
             )
 
         return ToolSpec(
@@ -1014,22 +974,6 @@ class ConversationCore:
             input_schema=RESUME_RUN_SCHEMA,
             handler=handler,
         )
-
-    def _cancel_open_interactions(self, thread_ts: str) -> int:
-        """Mark the thread's unanswered hypothesis prompts 'cancelled'.
-
-        A stopped run's IPC queues are gone, so pending/editing rows can never
-        be submitted; leaving them actionable would wedge the poller's FIFO
-        guard after a resume (the resumed run re-proposes under fresh keys).
-        """
-        cancelled = 0
-        for status in ("pending", "editing"):
-            for row in self._store.list_pending_interactions(thread_ts, status=status):
-                self._store.resolve_pending_interaction(row.id, "cancelled")
-                if self._recorder is not None:
-                    self._recorder.record_hypothesis_action(row.interaction_key, "cancelled")
-                cancelled += 1
-        return cancelled
 
     def _raw_idea(self, thread_ts: str) -> str | None:
         """The operator's first message this process saw for the thread.
@@ -1279,92 +1223,6 @@ class ConversationCore:
                 " today's number, check_account already reports it."
             ),
             input_schema=CHECK_PNL_SCHEMA,
-            handler=handler,
-        )
-
-    def _awaiting_hypothesis(self, thread_ts: str) -> PendingInteraction:
-        """The thread's oldest hypothesis awaiting a decision, or raise.
-
-        FIFO rule (see poller.py): submitted answers go to the run's oldest
-        blocked request, so the tools may only ever act on the oldest row.
-        """
-        rows = self._store.list_pending_interactions(thread_ts, status="pending")
-        if rows:
-            return rows[0]
-        if self._store.list_pending_interactions(thread_ts, status="editing"):
-            raise ValueError(
-                "the proposed hypothesis is mid-edit — the operator's next plain"
-                " reply in this thread is consumed as the revised hypothesis"
-                " text, so there is nothing to approve or reject right now"
-            )
-        raise ValueError(
-            "no proposed hypothesis is awaiting a decision in this thread"
-        )
-
-    def _approve_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
-        def handler(args: dict[str, Any]) -> str:
-            del args  # no inputs — acts on the thread's oldest awaiting hypothesis
-            assert self._interactions is not None  # tool only registered when wired
-            row = self._awaiting_hypothesis(thread_ts)
-            # The poller handler owns submit/resolve/notify and posts its own
-            # outcome (success or a submit-failure notice) to the thread.
-            self._interactions.approve(row.id, say)
-            resolved = self._store.get_pending_interaction(row.id)
-            if resolved is None or resolved.status != "approved":
-                return (
-                    "Submitting the approval to the run failed (the failure notice"
-                    " was posted in-thread) — the hypothesis is still awaiting a"
-                    " decision. Suggest the operator try again shortly."
-                )
-            logger.info("approved hypothesis #%s via chat for thread %s", row.id, thread_ts)
-            return (
-                "The hypothesis was approved and submitted to the run; the"
-                " confirmation was posted. Confirm briefly to the operator."
-            )
-
-        return ToolSpec(
-            name="approve_hypothesis",
-            description=(
-                "APPROVE the hypothesis currently awaiting the operator's decision"
-                " in this thread (same effect as its Approve button) — the run"
-                " implements it next. Call it only when the operator explicitly"
-                " approves in words ('approve', 'go ahead with it', 'LGTM')."
-                " Never approve on your own judgment or a lukewarm reply."
-            ),
-            input_schema=APPROVE_HYPOTHESIS_SCHEMA,
-            handler=handler,
-        )
-
-    def _reject_hypothesis_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
-        def handler(args: dict[str, Any]) -> str:
-            del args  # no inputs — acts on the thread's oldest awaiting hypothesis
-            assert self._interactions is not None  # tool only registered when wired
-            row = self._awaiting_hypothesis(thread_ts)
-            self._interactions.reject(row.id, say)
-            resolved = self._store.get_pending_interaction(row.id)
-            if resolved is None or resolved.status != "rejected":
-                return (
-                    "Submitting the rejection to the run failed (the failure notice"
-                    " was posted in-thread) — the hypothesis is still awaiting a"
-                    " decision. Suggest the operator try again shortly."
-                )
-            logger.info("rejected hypothesis #%s via chat for thread %s", row.id, thread_ts)
-            return (
-                "The hypothesis was rejected — the run was told to discard it and"
-                " propose a materially different direction; the notice was posted."
-                " Confirm briefly to the operator."
-            )
-
-        return ToolSpec(
-            name="reject_hypothesis",
-            description=(
-                "REJECT the hypothesis currently awaiting the operator's decision"
-                " in this thread (same effect as its Reject button) — the run"
-                " discards the idea and proposes a different direction. Call it"
-                " only when the operator explicitly rejects in words. For revised"
-                " wording they should use the hypothesis message's Edit button."
-            ),
-            input_schema=REJECT_HYPOTHESIS_SCHEMA,
             handler=handler,
         )
 

@@ -145,7 +145,6 @@ def make_core(
     tmp_path: Path,
     client: FakeClient,
     launcher: StubLauncher | None = None,
-    interactions: Any | None = None,
     promotions: Any | None = None,
     gpu: StubGpu | None = None,
     digest_builder: Any | None = None,
@@ -155,7 +154,6 @@ def make_core(
         store=store,
         router=ModelRouter(client=client),
         rdagent=launcher if launcher is not None else StubLauncher(),
-        interactions=interactions,
         promotions=promotions,
         gpu=gpu if gpu is not None else StubGpu(),
         digest_builder=digest_builder,
@@ -822,30 +820,8 @@ def test_stop_run_stops_run_and_updates_status(tmp_path: Path) -> None:
     assert run.status == "stopped"
     # stop notice posted in-thread, then the model's final reply
     assert [c["thread_ts"] for c in say.calls] == [THREAD, THREAD]
-    assert say.calls[0]["text"] == format_run_stopped(run, 0)
+    assert say.calls[0]["text"] == format_run_stopped(run)
     assert reply == "Stopped."
-
-
-def test_stop_run_cancels_open_hypothesis_prompts(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Stopped."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
-    store.create_run(THREAD, SESSION_PATH, universe="us_liquid")
-    pending = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
-    editing = store.add_pending_interaction(THREAD, "k|2|hypothesis", {"content": {}})
-    resolved = store.add_pending_interaction(THREAD, "k|3|hypothesis", {"content": {}})
-    assert pending is not None and editing is not None and resolved is not None
-    store.resolve_pending_interaction(editing.id, "editing")
-    store.resolve_pending_interaction(resolved.id, "approved")
-    say = RecordingSay()
-
-    core.handle_message(THREAD, "stop the run", say)
-
-    # unanswered prompts (pending/editing) were cancelled; resolved rows untouched
-    assert store.get_pending_interaction(pending.id).status == "cancelled"  # type: ignore[union-attr]
-    assert store.get_pending_interaction(editing.id).status == "cancelled"  # type: ignore[union-attr]
-    assert store.get_pending_interaction(resolved.id).status == "approved"  # type: ignore[union-attr]
-    assert "2 open hypothesis prompt(s)" in say.calls[0]["text"]
 
 
 def test_stop_run_without_run_is_rejected(tmp_path: Path) -> None:
@@ -904,7 +880,7 @@ def test_resume_run_resumes_session_and_reactivates_polling(tmp_path: Path) -> N
             "universe": "us_liquid",
         }
     ]
-    # the run row transitioned stopped -> running (what re-activates the poller)
+    # the run row transitioned stopped -> running
     run = store.get_run(THREAD)
     assert run is not None
     assert run.status == "running"
@@ -959,38 +935,7 @@ def test_resume_run_without_directive_is_rejected(tmp_path: Path) -> None:
     assert "save_directive" in tool_result["content"]
 
 
-# --- US-044: spoken hypothesis decisions + conversational promotion ----------
-
-
-class StubSteering:
-    """Stubbed HypothesisPoller button handlers: resolve the row like the real
-    ones do (approve/reject post their own outcome and flip the row status;
-    a submit failure leaves the row actionable)."""
-
-    def __init__(self, store: StateStore, fail: bool = False) -> None:
-        self.store = store
-        self.fail = fail
-        self.approved: list[int] = []
-        self.rejected: list[int] = []
-
-    def approve(self, interaction_id: int, say: Any) -> None:
-        self.approved.append(interaction_id)
-        if self.fail:
-            say(text="Submitting to the research run failed. Try again shortly.",
-                thread_ts=THREAD)
-            return
-        self.store.resolve_pending_interaction(interaction_id, "approved")
-        say(text=":white_check_mark: Hypothesis approved and submitted to the run.",
-            thread_ts=THREAD)
-
-    def reject(self, interaction_id: int, say: Any) -> None:
-        self.rejected.append(interaction_id)
-        if self.fail:
-            say(text="Submitting to the research run failed. Try again shortly.",
-                thread_ts=THREAD)
-            return
-        self.store.resolve_pending_interaction(interaction_id, "rejected")
-        say(text=":no_entry: Hypothesis rejected.", thread_ts=THREAD)
+# --- US-044: conversational promotion ----------------------------------------
 
 
 class StubPromotions:
@@ -1014,93 +959,6 @@ class StubPromotions:
         self.confirmed.append(thread_ts)
         say(text=":rocket: *Strategy promoted to paper trading.*",
             thread_ts=thread_ts)
-
-
-def test_approve_hypothesis_acts_on_the_oldest_pending_row(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("approve_hypothesis", "Approved."))
-    core, store = make_core(tmp_path, client)
-    steering = StubSteering(store)
-    core._interactions = steering  # noqa: SLF001 - make_core built the store first
-    older = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
-    newer = store.add_pending_interaction(THREAD, "k|2|hypothesis", {"content": {}})
-    assert older is not None and newer is not None
-    say = RecordingSay()
-
-    reply = core.handle_message(THREAD, "approve it", say)
-
-    # FIFO: only the OLDEST awaiting row may be answered
-    assert steering.approved == [older.id]
-    assert store.get_pending_interaction(older.id).status == "approved"  # type: ignore[union-attr]
-    assert store.get_pending_interaction(newer.id).status == "pending"  # type: ignore[union-attr]
-    # the handler's confirmation posted in-thread, then the model's reply
-    assert ":white_check_mark:" in say.calls[0]["text"]
-    assert reply == "Approved."
-
-
-def test_reject_hypothesis_resolves_row_and_notifies(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("reject_hypothesis", "Rejected."))
-    core, store = make_core(tmp_path, client)
-    steering = StubSteering(store)
-    core._interactions = steering  # noqa: SLF001
-    row = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
-    assert row is not None
-
-    core.handle_message(THREAD, "reject that", RecordingSay())
-
-    assert steering.rejected == [row.id]
-    assert store.get_pending_interaction(row.id).status == "rejected"  # type: ignore[union-attr]
-
-
-def test_approve_hypothesis_without_pending_row_is_rejected(tmp_path: Path) -> None:
-    client = FakeClient(
-        judgment_messages=lifecycle_script("approve_hypothesis", "Nothing to approve.")
-    )
-    core, store = make_core(tmp_path, client)
-    steering = StubSteering(store)
-    core._interactions = steering  # noqa: SLF001
-
-    core.handle_message(THREAD, "approve", RecordingSay())
-
-    assert steering.approved == []
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "no proposed hypothesis" in tool_result["content"]
-
-
-def test_approve_hypothesis_mid_edit_is_rejected(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("approve_hypothesis", "Mid-edit."))
-    core, store = make_core(tmp_path, client)
-    steering = StubSteering(store)
-    core._interactions = steering  # noqa: SLF001
-    row = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
-    assert row is not None
-    store.resolve_pending_interaction(row.id, "editing")
-
-    core.handle_message(THREAD, "approve", RecordingSay())
-
-    assert steering.approved == []
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "mid-edit" in tool_result["content"]
-
-
-def test_approve_hypothesis_submit_failure_keeps_row_actionable(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("approve_hypothesis", "Failed."))
-    core, store = make_core(tmp_path, client)
-    steering = StubSteering(store, fail=True)
-    core._interactions = steering  # noqa: SLF001
-    row = store.add_pending_interaction(THREAD, "k|1|hypothesis", {"content": {}})
-    assert row is not None
-
-    core.handle_message(THREAD, "approve", RecordingSay())
-
-    # handler was invoked but the submit failed: the row stays pending and the
-    # tool reports the failure (as a normal result, not an error — the failure
-    # notice already posted in-thread)
-    assert steering.approved == [row.id]
-    assert store.get_pending_interaction(row.id).status == "pending"  # type: ignore[union-attr]
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert "failed" in tool_result["content"]
 
 
 def test_promote_run_relays_the_posted_confirmation(tmp_path: Path) -> None:
@@ -1144,32 +1002,22 @@ def test_confirm_promotion_pins_via_the_flow(tmp_path: Path) -> None:
     assert ":rocket: *Strategy promoted" in say.calls[0]["text"]
 
 
-def test_decision_tools_absent_when_not_wired(tmp_path: Path) -> None:
-    """A core without steering/promotion wiring never offers the tools."""
+def test_promotion_tools_absent_when_not_wired(tmp_path: Path) -> None:
+    """A core without promotion wiring never offers the tools."""
     client = FakeClient(judgment_messages=[message("end_turn", [text_block("Hi.")])])
     core, store = make_core(tmp_path, client)
 
     core.handle_message(THREAD, "hello", RecordingSay())
 
     offered = {tool["name"] for tool in client.stream_calls[0]["tools"]}
-    assert offered.isdisjoint(
-        {"approve_hypothesis", "reject_hypothesis", "promote_run", "confirm_promotion"}
-    )
+    assert offered.isdisjoint({"promote_run", "confirm_promotion"})
 
 
-def test_decision_tools_offered_when_wired(tmp_path: Path) -> None:
+def test_promotion_tools_offered_when_wired(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=[message("end_turn", [text_block("Hi.")])])
-    core, store = make_core(
-        tmp_path, client, interactions=StubSteering.__new__(StubSteering),
-        promotions=StubPromotions(),
-    )
+    core, store = make_core(tmp_path, client, promotions=StubPromotions())
 
     core.handle_message(THREAD, "hello", RecordingSay())
 
     offered = {tool["name"] for tool in client.stream_calls[0]["tools"]}
-    assert {
-        "approve_hypothesis",
-        "reject_hypothesis",
-        "promote_run",
-        "confirm_promotion",
-    } <= offered
+    assert {"promote_run", "confirm_promotion"} <= offered

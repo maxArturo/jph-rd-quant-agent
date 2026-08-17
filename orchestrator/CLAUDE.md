@@ -9,12 +9,14 @@
   OneCLI proxy and never vault these (docs/decisions.md 2026-07-08).
 - Persistent state goes through `orchestrator/state.py` (`StateStore`), not ad
   hoc sqlite3 calls. It opens a short-lived connection per method, so one
-  instance is safe to share between Bolt handlers and background pollers —
+  instance is safe to share between Bolt handlers and background threads —
   never cache a `sqlite3.Connection` across threads. Extend the schema by
   adding `CREATE ... IF NOT EXISTS` statements to `_SCHEMA` (migration reruns
   on every startup). Dedup/uniqueness lives in the schema (runs.thread_ts PK
-  → `DuplicateRunError`; pending_interactions.interaction_key UNIQUE → insert
-  returns `None`), so restarts can't double-post. The DB runs in WAL mode
+  → `DuplicateRunError`), so restarts can't double-post. The
+  `pending_interactions` table is legacy (the poller that wrote it was
+  removed in US-027): read-only via `list_interactions`, never add a write
+  path or a destructive migration for it. The DB runs in WAL mode
   with a 30s busy timeout (both set in `_connect`, WAL persists in the file)
   so cross-process writers (GPU pipeline unit, CLI promotes) queue instead of
   raising 'database is locked' — keep any new sqlite connection in this repo
@@ -77,13 +79,9 @@
   (start_run/trace_dir/trace_id_of/stop/resume; stub-friendly — see
   StubLauncher in tests/test_conversation.py) rather than the concrete client.
 - Run lifecycle via `runs.status` (US-024): stop_run flips
-  running -> 'stopped' AND cancels the thread's unanswered
-  pending/editing interaction rows ('cancelled' — a stopped run's IPC queues
-  are dead and the resumed run re-proposes under fresh keys); resume_run
-  flips back to 'running', which is what re-activates the poller (it only
-  polls `status='running'` rows). Never flip a row to 'running' without
-  actually resuming the server-side process, or the poller will poll a
-  corpse forever.
+  running -> 'stopped'; resume_run flips back to 'running' (legacy
+  server_ui path only — GPU runs cannot be resumed). Never flip a row to
+  'running' without actually resuming the server-side process.
 
 - Notion writes go through `orchestrator/notion_client.py` (`NotionClient`):
   bare HTTPS with only `Notion-Version: 2022-06-28` — NEVER add an
@@ -203,42 +201,15 @@
   AND a guarded `ALTER TABLE` in `migrate()` (check `PRAGMA table_info`),
   like `runs.universe_tickers`.
 
-- Hypothesis steering lives in `orchestrator/poller.py` (`HypothesisPoller`):
-  one instance per process polls all `running` runs and also owns the button
-  handlers (`approve`/`reject`/`request_edit`/`consume_edit_reply`). app.py
-  depends on it only via the `InteractionHandler` protocol and registers the
-  Block Kit `hypo_approve`/`hypo_edit`/`hypo_reject` action listeners plus the
-  edit-reply interception (checked BEFORE the conversational core sees a
-  thread message). Lifecycle lives in `pending_interactions.status`:
-  `pending → editing → approved|edited|rejected` (feedback: `auto_approved`);
-  dedup is the schema UNIQUE key, so restarts never repost. Answer FIFO rule:
-  never submit anything for a run while an earlier hypothesis row is still
-  `pending`/`editing` — responses answer the oldest blocked request. If a
-  Slack post or submit fails, free/keep the row so the next poll or click
-  retries (never resolve a row whose submit didn't go through).
-- Autonomous runs (US-045, the DEFAULT — `runs.supervised=0`): the poller
-  auto-approves each hypothesis (submit unchanged → resolve `auto_approved` →
-  narrate to the thread, no buttons; narration is best-effort and never
-  unwinds a submit) and posts a one-line verdict per auto-acked feedback.
-  Brakes: after `max_hypotheses` submitted hypothesis rows (statuses in
-  `SUBMITTED_STATUSES`; RDQ_MAX_HYPOTHESES via config.py, default 10) the
-  next proposal is recorded 'cancelled' and the run stopped via /control —
-  the run row stays 'running' ON PURPOSE so the US-022 completion path posts
-  the summary + Promote offer; never flip it in the halt. 3 consecutive
-  failed feedbacks with identical `reason` text abort the run early
-  (infrastructure failure signature). All budget/streak state derives from
-  `StateStore.list_interactions` each poll — no in-memory counters, restarts
-  resume cleanly. Supervised runs come from `start_research supervised=true`
-  and keep the button flow above; `editing` rows block autonomous approval
-  too (operator owns the FIFO slot).
-- Reject has no upstream regenerate action — `rejection_payload()` rides the
-  instruction in the hypothesis text (see docs/decisions.md US-021 entry)
-  and MUST keep the exact constructor key set (`type(hypo)(**dict)`).
-- Testing Bolt block actions: dispatch a `{"type": "block_actions", ...}`
-  payload as `BoltRequest(body=json.dumps(payload), mode="socket_mode")`
-  (no event_callback envelope — interactive payloads ARE the body); Bolt
-  injects `ack`/`action`/`say`, and `process_before_response=True` keeps it
-  synchronous. See dispatch_action in tests/test_poller.py.
+- The hypothesis poller and ALL Block Kit flows were removed in US-027
+  (`orchestrator/poller.py`, the `hypo_approve`/`hypo_edit`/`hypo_reject`
+  and `run_promote`/`promote_confirm`/`promote_cancel` action listeners,
+  and the approve/reject hypothesis ToolSpecs). GPU runs are driven
+  end-to-end by ops/gpu_pipeline (digests, completion summary, gate); the
+  only Bolt listeners left are the message handler and the OneCLI approvals
+  buttons. Don't add new Block Kit action flows — operator decisions are
+  conversational tools (US-044), and buttons proved unclickable via the
+  Slack API anyway.
 
 - Global GPU run lock (US-020): `GpuBackend.active_run_lock()` reads
   `ops/run_lock.py`'s lock file (`(active, broken_stale)`; a stale lock —
@@ -294,36 +265,29 @@
   ret.pkl is qlib's report_normal_1day DataFrame (columns account/return/
   turnover/cost/bench/..., trading-day index); treat `cost`/`bench` as
   optional when consuming it.
-- Poller completion order (US-022): render/parse artifacts FIRST (so
-  deterministically-bad artifacts degrade to an honest message instead of a
-  retry loop), then post summary, upload chart, and update the run row to its
-  terminal status LAST — the status flip is what removes the run from the
-  `running` set, so a transient Slack failure retries the whole completion on
-  the next poll. Terminal mapping from the upstream END message:
-  end_code 0/None -> `completed`, -1 (operator stop) -> `stopped`,
-  else -> `failed` (`terminal_status()` in poller.py).
-
-- Strategy promotion (US-033) lives in `orchestrator/promotion.py`
-  (`PromotionFlow`): the poller adds the Promote button to a finished run's
-  summary (`promotion_offer_blocks`; statuses in `PROMOTABLE_STATUSES` =
-  completed AND operator-stopped — unbounded orchestrator runs only ever end
-  by an operator stop, so 'stopped' is their normal successful ending;
-  US-044), and app.py routes the three
-  `run_promote`/`promote_confirm`/`promote_cancel` actions via the
-  `PromotionHandler` protocol. Button values carry ONLY the thread_ts — the
-  candidate (workspace, topk/n_drop AND universe from the workspace's own
-  conf via `execution.signal.load_strategy_params`/`load_market`, tickers
-  from the store instruments file, headline metrics) is re-derived from
-  SQLite + run artifacts on every click, so buttons survive restarts with no
-  pending-promotion state. The universe is NEVER taken from the run-row
-  label — the conf's market line bounds pred.pkl (2026-08-05 incident); a
-  disagreeing label is called out in every promotion message. Promotion
-  refuses when the run is running/failed or topk/n_drop/market can't be read
-  (the rebalancer couldn't reproduce the strategy); metrics merely degrade
-  to n/a, and a missing instruments file degrades universe_tickers to None
-  (the rebalancer's divergence check skips). Confirm pins
-  workspace + config into the single `promoted_strategy` row (replacement is
-  announced in-thread), writes a Decision Log row
+- Strategy promotion (US-033, conversational since US-027/US-044) lives in
+  `orchestrator/promotion.py` (`PromotionFlow`): ConversationCore's
+  `promote_run`/`confirm_promotion` ToolSpecs call
+  `request_promotion`/`confirm_promotion` directly (protocol
+  `PromotionManager` in conversation.py); the tools capture what the flow
+  posted via a recording `say` wrapper and return it verbatim so the model
+  relays the actual confirmation/refusal. Two-step promotion is preserved
+  conversationally: the model is prompted to require an explicit second yes
+  before confirm_promotion. Statuses in `PROMOTABLE_STATUSES` = completed
+  AND operator-stopped ('stopped' is a normal successful ending; US-044).
+  The candidate (workspace, topk/n_drop AND universe from the workspace's
+  own conf via `execution.signal.load_strategy_params`/`load_market`,
+  tickers from the store instruments file, headline metrics) is re-derived
+  from SQLite + run artifacts on every call, so the flow survives restarts
+  with no pending-promotion state. The universe is NEVER taken from the
+  run-row label — the conf's market line bounds pred.pkl (2026-08-05
+  incident); a disagreeing label is called out in every promotion message.
+  Promotion refuses when the run is running/failed or topk/n_drop/market
+  can't be read (the rebalancer couldn't reproduce the strategy); metrics
+  merely degrade to n/a, and a missing instruments file degrades
+  universe_tickers to None (the rebalancer's divergence check skips).
+  Confirm pins workspace + config into the single `promoted_strategy` row
+  (replacement is announced in-thread), writes a Decision Log row
   (`NotionRecorder.record_decision`), and moves the idea page's Status to
   `promoted`. US-012: the confirmation text shows the INCUMBENT's own
   IC/ARR/MDD + test window (read from its workspace via ops.gpu_trace,
@@ -334,26 +298,9 @@
   keep the pinned config keys (universe/universe_tickers/topk/n_drop/
   thread_ts/session_path) in sync with what US-034 consumes.
 
-- Spoken hypothesis decisions + conversational promotion (US-044):
-  ConversationCore optionally takes `interactions=` (the HypothesisPoller) and
-  `promotions=` (the PromotionFlow) and, ONLY when wired, offers
-  `approve_hypothesis`/`reject_hypothesis` and `promote_run`/
-  `confirm_promotion` ToolSpecs — a spoken "approve" rides the exact same
-  poller/flow handlers as the buttons (protocols `HypothesisSteering` /
-  `PromotionManager` in conversation.py). The hypothesis tools act on the
-  thread's OLDEST pending row (the FIFO rule) and re-check the row's status
-  after the handler runs: a failed submit reports back as a normal tool
-  result (the handler already posted the failure in-thread), never resolves
-  the row. The promotion tools capture what the flow posted via a recording
-  `say` wrapper and return it verbatim so the model relays the actual
-  confirmation/refusal. Edit stays button-driven (the edit-reply interception
-  in app.py consumes the NEXT thread message raw — a conversational edit tool
-  would race it). Two-step promotion is preserved conversationally: the model
-  is prompted to require an explicit second yes before confirm_promotion.
-
 - OneCLI approvals bridge (US-039) lives in `orchestrator/approvals.py`
-  (`ApprovalsBridge` + `OneCliApprovalsClient`): a second background thread
-  (started alongside the poller in app.py main) long-polls the gateway's
+  (`ApprovalsBridge` + `OneCliApprovalsClient`): a background thread
+  (started in app.py main) long-polls the gateway's
   pending credential approvals and posts them to the CHANNEL (not a thread)
   as `onecli_approve`/`onecli_deny` buttons, routed via the
   `ApprovalsHandler` protocol. The approvals endpoints live on the GATEWAY

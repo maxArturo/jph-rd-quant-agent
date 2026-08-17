@@ -338,44 +338,35 @@ def test_fresh_db_without_promotion_backfills_nothing(store: StateStore) -> None
     assert store.list_promotion_history() == []
 
 
-# -- pending interactions ---------------------------------------------------------
+# -- pending interactions (legacy, read-only since US-027) -------------------------
 
 
-def test_pending_interaction_add_and_list(store: StateStore) -> None:
-    added = store.add_pending_interaction(
-        "111.222", "hypo-1", {"hypothesis": "momentum works"}
-    )
-    assert added is not None and added.status == "pending"
-    listed = store.list_pending_interactions()
-    assert listed == [added]
+def _seed_legacy_interaction(
+    db_path: Path, thread_ts: str, key: str, status: str = "pending"
+) -> None:
+    """Insert a poller-era row the way the deleted write path used to.
+
+    The poller was removed in US-027; historic rows must stay readable, so
+    the seed goes through raw SQL exactly like a legacy on-disk DB.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO pending_interactions (thread_ts, interaction_key, payload,"
+            " status, created_at) VALUES (?, ?, ?, ?, ?)",
+            (thread_ts, key, '{"kind": "hypothesis"}', status, "2026-07-08T10:00:00+00:00"),
+        )
 
 
-def test_pending_interaction_dedup_on_key(store: StateStore) -> None:
-    assert store.add_pending_interaction("111.222", "hypo-1", {"a": 1}) is not None
-    assert store.add_pending_interaction("111.222", "hypo-1", {"a": 1}) is None
-    assert len(store.list_pending_interactions()) == 1
+def test_legacy_interaction_rows_remain_readable(store: StateStore, db_path: Path) -> None:
+    _seed_legacy_interaction(db_path, "111.222", "hypo-1", status="approved")
+    _seed_legacy_interaction(db_path, "111.222", "hypo-2", status="pending")
+    _seed_legacy_interaction(db_path, "333.444", "hypo-3", status="rejected")
 
-
-def test_pending_interaction_resolve(store: StateStore) -> None:
-    added = store.add_pending_interaction("111.222", "hypo-1", {"a": 1})
-    assert added is not None
-    resolved = store.resolve_pending_interaction(added.id, "approved")
-    assert resolved.status == "approved"
-    assert resolved.resolved_at is not None
-    assert store.list_pending_interactions() == []  # default lists only 'pending'
-    assert store.list_pending_interactions(status="approved") == [resolved]
-
-
-def test_pending_interaction_list_filters_by_thread(store: StateStore) -> None:
-    store.add_pending_interaction("1.1", "k1", {})
-    store.add_pending_interaction("2.2", "k2", {})
-    listed = store.list_pending_interactions(thread_ts="1.1")
-    assert [item.interaction_key for item in listed] == ["k1"]
-
-
-def test_resolve_missing_interaction_raises(store: StateStore) -> None:
-    with pytest.raises(KeyError):
-        store.resolve_pending_interaction(42, "approved")
+    rows = store.list_interactions("111.222")
+    assert [r.interaction_key for r in rows] == ["hypo-1", "hypo-2"]  # oldest first
+    assert [r.status for r in rows] == ["approved", "pending"]
+    assert rows[0].payload == {"kind": "hypothesis"}
+    assert store.list_interactions("999.999") == []
 
 
 # -- restart survival --------------------------------------------------------------
@@ -386,8 +377,6 @@ def test_state_survives_store_restart(db_path: Path) -> None:
     store.create_directive("111.222", "idea", universe_hint="semis")
     store.create_run("111.222", session_path="/logs/run1", universe="custom_semis")
     store.set_promoted_strategy("/workspaces/abc", {"topk": 30})
-    pending = store.add_pending_interaction("111.222", "hypo-1", {"h": "x"})
-    assert pending is not None
 
     reopened = StateStore(db_path)  # simulates process restart
     directive = reopened.get_directive("111.222")
@@ -396,7 +385,6 @@ def test_state_survives_store_restart(db_path: Path) -> None:
     assert run is not None and run.universe == "custom_semis"
     promoted = reopened.get_promoted_strategy()
     assert promoted is not None and promoted.workspace_path == "/workspaces/abc"
-    assert reopened.list_pending_interactions("111.222") == [pending]
 
 
 # -- thread universes (US-023) -------------------------------------------------
@@ -506,13 +494,3 @@ def test_migration_adds_supervised_to_legacy_db(db_path: Path) -> None:
     assert legacy is not None and legacy.supervised is False
 
 
-def test_list_interactions_returns_all_statuses_oldest_first(store: StateStore) -> None:
-    first = store.add_pending_interaction("t1", "k1", {"kind": "hypothesis"})
-    second = store.add_pending_interaction("t1", "k2", {"kind": "feedback"})
-    store.add_pending_interaction("t2", "k3", {"kind": "hypothesis"})  # other thread
-    assert first is not None and second is not None
-    store.resolve_pending_interaction(first.id, "auto_approved")
-
-    rows = store.list_interactions("t1")
-    assert [r.interaction_key for r in rows] == ["k1", "k2"]
-    assert [r.status for r in rows] == ["auto_approved", "pending"]

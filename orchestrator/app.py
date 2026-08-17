@@ -29,28 +29,6 @@ class MessageResponder(Protocol):
     def handle_message(self, thread_ts: str, text: str, say: Say) -> str: ...
 
 
-class InteractionHandler(Protocol):
-    """What the app needs from the hypothesis poller (see HypothesisPoller)."""
-
-    def approve(self, interaction_id: int, say: Say) -> None: ...
-
-    def reject(self, interaction_id: int, say: Say) -> None: ...
-
-    def request_edit(self, interaction_id: int, say: Say) -> None: ...
-
-    def consume_edit_reply(self, thread_ts: str, text: str, say: Say) -> bool: ...
-
-
-class PromotionHandler(Protocol):
-    """What the app needs from the promotion flow (see PromotionFlow)."""
-
-    def request_promotion(self, thread_ts: str, say: Say) -> None: ...
-
-    def confirm_promotion(self, thread_ts: str, say: Say) -> None: ...
-
-    def cancel_promotion(self, thread_ts: str, say: Say) -> None: ...
-
-
 class ApprovalsHandler(Protocol):
     """What the app needs from the OneCLI approvals bridge (see ApprovalsBridge)."""
 
@@ -104,7 +82,6 @@ def handle_message(
     say: Say,
     channel_id: str,
     conversation: MessageResponder,
-    interactions: InteractionHandler | None = None,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
 ) -> bool:
@@ -113,18 +90,10 @@ def handle_message(
     Replies target the message's thread: for a top-level message the reply
     starts a thread on it (thread_ts = its ts); for a threaded message the
     reply stays in that thread (thread_ts = the event's thread_ts).
-
-    When the thread has a hypothesis in the Edit round-trip, the message is
-    the operator's edit text and is consumed by the poller instead of the
-    conversational core.
     """
     if not _is_actionable_user_message(event, channel_id, trusted_bot_ids, bot_user_id):
         return False
     thread_ts = event.get("thread_ts") or event["ts"]
-    if interactions is not None and interactions.consume_edit_reply(
-        thread_ts, event["text"], say
-    ):
-        return True
     conversation.handle_message(thread_ts, event["text"], say)
     return True
 
@@ -132,8 +101,6 @@ def handle_message(
 def create_app(
     config: SlackConfig,
     conversation: MessageResponder,
-    interactions: InteractionHandler | None = None,
-    promotions: PromotionHandler | None = None,
     approvals: ApprovalsHandler | None = None,
     client: WebClient | None = None,
     token_verification_enabled: bool = True,
@@ -165,57 +132,9 @@ def create_app(
             say,
             config.channel_id,
             conversation,
-            interactions,
             trusted_bot_ids=trusted_bot_ids,
             bot_user_id=bot_user_id,
         )
-
-    if interactions is not None:
-        # Local alias: pyright does not carry the None-narrowing into closures.
-        handler = interactions
-        # Late import keeps the action-id constants next to their handlers.
-        from orchestrator.poller import ACTION_APPROVE, ACTION_EDIT, ACTION_REJECT
-
-        def _interaction_id(action: dict[str, Any]) -> int:
-            return int(action["value"])
-
-        @app.action(ACTION_APPROVE)
-        def _on_approve(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            handler.approve(_interaction_id(action), say)
-
-        @app.action(ACTION_EDIT)
-        def _on_edit(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            handler.request_edit(_interaction_id(action), say)
-
-        @app.action(ACTION_REJECT)
-        def _on_reject(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            handler.reject(_interaction_id(action), say)
-
-    if promotions is not None:
-        promoter = promotions
-        from orchestrator.promotion import (
-            ACTION_PROMOTE,
-            ACTION_PROMOTE_CANCEL,
-            ACTION_PROMOTE_CONFIRM,
-        )
-
-        @app.action(ACTION_PROMOTE)
-        def _on_promote(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            promoter.request_promotion(str(action["value"]), say)
-
-        @app.action(ACTION_PROMOTE_CONFIRM)
-        def _on_promote_confirm(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            promoter.confirm_promotion(str(action["value"]), say)
-
-        @app.action(ACTION_PROMOTE_CANCEL)
-        def _on_promote_cancel(ack: Any, action: dict[str, Any], say: Say) -> None:
-            ack()
-            promoter.cancel_promotion(str(action["value"]), say)
 
     if approvals is not None:
         approver = approvals
@@ -237,7 +156,7 @@ def create_app(
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
-    from orchestrator.config import load_max_hypotheses, load_onecli_url, load_trusted_bot_ids
+    from orchestrator.config import load_onecli_url, load_trusted_bot_ids
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
     from orchestrator.notion_client import NotionClient
@@ -246,7 +165,6 @@ def main() -> None:
         RecorderConfigError,
         load_notion_databases,
     )
-    from orchestrator.poller import HypothesisPoller
     from orchestrator.promotion import PromotionFlow
     from orchestrator.rdagent_client import RdAgentClient
     from orchestrator.state import StateStore
@@ -255,10 +173,11 @@ def main() -> None:
     config = load_slack_config()
     store = StateStore()
     rdagent = RdAgentClient()
-    # One WebClient shared by Bolt and the background poller (which posts
-    # outside any Bolt request context, so it needs the client directly).
-    # proxy=None immediately: slack_sdk loads HTTPS_PROXY from the env and
-    # ignores NO_PROXY, and the auth.test below runs before handler setup.
+    # One WebClient shared by Bolt and the background threads (approvals
+    # bridge, run reaper — they post outside any Bolt request context, so
+    # they need the client directly). proxy=None immediately: slack_sdk loads
+    # HTTPS_PROXY from the env and ignores NO_PROXY, and the auth.test below
+    # runs before handler setup.
     web_client = WebClient(token=config.bot_token)
     web_client.proxy = None
 
@@ -288,14 +207,6 @@ def main() -> None:
 
         recorder = NotionRecorder(NotionClient(), databases, store, permalink=_permalink)
 
-    poller = HypothesisPoller(
-        store,
-        rdagent,
-        slack=web_client,
-        channel_id=config.channel_id,
-        recorder=recorder,
-        max_hypotheses=load_max_hypotheses(),
-    )
     # locate understands both backends: fetched GPU traces (remapped pickled
     # paths, last-SOTA candidate) and classic server_ui traces.
     from orchestrator.gpu_backend import GpuBackend, locate_run_artifacts
@@ -309,8 +220,8 @@ def main() -> None:
         router=ModelRouter(),
         rdagent=rdagent,
         recorder=recorder,
-        # Spoken decisions ride the same handlers as the buttons (US-044).
-        interactions=poller,
+        # Promotion is conversational (US-044): promote_run/confirm_promotion
+        # tools drive the PromotionFlow handlers directly.
         promotions=promotions,
         gpu=gpu,
         # US-015: run-history digest injected into RDQ_USER_INSTRUCTION at
@@ -335,14 +246,11 @@ def main() -> None:
     app = create_app(
         config,
         conversation,
-        interactions=poller,
-        promotions=promotions,
         approvals=approvals,
         client=web_client,
         trusted_bot_ids=trusted_bot_ids,
         bot_user_id=bot_user_id,
     )
-    poller.start()
     approvals.start()
     reaper.start()
     logger.info("starting Socket Mode connection (channel %s)", config.channel_id)
