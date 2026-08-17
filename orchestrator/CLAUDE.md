@@ -115,14 +115,16 @@
   (`NotionRecorder`, US-027) — the single write funnel for Research Ideas /
   Hypothesis Log / Backtest Results. It is best-effort BY DESIGN: every
   `record_*` method logs-and-swallows its own failures (a Notion outage must
-  never break Slack flows or the poller), so call sites never wrap it in
+  never break Slack flows), so call sites never wrap it in
   try/except — but also never rely on its return value for control flow.
   Page-id mappings live in StateStore's `notion_pages` table (kind `idea`
   keyed by thread_ts, kind `hypothesis` keyed by interaction_key); use
   `get_notion_page`/`set_notion_page`, never re-query Notion to find a page.
-  Backtest Results rows are written at FEEDBACK auto-ack time (one feedback =
-  one completed experiment; its `decision` field is the SOTA flag), not at
-  run END. Recorder property names must match
+  Since US-027 only the idea/decision methods have live callers —
+  `record_hypothesis`/`record_hypothesis_action`/`record_backtest` were
+  poller-driven and are prod-dead (per-hypothesis rows don't exist on the
+  GPU path; run history lives in Strategy Notes' run_summary JSON instead).
+  Recorder property names must match
   docs/reference/notion-schema.md; metric properties reuse
   summary.METRIC_SPECS labels. Tests: real recorder + NotionClient over
   FakeSession (tests/test_notion_recorder.py) — recorder failures are
@@ -176,25 +178,43 @@
   refuses while a proposal is unconfirmed, then copies name + tickers onto
   the run row (`runs.universe_tickers`, JSON). Artifact layout mirrors
   us_liquid: `~/rdq-data/factor_source/<name>` + `~/rdq-data/templates/<name>`
-  — consumed since 2026-08-05 via the upload/resume `universe` field
-  (research/server_ui.py wires the run env per-universe and 400s when the
-  artifacts are missing; rdagent_client sends the field on start_run AND
-  resume). Keep `MARKET_LINE` in sync with research/us_templates conf yamls —
-  the render hard-fails if the anchor line drifts.
+  — consumed by the GPU pipeline's `--universe` flag (GpuBackend.launch
+  passes the run row's universe through; the worker launch wiring
+  hard-refuses when the artifacts are missing). Keep `MARKET_LINE` in sync
+  with research/us_templates conf yamls — the render hard-fails if the
+  anchor line drifts.
 - Schema changes to an EXISTING table cannot ride `CREATE TABLE IF NOT
   EXISTS` (it skips existing DBs): add the column to `_SCHEMA` for fresh DBs
   AND a guarded `ALTER TABLE` in `migrate()` (check `PRAGMA table_info`),
   like `runs.universe_tickers`.
 
-- The hypothesis poller and ALL Block Kit flows were removed in US-027
+- GPU burst workers are the ONLY research backend: `GpuBackend.launch`
+  starts `ops/gpu_pipeline` as a transient user unit (`rdq-gpu-run-<ts>`),
+  which drives the whole run end-to-end (provision → loops with per-loop
+  Slack digests → fetch → completion summary → gate → destroy). The
+  hypothesis poller and ALL Block Kit flows were removed in US-027
   (`orchestrator/poller.py`, the `hypo_approve`/`hypo_edit`/`hypo_reject`
   and `run_promote`/`promote_confirm`/`promote_cancel` action listeners,
-  and the approve/reject hypothesis ToolSpecs). GPU runs are driven
-  end-to-end by ops/gpu_pipeline (digests, completion summary, gate); the
-  only Bolt listeners left are the message handler and the OneCLI approvals
-  buttons. Don't add new Block Kit action flows — operator decisions are
-  conversational tools (US-044), and buttons proved unclickable via the
-  Slack API anyway.
+  and the approve/reject hypothesis ToolSpecs); the only Bolt listeners
+  left are the message handler and the OneCLI approvals buttons. Don't add
+  new Block Kit action flows — operator decisions are conversational tools
+  (US-044), and buttons proved unclickable via the Slack API anyway.
+- The poller-era brakes (RDQ_MAX_HYPOTHESES cap, identical-error abort,
+  per-hypothesis approval) do NOT exist on the GPU path (accepted loss,
+  docs/decisions.md 2026-08-17). What bounds a GPU run instead: the
+  `--loop_n` hypothesis budget, the pipeline's `--max-hours` wall-clock
+  teardown (default 24h), the hourly `rdq-gpu-watchdog` billing reaper, the
+  global run lock (US-020, one run at a time), and the stale run-row reaper
+  (US-021).
+- Gate/auto-promotion flow (US-007..011): at run end `gpu_pipeline`
+  evaluates `ops/promotion_gate.evaluate_gate` — parity-enforced (window,
+  market, instrument hash, topk/n_drop, costs) IR/MDD/IC criteria plus the
+  reserved confirmation-window comparison (`ops/confirm_window`) — and on
+  pass promotes via `ops.promote_fetched.promote_workspace` with
+  source='auto_gate' and the verdict JSON in promotion_history.
+  `promotion_gate.auto_promote: false` in config.yaml is the report-only
+  kill-switch. Conversational (two-yes thread) and CLI promotion paths stay
+  available and write the same history/Decision Log records (US-012).
 
 - Global GPU run lock (US-020): `GpuBackend.active_run_lock()` reads
   `ops/run_lock.py`'s lock file (`(active, broken_stale)`; a stale lock —
@@ -210,7 +230,7 @@
   `running`/`gpu` run rows 'failed' once their `rdq-gpu-run-<ts>` unit has
   been inactive for one grace period (15 min default), posting a note in the
   run's thread FIRST and flipping the status LAST (a Slack failure retries
-  the whole reap next tick — same convention as poller completion). Grace
+  the whole reap next tick — notify-then-commit convention). Grace
   tracking is in-memory (a restart only delays a reap). A 'failed' run row no
   longer blocks start_research: it passes `replace_failed=True` to
   `create_run`, which atomically deletes exactly-a-failed row before the

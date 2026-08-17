@@ -58,9 +58,9 @@
   the worker over `gpu_worker.sh ssh`; fetched copies need the --remap flag
   because runner-result pkls store the worker's ABSOLUTE workspace paths.
   Slack posting mirrors app.py: WebClient with `proxy = None`, chat_postMessage
-  with thread_ts (root post first). These runs never touch server_ui state —
-  thread replies can't stop them (`gpu_worker.sh ssh tmux kill-session -t
-  rdq-run` does).
+  with thread_ts (root post first). Stop a run with the stop_run tool from
+  the OWNING thread (it cancels via GpuBackend; other threads are refused —
+  US-020), or manually with `gpu_worker.sh ssh tmux kill-session -t rdq-run`.
 - Rolling TEST_END (US-008): `gpu_pipeline` computes RDQ_TEST_END at launch —
   store calendar end minus `--confirm-days` (default 42, env RDQ_CONFIRM_DAYS)
   TRADING days — BEFORE provisioning (a broken store must cost $0), and ships

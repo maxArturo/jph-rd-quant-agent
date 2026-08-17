@@ -12,7 +12,7 @@ Findings from inspecting nanoclaw and RD-Agent before writing this plan:
 
 1. **"openCLI" is OneCLI.** Your mental model is **confirmed with one nuance**: you make **bare HTTP calls to the real service URL** (e.g. `https://api.notion.com/v1/...`, `https://paper-api.alpaca.markets/v2/orders`) with `HTTPS_PROXY` pointed at the OneCLI gateway and its CA cert trusted (`SSL_CERT_FILE`). The proxy matches the destination **host pattern** and injects credentials (headers, bearer, or query params) on the wire. It is *not* URL rewriting — you never address OneCLI directly for API calls, only for management (`/api/agents`, `/api/container-config`, `/api/approvals/pending`). For a host process, either export the proxy env + CA yourself or wrap the command: `onecli run --agent <id> -- <cmd>`.
 2. **Gotcha:** newly registered OneCLI agents start in `selective` secret mode with **zero secrets assigned** — every new agent identity needs `onecli agents set-secrets --id <id> --secret-ids ...` (or `set-secret-mode --mode all`) or every API call 401s.
-3. **RD-Agent(Q) ships a ready-made control plane** — `rdagent server_ui` (Flask, port 19899, `rdagent/log/server/app.py`) runs research loops as subprocesses with human-in-the-loop interaction queues, exposed over HTTP: `POST /trace` (start run, `interaction: true`, seed with `user_instruction`), `GET /receive` (pending hypothesis/feedback dicts), `POST /user_interaction/submit` (apply user edits), `POST /control` (stop/resume). **Our Slack orchestrator is a thin client of this API — no RD-Agent fork needed for the interaction layer.**
+3. **RD-Agent(Q) ships a ready-made control plane** — `rdagent server_ui` (Flask, port 19899, `rdagent/log/server/app.py`) runs research loops as subprocesses with human-in-the-loop interaction queues, exposed over HTTP: `POST /trace` (start run, `interaction: true`, seed with `user_instruction`), `GET /receive` (pending hypothesis/feedback dicts), `POST /user_interaction/submit` (apply user edits), `POST /control` (stop/resume). **Our Slack orchestrator is a thin client of this API — no RD-Agent fork needed for the interaction layer.** *(Superseded 2026-08: after research moved to GPU burst workers — 2026-08-06 decision — the server_ui path was decommissioned entirely in US-026..028; `ops/gpu_pipeline` driving `rdagent fin_quant` on a disposable droplet is the only research backend. Port 19899 stays dark forever — `ops/health.sh` fails if anything listens there.)*
 4. **RD-Agent(Q) does NOT support US equities out of the box.** Templates hardcode Qlib China A-share data (`csi300`, `SH000300`, A-share trading rules). Qlib itself supports `region: us`; the port is confined to data prep + two template directories (Phase 2). This is the single most invasive change in the plan.
 5. **RD-Agent's internal LLM is LiteLLM-based** (`CHAT_MODEL`, `EMBEDDING_MODEL`) and **requires JSON mode + an embedding model**. Anthropic works for chat via LiteLLM, but has no embeddings API — a separate embedding provider is required regardless. *Decided: Voyage AI* (`voyage/voyage-3.5-lite`, LiteLLM-native, Anthropic's recommended embedding partner; zero droplet RAM vs. ~0.5–1.2GB for a self-hosted embedder, and effectively free at our call volume — 200M-token free tier). No OpenAI dependency anywhere. Both keys (Anthropic + Voyage) go in the OneCLI vault and are injected via the proxy.
 6. RD-Agent runs experiments in **Docker** (auto-built `local_qlib:latest`, `qrun` backtests inside), so everything here runs as **host processes** — no container orchestration layer at all in v1. MIT licensed; upstream activity has slowed in 2026 but the quant scenario is stable — **pin a commit**.
@@ -36,46 +36,61 @@ Slack channel #quant-research
 │  Slack bot + conversational layer (Claude via Anthropic API,   │
 │  tool-use loop; creds injected by OneCLI proxy)                │
 │                                                                │
-│  Tools: start/steer/stop research runs · read run results ·    │
-│  write Notion · read Alpaca account/positions · promote        │
-│  strategy · request trade sign-off (Block Kit buttons)         │
+│  Tools: start/status/stop GPU research runs · promote          │
+│  strategy (conversational two-yes flow) · halt/resume          │
+│  trading · read Alpaca account/orders/P&L · custom universes   │
 │                                                                │
-│  Local state: SQLite (thread ↔ run mapping, pending            │
-│  interactions, promoted strategy pointer)                      │
+│  Run memory (orchestrator/run_memory.py): digest of prior      │
+│  runs (Notion run_summary JSON) injected into each new run's   │
+│  instruction so research builds on history                     │
+│                                                                │
+│  Local state: SQLite (thread ↔ run mapping, promoted-strategy  │
+│  pointer, append-only promotion history)                       │
 └───────┬───────────────────────┬────────────────────────────────┘
-        │ HTTP :19899           │ HTTPS via OneCLI proxy
-        ▼                       ▼
-RD-Agent(Q) service        Notion API · Alpaca API
-(rdagent server_ui;
- fin_quant loops: propose → Co-STEER code → qlib backtest
- (Docker) → feedback; outputs per experiment:
- combined_factors_df.parquet, model.py, qlib_res.csv,
- ret.pkl, mlruns/**/pred.pkl ← the signal)
+        │ systemd-run            │ HTTPS via OneCLI proxy
+        │ (transient unit)       ▼
+        ▼                   Notion API · Alpaca API
+ops/gpu_pipeline — disposable DO GPU droplet (ops/gpu_worker/):
+ provision (snapshot boot when inputs hash matches) → reverse
+ tunnel to the OneCLI proxy → rdagent fin_quant loops (propose →
+ Co-STEER code → qlib backtest in Docker → feedback; per-loop
+ Slack digests) → fetch artifacts (qlib_res.csv, ret.pkl,
+ mlruns/**/pred.pkl ← the signal) → promotion gate
+ (ops/promotion_gate: parity-enforced IR/MDD/IC criteria + the
+ reserved confirmation window) → auto-promote on pass → destroy
 
 ┌─ execution/ ───────────────────────────────────────────────────┐
 │  rebalance.py (nightly systemd timer) — deterministic:         │
-│  refresh US qlib data → re-run promoted SOTA workspace with    │
-│  test_end=today → latest pred.pkl cross-section → top-k        │
+│  refresh US qlib data → exact-weights re-predict of the        │
+│  promoted workspace → latest pred.pkl cross-section → top-k    │
 │  target weights → diff vs Alpaca positions → order gate +      │
 │  breaker check → POST /v2/orders → fills to Notion Ledger +    │
 │  Slack summary                                                 │
+│                                                                │
+│  divergence.py (post-close weekday timer) — realized vs        │
+│  haircut backtest expectation; Slack warning on drift,         │
+│  breaker halt file on severe breach                            │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Division of labor:** the orchestrator's Claude layer is *conversation and judgment* (interpret ideas, relay/approve hypotheses, narrate results, collect trade sign-off). RD-Agent(Q) is the *research engine*. The rebalancer is *deterministic plumbing* — deliberately not an LLM.
+**Division of labor:** the orchestrator's Claude layer is *conversation and judgment* (interpret ideas, structure directives, narrate results, take halt/promote instructions). RD-Agent(Q) on the GPU worker is the *research engine*. The promotion gate and the rebalancer are *deterministic plumbing* — deliberately not an LLM.
 
 **Proposed repo layout:**
 
 ```
 rd-agent-q/
   orchestrator/        # Slack bot (Bolt, Socket Mode), Claude tool-use loop,
-                       #   rdagent_client.py, notion_client.py, state.sqlite
+                       #   gpu_backend.py, run_memory.py, notion_client.py,
+                       #   state.sqlite (runs, promoted strategy, history)
   execution/           # alpaca_client.py, order_gate.py, breaker.py,
-                       #   limits.paper.json, limits.live.json, rebalance.py
+                       #   divergence.py, limits.paper.json, rebalance.py,
+                       #   pred_refresh.py (exact-weights re-predict)
   research/            # RD-Agent config: .env, APP_TPL prompt overrides,
                        #   us_templates/ (patched factor/model YAMLs), base_factors/
-  data/                # US qlib data-store build + refresh scripts
-  ops/                 # systemd user units, runbook.md
+  data/                # US qlib data-store build + refresh scripts,
+                       #   point-in-time universe builder
+  ops/                 # gpu_pipeline.py + gpu_worker/, promotion_gate.py,
+                       #   confirm_window.py, systemd user units, runbook.md
   docs/reference/      # patterns copied from nanoclaw (schema, gate semantics)
   vendor/ or pip pin   # RD-Agent at a pinned commit
 ```
@@ -98,8 +113,8 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 | Service | Binds | Exposure |
 |---|---|---|
 | Slack Socket Mode | outbound WebSocket only | **none needed** — no inbound port at all |
-| `rdagent server_ui` (control API :19899) | 127.0.0.1 | **not exposed** — orchestrator talks to it over localhost; it has known flask-cors advisories, keep it dark |
-| `rdagent ui` (Streamlit trace viewer, run on :19900 to avoid the 19899 collision) | 127.0.0.1 | `tailscale serve --bg --https=19900 http://127.0.0.1:19900` when research monitoring is wanted |
+| ~~`rdagent server_ui` (control API :19899)~~ | — | **retired** (US-026): the service is decommissioned and nothing may ever listen on 19899 again — `ops/health.sh` fails the audit if the port lights up or gets a serve mapping |
+| `rdagent ui` (Streamlit trace viewer on :19900; legacy on-box traces only — GPU runs are monitored via Slack digests) | 127.0.0.1 | `tailscale serve --bg --https=19900 http://127.0.0.1:19900` when trace monitoring is wanted |
 | OneCLI web UI (:10254) | 127.0.0.1 | already served at `https://nanoclaw-prod.tail05c9bf.ts.net/` — used for approval rules (Phase 6) and manual approvals fallback |
 | Any future dashboard (e.g. P&L page) | 127.0.0.1 | new tailnet-only serve mapping on a dedicated HTTPS port; pick ports that don't collide with the existing 443/3100 mappings |
 
@@ -108,6 +123,13 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 ---
 
 ## 2. Phases
+
+> **Historical record.** These phases are the original build plan and are
+> complete; they describe some components as designed, not as they exist
+> today (notably: the server_ui control plane, its poller, and Block Kit
+> approvals were built in Phases 1/3 and later decommissioned in
+> US-026..028 — research now runs on GPU burst workers, `ops/gpu_worker/`).
+> The system as it runs is §1 above plus `docs/decisions.md`.
 
 ### Phase 0 — Environment bring-up (RD-Agent vanilla)
 
@@ -226,8 +248,8 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 | Slack tokens through OneCLI unverified | Test header injection for `slack.com` in Phase 1; fallback to repo-local `.env` for chat tokens only |
 | OneCLI approvals API shape unverified for a non-nanoclaw client | Phase 6 step 2 has a web-UI fallback that preserves the human gate |
 | GPU: `fin_model` loop wants CUDA | Start factor-only loops (LGBM, CPU-fine); enable model evolution only with a GPU |
-| Long backtests hanging (known upstream issue) | `--all_duration` wall-clock budgets on every run; poller reports stalls to Slack |
-| Accidental public exposure of control/trading surfaces | Everything binds 127.0.0.1; human access only via tailnet-only `tailscale serve` (never funnel); `server_ui` (flask-cors advisories) stays localhost-only; runbook audits `tailscale serve status` |
+| Long backtests hanging (known upstream issue) | Wall-clock budgets on every run: the GPU pipeline's `--max-hours` teardown (default 24h) and the hourly billing watchdog |
+| Accidental public exposure of control/trading surfaces | Everything binds 127.0.0.1; human access only via tailnet-only `tailscale serve` (never funnel); retired port 19899 must stay dark; `ops/health.sh` audits units, listeners, and `tailscale serve status` against the §1 allowlist |
 
 ## 4. Explicit non-goals (v1)
 

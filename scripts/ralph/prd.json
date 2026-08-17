@@ -442,8 +442,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "orchestrator/CLAUDE.md: GPU-only backend bullet + poller-brake replacement (loop_n / 24h cap / watchdog / run lock / reaper) + gate/auto-promotion flow; stale universe-wiring and poller mentions fixed. README intro+layout and PLAN.md §1 (diagram, layout, port table, risks) rewritten, phases marked historical. gpu_worker README Promotion caveat corrected (auto-gate + thread promotion + advisory-gated promote_fetched). Runbook: GPU-era §2, divergence-halt clear procedure in §1, §7 rollback, server_ui probes/logs replaced; snapshot rebake notes already present. All documented commands verified on-box."
     },
     {
       "id": "US-030",

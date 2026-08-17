@@ -1,10 +1,14 @@
 # rd-agent-q
 
 RD-Agent(Q) Slack-driven quant research and paper trading system: a Slack
-orchestrator (Claude) drives RD-Agent(Q) research loops via `server_ui`,
-records everything to Notion, and a deterministic nightly rebalancer trades an
-Alpaca **paper** account through the OneCLI gateway. Live trading is out of
-scope.
+orchestrator (Claude) launches RD-Agent(Q) research runs on disposable GPU
+droplets (`ops/gpu_pipeline` — the only research backend), injects a digest of
+prior runs into each new run's instruction, gates every candidate against the
+promoted incumbent (parity-enforced criteria plus a reserved confirmation
+window; auto-promotes on pass), records everything to Notion, and a
+deterministic nightly rebalancer trades an Alpaca **paper** account through
+the OneCLI gateway, with a post-close realized-vs-backtest divergence tracker
+that can halt trading. Live trading is out of scope.
 
 ## Standalone constraint
 
@@ -22,11 +26,13 @@ live in this repo or its environment files.
 ## Layout
 
 ```
-orchestrator/   Slack bot, state store, LLM router, RD-Agent control client
-execution/      Alpaca paper client, signal -> orders pipeline, safety gates
+orchestrator/   Slack bot, state store, LLM router, GPU run backend, run memory
+execution/      Alpaca paper client, signal -> orders pipeline, safety gates,
+                divergence tracker
 research/       RD-Agent pin, US templates, prompt overrides, LLM probe
 data/           FMP client, adjustment factors, Qlib store + universe builders
-ops/            setup/verify scripts, systemd units, runbook
+ops/            GPU pipeline + promotion gate, setup/verify scripts,
+                systemd units, runbook
 docs/reference/ schemas and reference docs
 tests/          pytest suite
 ```

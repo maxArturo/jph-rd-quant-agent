@@ -38,25 +38,54 @@ Resume later with the `resume_trading` Slack tool (removes the file, logs the
 decision) or `rm ~/rdq-data/breaker/halt`, and re-enable the timer if you
 disabled it.
 
+### Clearing a divergence auto-halt (US-016)
+
+`rdq-divergence.timer` (weekdays 16:30 ET) compares realized returns since
+promotion against a haircut backtest expectation (mean × 0.5). A trailing
+z-score below −2 is a Slack warning only; z below −3 **or** drawdown since
+promotion beyond backtest MDD × 1.25 writes the same breaker halt file with
+a :rotating_light: notice naming the trigger. To clear one:
+
+1. Read the trigger: `cat ~/rdq-data/breaker/halt` (and the Slack notice —
+   realized vs expected numbers, drawdown since promotion).
+2. Decide: is the strategy broken (consider rolling back the promotion,
+   §7) or is the breach explainable (regime move, single-name event)?
+3. Clear only after recording the decision: `resume trading` in Slack
+   (writes the Decision Log row for you), or `rm ~/rdq-data/breaker/halt`
+   plus a manual Decision Log note.
+
+The tracker runs again at the next weekday close — if the breach condition
+still holds it halts again, so clearing without addressing the cause buys
+exactly one trading day.
+
 ## 2. Pause the research loop
+
+Research runs execute on a disposable GPU droplet driven by
+`ops/gpu_pipeline` (transient unit `rdq-gpu-run-<thread>`).
 
 Preferred — in Slack, in the thread that owns the run:
 
 > stop the research run
 
-The `stop_run` tool sends `POST /control stop` to server_ui, cancels pending
-hypothesis prompts, and marks the run stopped (resumable later with
-`resume_run` from the same thread).
+The `stop_run` tool cancels the run on the worker (kills its tmux session);
+the pipeline then fetches partial results, posts the final summary, and
+destroys the droplet — results up to the last completed loop stay
+promotable. Runs are **not resumable**, and only the owning thread can stop
+one (global run lock, US-020).
 
-Manual fallback — stop the control plane outright (kills server_ui **and**
-its child research subprocesses, same cgroup):
+Manual fallback (Slack down):
 
 ```sh
-XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop rdq-research.service
+ops/gpu_worker/gpu_worker.sh ssh tmux kill-session -t rdq-run
 ```
 
-Research runs cost LLM tokens and disk, not money — pausing them is never
-urgent the way halting trading is.
+The droplet bills until destroyed — the pipeline's teardown handles that,
+with the hourly `rdq-gpu-watchdog` as the 24h backstop. Confirm with
+`ops/gpu_worker/gpu_worker.sh status`.
+
+Research runs cost LLM tokens and GPU-droplet dollars (~$0.76/hr at the
+default size), not brokerage money — halting trading is always the more
+urgent action.
 
 ## 3. Flatten positions (go to zero)
 
@@ -136,8 +165,9 @@ tailscale serve status
   (rdagent trace viewer, only while research monitoring is wanted).
   Pre-existing box mappings (`:443 -> 127.0.0.1:10254` OneCLI UI,
   `:3100 -> 127.0.0.1:3001`) are not ours to change.
-- `rdagent server_ui` (:19899) must **never** be served — it is
-  localhost-only by design (known flask-cors advisories).
+- Port 19899 (the retired server_ui control plane, decommissioned US-026)
+  must **never** be served or listened on again — `ops/health.sh` fails the
+  audit if it reappears.
 - Remove an unexpected mapping with
   `tailscale serve --https=<port> off`, then find what added it.
 
@@ -163,10 +193,12 @@ ops/health.sh    # unit states + loopback audit + tailscale exposure; exit 0 = h
 
 ```sh
 journalctl --user -u rdq-orchestrator.service -f     # Slack bot, live
-journalctl --user -u rdq-research.service -f         # server_ui control plane
+journalctl --user -u 'rdq-gpu-run-*' -f              # active GPU research run (transient unit)
 journalctl --user -u rdq-rebalance.service -n 100    # last rebalance run
 journalctl --user -u rdq-data-refresh.service -n 50  # last data refresh
-journalctl --user -u rdq-pred-refresh.service -n 50  # last prediction refresh (US-048)
+journalctl --user -u rdq-pred-refresh.service -n 50  # last prediction refresh (US-049)
+journalctl --user -u rdq-divergence.service -n 50    # last divergence check (US-016/017)
+journalctl --user -u rdq-reconcile.service -n 50     # last ledger reconcile (US-019)
 journalctl --user -u rdq-sweep.service -n 50         # last retention sweep
 ```
 
@@ -202,10 +234,20 @@ deafness check below.
 ### Per-subsystem probes
 
 ```sh
-# research control plane up?
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19899/test   # want 200
+# GPU research run alive? droplet / tunnel / tmux / GPU util / log tail:
+ops/gpu_worker/gpu_worker.sh status
+# live pipeline stage, loop progress, test/confirmation windows, gate verdict:
+cat ~/rdq-runs/gpu_worker/pipeline_status.json
 
-# research run internals (hypotheses, Co-STEER attempts, backtest logs):
+# research run stuck? tail the run log on the worker — if the newest trace
+# line is "Requesting base feature configuration from user." and old, the
+# base-feature gate is failing validation on every submit (rd_loop retries
+# forever; a missing shim reverts to upstream's conda/CN-data probe, which
+# can NEVER pass — docs/decisions.md US-043). Stop the run (§2) and relaunch.
+ops/gpu_worker/gpu_worker.sh ssh tail -n 20 /root/rdq-runs/gpu-run.log
+
+# legacy on-box trace internals (pre-GPU-era runs only; fetched GPU traces
+# do NOT appear here — use the Slack digests / Notion write-up instead):
 # start the viewer (transient unit; `rdagent ui` shells out to bare
 # `streamlit`, so the venv must be on PATH), then map it tailnet-only:
 systemd-run --user --unit=rdq-trace-viewer \
@@ -218,21 +260,11 @@ ops/expose_traces.sh    # then open https://<tailnet-host>:19900
 # stop when monitoring is done:
 #   systemctl --user stop rdq-trace-viewer; tailscale serve --https=19900 off
 
-# research run stuck? tail its trace log — if the newest line is
-# "Requesting base feature configuration from user." and the file mtime is
-# stale, the base-feature gate is failing validation on every submit
-# (rd_loop retries forever). The probe's stderr is logged as
-# "feature validation probe failed" (research/us_validation.py); a missing
-# shim (e.g. QLIB_QUANT_* class paths unset) reverts to upstream's
-# conda/CN-data probe, which can NEVER pass on this box — see
-# docs/decisions.md US-043. Restart the service and relaunch the run.
-tail -n 5 ~/rdq-runs/server_ui/traces/*/*.log
-
-# orchestrator state (read-only peek; directives/runs/pending_interactions/
-# promoted_strategy):
+# orchestrator state (read-only peek; directives/runs/promoted_strategy/
+# promotion_history):
 .venv/bin/python -c "import sqlite3; con=sqlite3.connect('orchestrator/state.sqlite'); \
   [print(t, con.execute(f'select count(*) from {t}').fetchone()[0]) for t in \
-  ('directives','runs','pending_interactions','promoted_strategy')]"
+  ('directives','runs','promoted_strategy','promotion_history')]"
 
 # ledger vs broker (read-only both sides):
 onecli run --agent rdq-exec-paper -- .venv/bin/python -m ops.reconcile
@@ -279,3 +311,35 @@ which the hash does not cover); `--no-snapshot` ignores snapshots entirely.
 Inspect state with `.venv/bin/python -m ops.gpu_snapshot hash` and
 `... select --region tor1 [--hash <hash>]`; a bake failure is a Slack
 warning only — the next run bootstraps in full and retries.
+
+## 7. Roll back a promotion
+
+Every promotion (auto-gate, Slack thread, CLI) appends an append-only
+`promotion_history` row, and `ops/sweep.py` protects the workspaces of the
+last 3 entries — so the previous strategy is on disk and one command away.
+Run from the deployed checkout (`~/rd-agent-q`) so it targets the real
+orchestrator/state.sqlite:
+
+```sh
+.venv/bin/python -m ops.rollback_promotion                  # dry-run: shows current vs previous
+.venv/bin/python -m ops.rollback_promotion --yes            # re-promote the previous entry
+.venv/bin/python -m ops.rollback_promotion --to <ws> --yes  # or a named workspace from history
+```
+
+- Restores the history entry's RECORDED config (what was actually traded),
+  never a re-derivation from the workspace conf.
+- Re-runs the pred-refresh snapshot BEFORE flipping the pointer — a
+  snapshot failure leaves the current promotion untouched.
+- `--keep-snapshot` preserves an operator-pinned `conf_pred_refresh.yaml`
+  (required when the target workspace is pinned to a frozen `*_promoted_*`
+  universe — the tool prints a reminder).
+- Refuses when the target workspace directory no longer exists (swept).
+- The rollback is itself a new history row (source `cli`, with a rollback
+  marker in gate_verdict), so it is auditable and reversible.
+
+Afterwards, verify the refresh path produces fresh predictions for the
+restored strategy:
+
+```sh
+.venv/bin/python -m execution.pred_refresh --no-slack   # want exit 0
+```

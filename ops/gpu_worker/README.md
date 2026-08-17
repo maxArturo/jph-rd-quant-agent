@@ -159,12 +159,17 @@ export them in the heredoc — see Troubleshooting).
 Judge a run by the usual completion criterion (non-NaN IC in qlib_res.csv,
 sane ARR/MDD, US tickers in pred.pkl — see run_us_quant.sh header).
 
-**Promotion caveat:** these runs live outside the orchestrator/server_ui flow,
-so Slack-thread promotion does not see them (no `runs` row, and the trace's
-runner-result pickles carry the WORKER's absolute workspace paths). Promote a
-fetched workspace with the dedicated command instead — it writes the same
-records as a thread promotion (pred-refresh snapshot into the workspace +
-the `promoted_strategy` row with the conf-derived universe):
+**Promotion:** Slack-launched runs need no manual step — at run end the
+pipeline evaluates the promotion gate (`ops/promotion_gate`: parity +
+IR/MDD/IC + the reserved confirmation window) and auto-promotes on pass
+(kill-switch: `promotion_gate.auto_promote: false` in
+orchestrator/config.yaml). A gate-failed run can still be promoted from its
+Slack thread (the usual two-yes flow; completed AND operator-stopped runs
+are promotable). Manual CLI runs (`python -m ops.gpu_pipeline` by hand)
+have no `runs` row/thread — promote those fetched workspaces with the
+dedicated command, which writes the same records as every other path
+(pred-refresh snapshot, `promoted_strategy` pointer + promotion_history
+row, Notion Decision Log entry since US-012):
 
 ```sh
 .venv/bin/python -m ops.promote_fetched --workspace ~/rdq-runs/gpu_worker/results/us_quant/workspace/<hash>          # dry-run
@@ -172,12 +177,14 @@ the `promoted_strategy` row with the conf-derived universe):
 .venv/bin/python -m execution.pred_refresh --no-slack                                                                # verify
 ```
 
-It refuses on unusable confs/missing artifacts, shows the currently promoted
-strategy before replacing it, and reminds you that (a) an operator-pinned
-market in the OLD snapshot (e.g. a frozen `*_promoted_*` universe) must be
-re-applied to the new one, and (b) the Notion Decision Log entry is manual
-(no thread exists for the run). Run it from the deployed checkout
-(~/rd-agent-q) so it targets the real orchestrator/state.sqlite.
+It runs the gate in advisory mode first and refuses `--yes` on a non-PASS
+verdict unless `--force` (recorded in the history row); it also refuses on
+unusable confs/missing artifacts, shows the currently promoted strategy
+before replacing it, and reminds you that an operator-pinned market in the
+OLD snapshot (e.g. a frozen `*_promoted_*` universe) must be re-applied to
+the new one. Run it from the deployed checkout (~/rd-agent-q) so it targets
+the real orchestrator/state.sqlite. Undo any promotion with
+`python -m ops.rollback_promotion` (see ops/runbook.md).
 
 **Trace visibility & retention:** fetched runs don't appear in the :19900
 trace viewer, and `ops/sweep.py` neither protects nor prunes
@@ -193,8 +200,8 @@ old fetched runs by hand when disk matters.
 - The proxy token on the worker (`/root/rdq-proxy.env`, mode 600) is scoped
   to the rdq-research agent and dies with the droplet. Rotate via OneCLI if
   a worker is ever compromised mid-run.
-- Never point the worker at server_ui (:19899) or the tailnet — it doesn't
-  need either.
+- Never point the worker at the tailnet or any control-box port beyond the
+  tunneled proxy (:10255) — it doesn't need anything else.
 
 ## Troubleshooting
 
