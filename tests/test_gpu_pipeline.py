@@ -23,6 +23,7 @@ from ops.gpu_pipeline import (
     format_loop_digest,
     format_run_start,
     gate_and_promote,
+    gate_preview_note,
     incumbent_report,
     parse_size_plan,
     provision_with_fallback,
@@ -144,6 +145,13 @@ class TestLaunchComposition:
         assert f"{dates.confirm_start} → {dates.store_end}" in text
         assert "5 trading days" in text
         assert "`abcd1234abcd1234`" in text
+        assert "gate preview" not in text  # no note passed, no line
+
+    def test_run_start_message_carries_gate_preview(self, tmp_path: Path) -> None:
+        dates = compute_run_dates(make_store(tmp_path)[0], confirm_days=5)
+        note = ":information_source: gate preview: report-only this run — kill-switch"
+        text = format_run_start(PipelineOptions(loop_n=10), dates, "abcd1234", None, note)
+        assert note in text
 
 
 class TestFormatting:
@@ -405,14 +413,23 @@ def install_gate_fakes(
     inc_ir: float = 1.0,
     conf_cand_ir: float = 2.0,
     conf_inc_ir: float = 1.0,
+    inc_topk: int = 20,
 ) -> None:
-    """Stub the gate's IO half; evaluate_gate itself runs for real."""
+    """Stub the gate's IO half; evaluate_gate AND align_overlap run for real —
+    the fake bundles carry dated return series engineered to the given IRs
+    (US-031: the IR/MDD legs are computed on the shared overlap window)."""
     from ops import promotion_gate
+    from tests.test_promotion_gate import dated_returns_with_ir
 
     metrics = {
         str(candidate): {"IR": cand_ir, "MDD": -0.10, "IC": 0.02},
         str(incumbent): {"IR": inc_ir, "MDD": -0.10, "IC": 0.02},
     }
+    returns = {
+        str(candidate): dated_returns_with_ir(cand_ir, days=252),
+        str(incumbent): dated_returns_with_ir(inc_ir, days=252),
+    }
+    topks = {str(candidate): 20, str(incumbent): inc_topk}
 
     def fake_bundle(workspace, *, instrument_hash=None, config_name=None):
         ws = str(Path(workspace).expanduser())
@@ -422,9 +439,10 @@ def install_gate_fakes(
             window=TEST_WINDOW,
             market="us_liquid",
             instrument_hash=instrument_hash,
-            topk=20,
+            topk=topks[ws],
             n_drop=3,
             cost_params={"open_cost": 0.0005, "close_cost": 0.0005, "min_cost": 5.0},
+            dated_returns=returns[ws],
         )
 
     def fake_evidence(cand, inc, start, end, **kwargs):
@@ -545,7 +563,27 @@ class TestGateAndPromote:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         candidate, incumbent, store, db = self.setup_box(tmp_path)
-        install_gate_fakes(monkeypatch, candidate, incumbent)  # metrics would pass
+        # Metrics would pass, but the incumbent's selection params differ —
+        # a config-level mismatch is still a hard veto (US-031 keeps these).
+        install_gate_fakes(monkeypatch, candidate, incumbent, inc_topk=50)
+        promoted, slack, _ = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        text = "\n".join(slack.posts)
+        assert "topk mismatch" in text
+        assert "failing criteria: parity" in text
+
+    def test_universe_drift_is_noted_but_does_not_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """US-031: a hash mismatch (the PIT universe evolving) must not
+        strand auto-promotion — it becomes a drift note on a promotable
+        verdict."""
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)
         slack = RecordingSlack()
         promoted = gate_and_promote(
             str(candidate),
@@ -557,12 +595,11 @@ class TestGateAndPromote:
             store_path=store,
             config_path=gate_config_yaml(tmp_path),
         )
-        assert promoted is False
+        assert promoted is True
         row = StateStore(db).get_promoted_strategy()
-        assert row is not None and row.workspace_path == str(incumbent)
+        assert row is not None and row.workspace_path == str(candidate)
         text = "\n".join(slack.posts)
-        assert "instrument list mismatch" in text
-        assert "failing criteria: parity" in text
+        assert "universe drift" in text and "PASS" in text
 
     def test_no_promote_on_snapshot_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -626,6 +663,61 @@ class TestGateAndPromote:
         assert json.loads(status_path.read_text())["gate"] == {
             "error": "qlib_res parse exploded"
         }
+
+
+# --- US-032: launch-time gate preview ------------------------------------------
+
+
+class TestGatePreview:
+    def promoted_db(self, tmp_path: Path, workspace: Path) -> Path:
+        db = tmp_path / "state.sqlite"
+        StateStore(db).set_promoted_strategy(
+            str(workspace), {"universe": "us_liquid", "universe_tickers": ["AAPL", "SPY"]}
+        )
+        return db
+
+    def incumbent_with_returns(self, tmp_path: Path) -> Path:
+        from tests.test_summary import write_ret_pkl
+
+        workspace = tmp_path / "inc" / "e05ad9b46f4d"
+        workspace.mkdir(parents=True)
+        write_ret_pkl(workspace / "ret.pkl", days=60)
+        return workspace
+
+    def test_clean_launch_has_no_note(self, tmp_path: Path) -> None:
+        workspace = self.incumbent_with_returns(tmp_path)
+        db = self.promoted_db(tmp_path, workspace)
+        assert gate_preview_note(db, gate_config_yaml(tmp_path)) is None
+
+    def test_kill_switch_is_previewed(self, tmp_path: Path) -> None:
+        workspace = self.incumbent_with_returns(tmp_path)
+        db = self.promoted_db(tmp_path, workspace)
+        note = gate_preview_note(db, gate_config_yaml(tmp_path, auto_promote=False))
+        assert note is not None
+        assert "report-only this run" in note and "auto_promote" in note
+
+    def test_no_incumbent_respects_allow_first(self, tmp_path: Path) -> None:
+        db = tmp_path / "state.sqlite"  # never created — no promoted row
+        note = gate_preview_note(db, gate_config_yaml(tmp_path))
+        assert note is not None and "no incumbent" in note
+        assert gate_preview_note(db, gate_config_yaml(tmp_path, allow_first=True)) is None
+
+    def test_missing_incumbent_workspace_is_previewed(self, tmp_path: Path) -> None:
+        db = self.promoted_db(tmp_path, tmp_path / "gone" / "e05ad9b46f4d")
+        note = gate_preview_note(db, gate_config_yaml(tmp_path))
+        assert note is not None and "missing on disk" in note and "e05ad9b4" in note
+
+    def test_unreadable_incumbent_returns_is_previewed(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "inc" / "e05ad9b46f4d"
+        workspace.mkdir(parents=True)  # exists, but no ret.pkl
+        db = self.promoted_db(tmp_path, workspace)
+        note = gate_preview_note(db, gate_config_yaml(tmp_path))
+        assert note is not None and "daily returns unreadable" in note
+
+    def test_preview_never_raises(self, tmp_path: Path) -> None:
+        broken = tmp_path / "config.yaml"
+        broken.write_text("promotion_gate:\n  ir_margin: wide\n")
+        assert gate_preview_note(tmp_path / "state.sqlite", broken) is None
 
 
 # --- US-020: global run mutual exclusion --------------------------------------

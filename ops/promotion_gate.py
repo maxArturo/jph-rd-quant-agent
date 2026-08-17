@@ -8,16 +8,26 @@ promotion_history.gate_verdict payload) and renders to a Slack text block.
 
 The decision has two layers:
 
-1. Parity — the two backtests must be comparable at all: same test window,
-   market, instrument-list hash, topk/n_drop, and cost params. Any mismatch,
-   or either side MISSING one of those inputs, fails parity — and a parity
-   failure fails the gate no matter how good the metrics look (the
-   2026-08-12 no-promote was a window mismatch nothing surfaced).
+1. Parity — checked on the inputs that must never drift silently: market,
+   topk/n_drop, and cost params. Any mismatch, or either side MISSING one of
+   those inputs, fails parity — and a parity failure fails the gate no
+   matter how good the metrics look. Test window and instrument-list hash
+   are NOT parity fields (US-031): both drift by design (the window rolls
+   with the store, the PIT universe evolves), so requiring recorded equality
+   made auto-promotion structurally unreachable after the first promotion.
+   Instead comparability is CONSTRUCTED: the incumbent-relative legs are
+   computed from both strategies' daily returns over their shared trading
+   days (``align_overlap``), and window/universe drift is surfaced as
+   verdict drift notes.
 2. Criteria — thresholds read from the ``promotion_gate:`` section of
    orchestrator/config.yaml (``load_gate_config``):
-   - candidate IR strictly > incumbent IR × ir_margin (default 1.05)
-   - candidate |MDD| ≤ incumbent |MDD| × mdd_tolerance (default 1.25)
-   - candidate IC strictly > min_ic (default 0)
+   - candidate IR strictly > incumbent IR × ir_margin (default 1.05), both
+     computed over the shared overlap window (≥ min_overlap_days, default
+     126, else the leg fails as ``overlap_unavailable``)
+   - candidate |MDD| ≤ incumbent |MDD| × mdd_tolerance (default 1.25), same
+     overlap window
+   - candidate IC strictly > min_ic (default 0) — recorded value, candidate
+     only
    - candidate confirmation-window IR strictly > incumbent's ×
      confirm_ir_margin (default 1.0 — no margin on the out-of-search-sample
      leg, US-010). Evidence comes from ``load_confirmation_evidence`` (the
@@ -77,6 +87,10 @@ class GateConfig:
     # Kill-switch (US-011): False = report-only, the pipeline posts the
     # verdict but never promotes. Does not affect the verdict itself.
     auto_promote: bool = True
+    # US-031: the IR/MDD legs compare over the two strategies' shared trading
+    # days; fewer shared days than this fails those legs as
+    # overlap_unavailable (about half a trading year by default).
+    min_overlap_days: int = 126
 
 
 def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
@@ -103,6 +117,7 @@ def load_gate_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GateConfig:
             section, "confirm_ir_margin", GateConfig.confirm_ir_margin
         ),
         auto_promote=_config_bool(section, "auto_promote", GateConfig.auto_promote),
+        min_overlap_days=_config_int(section, "min_overlap_days", GateConfig.min_overlap_days),
     )
 
 
@@ -117,6 +132,13 @@ def _config_bool(section: Mapping[str, Any], key: str, default: bool) -> bool:
     raw = section.get(key, default)
     if not isinstance(raw, bool):
         raise GateConfigError(f"promotion_gate.{key} must be a boolean, got {raw!r}")
+    return raw
+
+
+def _config_int(section: Mapping[str, Any], key: str, default: int) -> int:
+    raw = section.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise GateConfigError(f"promotion_gate.{key} must be a positive integer, got {raw!r}")
     return raw
 
 
@@ -138,11 +160,13 @@ class MetricBundle:
     """One strategy's comparison inputs.
 
     ``metrics`` uses the operator-facing labels from summary.METRIC_SPECS
-    (IC/ICIR/Rank IC/ARR/IR/MDD) plus ``Sharpe``. Parity fields are None when
-    an artifact could not provide them — which FAILS parity against an
-    incumbent (the gate never guesses). ``daily_returns`` is the net-of-cost
-    ret.pkl series; unused by today's criteria, it is the confirmation-window
-    input US-009/US-010 evaluate on.
+    (IC/ICIR/Rank IC/ARR/IR/MDD) plus ``Sharpe``. Hard-parity fields (market,
+    topk, n_drop, cost_params) are None when an artifact could not provide
+    them — which FAILS parity against an incumbent (the gate never guesses).
+    ``dated_returns`` is the net-of-cost ret.pkl series as (ISO date, return)
+    pairs — the ``align_overlap`` input the IR/MDD legs are computed from
+    (US-031); missing means those legs fail as overlap_unavailable. ``window``
+    and ``instrument_hash`` are informational since US-031 (drift notes).
     """
 
     workspace: str
@@ -153,7 +177,81 @@ class MetricBundle:
     topk: int | None = None
     n_drop: int | None = None
     cost_params: Mapping[str, float] | None = None
-    daily_returns: tuple[float, ...] | None = None
+    dated_returns: tuple[tuple[str, float], ...] | None = None
+
+
+@dataclass(frozen=True)
+class OverlapComparison:
+    """Both strategies' IR/MDD computed over their shared trading days (US-031).
+
+    Built by ``align_overlap``. ``error`` set means the two return series
+    could not be aligned (missing dated returns, or fewer shared days than
+    ``min_overlap_days``) — the gate maps that to failing IR and MDD criteria
+    with reason ``overlap_unavailable``, never a silent skip.
+    """
+
+    window: tuple[str, str] | None = None  # first/last shared day, ISO
+    days: int = 0
+    candidate_ir: float | None = None
+    incumbent_ir: float | None = None
+    candidate_mdd: float | None = None
+    incumbent_mdd: float | None = None
+    error: str | None = None
+
+
+def max_drawdown(returns: Iterable[float]) -> float:
+    """Worst peak-to-trough drawdown of a compounded daily-return series.
+
+    Returns 0.0 for a series that never draws down; always ≤ 0 (qlib's MDD
+    sign convention, so overlap MDDs read like recorded ones)."""
+    equity = peak = 1.0
+    worst = 0.0
+    for value in returns:
+        equity *= 1.0 + float(value)
+        peak = max(peak, equity)
+        worst = min(worst, equity / peak - 1.0)
+    return worst
+
+
+def align_overlap(
+    candidate: MetricBundle,
+    incumbent: MetricBundle,
+    min_days: int = GateConfig.min_overlap_days,
+) -> OverlapComparison:
+    """PURE alignment: IR/MDD for both strategies on their shared trading days.
+
+    This is US-031's comparability-by-construction: recorded windows may
+    legitimately differ (the test window rolls with the store), so the
+    incumbent-relative legs compare returns on the DATES BOTH STRATEGIES WERE
+    MEASURED ON instead of requiring recorded windows to match. IR uses the
+    confirmation leg's convention (ops.confirm_window.annualized_ir) so every
+    IR in a verdict is computed identically.
+    """
+    from ops.confirm_window import annualized_ir
+
+    for role, bundle in (("candidate", candidate), ("incumbent", incumbent)):
+        if not bundle.dated_returns:
+            return OverlapComparison(error=f"dated daily returns unavailable on {role}")
+    candidate_map = {day: value for day, value in candidate.dated_returns or ()}
+    incumbent_map = {day: value for day, value in incumbent.dated_returns or ()}
+    shared = sorted(set(candidate_map) & set(incumbent_map))
+    if len(shared) < min_days:
+        return OverlapComparison(
+            error=(
+                f"insufficient overlap — {len(shared)} shared trading day(s), "
+                f"need >= {min_days}"
+            )
+        )
+    candidate_returns = [candidate_map[day] for day in shared]
+    incumbent_returns = [incumbent_map[day] for day in shared]
+    return OverlapComparison(
+        window=(shared[0], shared[-1]),
+        days=len(shared),
+        candidate_ir=annualized_ir(candidate_returns),
+        incumbent_ir=annualized_ir(incumbent_returns),
+        candidate_mdd=max_drawdown(candidate_returns),
+        incumbent_mdd=max_drawdown(incumbent_returns),
+    )
 
 
 @dataclass(frozen=True)
@@ -209,7 +307,9 @@ class GateVerdict:
     incumbent_workspace: str | None
     config: GateConfig
     confirmation: ConfirmationEvidence | None = None
-    window: tuple[str, str] | None = None  # the (parity-checked) test window
+    window: tuple[str, str] | None = None  # the candidate's test window
+    overlap: OverlapComparison | None = None  # the shared-window comparison (US-031)
+    drift_notes: tuple[str, ...] = ()  # window/universe drift, informational
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -222,6 +322,8 @@ class GateVerdict:
             "config": asdict(self.config),
             "confirmation": asdict(self.confirmation) if self.confirmation else None,
             "window": list(self.window) if self.window else None,
+            "overlap": asdict(self.overlap) if self.overlap else None,
+            "drift_notes": list(self.drift_notes),
         }
 
     def to_json(self) -> str:
@@ -240,9 +342,12 @@ class GateVerdict:
         elif self.incumbent_workspace is None:
             lines.append("• parity: no incumbent to compare against")
         else:
-            parity = "window/market/instruments/topk-n_drop/costs all match"
-            if self.window is not None:
-                parity += f" (test window {self.window[0]} → {self.window[1]})"
+            parity = "market/topk-n_drop/costs match"
+            if self.overlap is not None and self.overlap.window is not None:
+                parity += (
+                    f" — compared on the shared window {self.overlap.window[0]} → "
+                    f"{self.overlap.window[1]} ({self.overlap.days} trading days)"
+                )
             lines.append(f"• {PASS_MARK} parity: {parity}")
         for criterion in self.criteria:
             mark = PASS_MARK if criterion.passed else FAIL_MARK
@@ -259,6 +364,7 @@ class GateVerdict:
             )
             if sides:
                 lines.append(f"• confirmation window {window[0]} → {window[1]}: {sides}")
+        lines.extend(f"• :information_source: {note}" for note in self.drift_notes)
         lines.append(f"_{SURVIVORSHIP_CAVEAT}_")
         return "\n".join(lines)
 
@@ -305,12 +411,12 @@ def _confirmation_side_text(role: str, side: ConfirmationSide) -> str:
     return f"{role} `{_workspace_tag(side.workspace)}` IR {ir} ({side.days}d, {source})"
 
 
-# (bundle attribute, human label) — the inputs that must match for the two
-# backtests to be comparable at all.
+# (bundle attribute, human label) — the configuration inputs that must never
+# drift silently. Test window and instrument hash are NOT here (US-031): both
+# drift by design, so they surface as drift notes and the incumbent-relative
+# legs compare on the constructed overlap window instead.
 _PARITY_FIELDS: tuple[tuple[str, str], ...] = (
-    ("window", "test window"),
     ("market", "market"),
-    ("instrument_hash", "instrument list"),
     ("topk", "topk"),
     ("n_drop", "n_drop"),
     ("cost_params", "cost params"),
@@ -354,6 +460,40 @@ def _check_parity(candidate: MetricBundle, incumbent: MetricBundle) -> list[str]
     return mismatches
 
 
+def _drift_notes(candidate: MetricBundle, incumbent: MetricBundle) -> list[str]:
+    """US-031: window/universe differences are informational, not vetoes —
+    the IR/MDD legs compare on the constructed overlap and the confirmation
+    leg re-predicts each strategy on its own deployed conf. Still worth the
+    operator's eyes, so every difference (or unknowable) is stated."""
+    notes: list[str] = []
+    cand_window, inc_window = candidate.window, incumbent.window
+    if cand_window is not None and inc_window is not None:
+        if _parity_value(cand_window) != _parity_value(inc_window):
+            notes.append(
+                f"window drift: candidate {_format_parity(cand_window)}, incumbent "
+                f"{_format_parity(inc_window)} — IR/MDD compared on the shared window only"
+            )
+    else:
+        side = "both sides" if cand_window is None and inc_window is None else (
+            "candidate" if cand_window is None else "incumbent"
+        )
+        notes.append(f"window drift unknown — test window unrecorded on {side}")
+    cand_hash, inc_hash = candidate.instrument_hash, incumbent.instrument_hash
+    if cand_hash is not None and inc_hash is not None:
+        if cand_hash != inc_hash:
+            notes.append(
+                f"universe drift: instrument hash candidate {cand_hash}, incumbent "
+                f"{inc_hash} — recorded returns come from each strategy's own universe; "
+                "the confirmation leg re-predicts each on its deployed conf"
+            )
+    else:
+        side = "both sides" if cand_hash is None and inc_hash is None else (
+            "candidate" if cand_hash is None else "incumbent"
+        )
+        notes.append(f"universe drift unknown — instrument hash unavailable on {side}")
+    return notes
+
+
 def _ic_criterion(candidate: MetricBundle, config: GateConfig) -> CriterionResult:
     ic = candidate.metrics.get("IC")
     if ic is None:
@@ -367,40 +507,54 @@ def _ic_criterion(candidate: MetricBundle, config: GateConfig) -> CriterionResul
     )
 
 
-def _ir_criterion(
-    candidate: MetricBundle, incumbent: MetricBundle, config: GateConfig
-) -> CriterionResult:
-    cand = candidate.metrics.get("IR")
-    inc = incumbent.metrics.get("IR")
+def _overlap_prefix(overlap: OverlapComparison) -> str:
+    window = overlap.window or ("?", "?")
+    return f"shared window {window[0]} → {window[1]} ({overlap.days}d)"
+
+
+def _ir_criterion(overlap: OverlapComparison | None, config: GateConfig) -> CriterionResult:
+    """US-031: IRs computed over the shared trading days, never recorded
+    scalars from different windows. Missing/failed alignment fails the leg
+    as overlap_unavailable — the exact mirror of confirmation_unavailable."""
+    name = "IR"
+    if overlap is None:
+        return CriterionResult(name, False, "overlap_unavailable — overlap was not evaluated")
+    if overlap.error is not None:
+        return CriterionResult(name, False, f"overlap_unavailable — {overlap.error}")
+    cand, inc = overlap.candidate_ir, overlap.incumbent_ir
     if cand is None or inc is None:
         side = "candidate" if cand is None else "incumbent"
-        return CriterionResult("IR", False, f"{side} IR unavailable", cand, inc)
+        return CriterionResult(
+            name, False, f"overlap_unavailable — {side} IR degenerate on the shared window"
+        )
     threshold = inc * config.ir_margin
     return CriterionResult(
-        "IR",
+        name,
         cand > threshold,
-        f"candidate {cand:.4f} vs incumbent {inc:.4f} × {config.ir_margin:g} "
-        f"= {threshold:.4f} (need >)",
+        f"{_overlap_prefix(overlap)}: candidate {cand:.4f} vs incumbent {inc:.4f} × "
+        f"{config.ir_margin:g} = {threshold:.4f} (need >)",
         candidate=cand,
         incumbent=inc,
     )
 
 
-def _mdd_criterion(
-    candidate: MetricBundle, incumbent: MetricBundle, config: GateConfig
-) -> CriterionResult:
-    cand = candidate.metrics.get("MDD")
-    inc = incumbent.metrics.get("MDD")
+def _mdd_criterion(overlap: OverlapComparison | None, config: GateConfig) -> CriterionResult:
+    name = "MDD"
+    if overlap is None:
+        return CriterionResult(name, False, "overlap_unavailable — overlap was not evaluated")
+    if overlap.error is not None:
+        return CriterionResult(name, False, f"overlap_unavailable — {overlap.error}")
+    cand, inc = overlap.candidate_mdd, overlap.incumbent_mdd
     if cand is None or inc is None:
         side = "candidate" if cand is None else "incumbent"
-        return CriterionResult("MDD", False, f"{side} MDD unavailable", cand, inc)
-    # qlib reports MDD as a negative return; compare magnitudes so the sign
+        return CriterionResult(name, False, f"overlap_unavailable — {side} MDD unavailable")
+    # MDD is negative by convention; compare magnitudes so the sign
     # convention can never flip the verdict. At the tolerance passes.
     limit = abs(inc) * config.mdd_tolerance
     return CriterionResult(
-        "MDD",
+        name,
         abs(cand) <= limit,
-        f"candidate {cand:+.2%} vs limit {-limit:.2%} "
+        f"{_overlap_prefix(overlap)}: candidate {cand:+.2%} vs limit {-limit:.2%} "
         f"(incumbent {inc:+.2%} × {config.mdd_tolerance:g})",
         candidate=cand,
         incumbent=inc,
@@ -450,17 +604,21 @@ def evaluate_gate(
     incumbent: MetricBundle | None,
     config: GateConfig | None = None,
     confirmation: ConfirmationEvidence | None = None,
+    overlap: OverlapComparison | None = None,
 ) -> GateVerdict:
     """PURE comparison: does the candidate beat the incumbent on this config?
 
     ``incumbent=None`` means nothing is promoted: the comparison legs are
     waived only under ``allow_first`` (IC still applies), otherwise the gate
     fails on the missing incumbent alone. With an incumbent, ``confirmation``
-    evidence is REQUIRED — omitting it fails the confirmation criterion as
-    confirmation_unavailable (the PRD forbids a silent skip).
+    evidence AND ``overlap`` (US-031, from ``align_overlap``) are REQUIRED —
+    omitting either fails its criteria as
+    confirmation_unavailable/overlap_unavailable (the PRD forbids a silent
+    skip).
     """
     config = config if config is not None else GateConfig()
     criteria: list[CriterionResult] = []
+    drift: list[str] = []
     if incumbent is None:
         mismatches: list[str] = []
         criteria.append(
@@ -474,8 +632,9 @@ def evaluate_gate(
         )
     else:
         mismatches = _check_parity(candidate, incumbent)
-        criteria.append(_ir_criterion(candidate, incumbent, config))
-        criteria.append(_mdd_criterion(candidate, incumbent, config))
+        drift = _drift_notes(candidate, incumbent)
+        criteria.append(_ir_criterion(overlap, config))
+        criteria.append(_mdd_criterion(overlap, config))
     criteria.append(_ic_criterion(candidate, config))
     if incumbent is not None:
         criteria.append(_confirmation_criterion(confirmation, config))
@@ -493,6 +652,8 @@ def evaluate_gate(
         window=(candidate.window[0], candidate.window[1])
         if candidate.window is not None
         else None,
+        overlap=overlap if incumbent is not None else None,
+        drift_notes=tuple(drift),
     )
 
 
@@ -553,7 +714,7 @@ def load_metric_bundle(
         topk=topk,
         n_drop=n_drop,
         cost_params=cost_params,
-        daily_returns=_net_daily_returns(ws / "ret.pkl"),
+        dated_returns=_net_dated_returns(ws / "ret.pkl"),
     )
 
 
@@ -628,8 +789,10 @@ def _derived_sharpe(workspace: Path) -> float | None:
         return None
 
 
-def _net_daily_returns(ret_pkl: Path) -> tuple[float, ...] | None:
-    """ret.pkl -> net-of-cost daily return tuple; None on any unusable artifact."""
+def _net_dated_returns(ret_pkl: Path) -> tuple[tuple[str, float], ...] | None:
+    """ret.pkl -> net-of-cost (ISO date, return) pairs; None on any unusable
+    artifact. Dates ride along so align_overlap (US-031) can intersect two
+    strategies' series on their shared trading days."""
     if not ret_pkl.is_file():
         return None
     import pandas as pd  # lazy: keeps offline imports fast, like gpu_trace
@@ -643,4 +806,11 @@ def _net_daily_returns(ret_pkl: Path) -> tuple[float, ...] | None:
     net = frame["return"].astype(float)
     if "cost" in frame.columns:
         net = net - frame["cost"].astype(float)
-    return tuple(float(value) for value in net.dropna())
+    net = net.dropna()
+    try:
+        return tuple(
+            (pd.Timestamp(day).date().isoformat(), float(value))  # pyright: ignore[reportArgumentType]
+            for day, value in net.items()
+        )
+    except (TypeError, ValueError):  # non-date index — unusable for alignment
+        return None

@@ -604,10 +604,12 @@ def format_run_start(
     dates: RunDates,
     instrument_hash: str,
     boot_note: str | None = None,
+    gate_note: str | None = None,
 ) -> str:
     """Run-start Slack message — states the rolling window the operator can't
-    otherwise see (TEST_END no longer lives in any file) and how the worker
-    booted (snapshot vs full bootstrap, US-022)."""
+    otherwise see (TEST_END no longer lives in any file), how the worker
+    booted (snapshot vs full bootstrap, US-022), and whether the gate can
+    possibly promote this run (US-032 preview)."""
     return (
         f":microscope: research loop launched — budget {options.loop_n} hypotheses"
         f"{', universe ' + options.universe if options.universe else ''}"
@@ -616,8 +618,48 @@ def format_run_start(
         f"{dates.confirm_start} → {dates.store_end} ({dates.confirm_days} trading days "
         f"reserved, unseen by the search) · universe hash `{instrument_hash}`\n"
         + (f"{boot_note}\n" if boot_note else "")
+        + (f"{gate_note}\n" if gate_note else "")
         + "Per-loop digests will follow in this thread"
     )
+
+
+def gate_preview_note(
+    db_path: Path | None = None, config_path: Path | None = None
+) -> str | None:
+    """US-032: the launch-knowable reasons this run cannot end in a promotion.
+
+    Purely advisory — returns a one-line run-start note (or None when nothing
+    blocks) and NEVER raises: a broken preview must not cost a launch. It
+    checks only what is certain at launch: the auto_promote kill-switch, the
+    no-incumbent/allow_first combination, an incumbent workspace missing on
+    disk, and incumbent daily returns the overlap comparison cannot read.
+    """
+    try:
+        from ops.promotion_gate import DEFAULT_CONFIG_PATH, load_gate_config, load_metric_bundle
+        from orchestrator.state import DEFAULT_DB_PATH
+
+        gate_config = load_gate_config(config_path if config_path else DEFAULT_CONFIG_PATH)
+        reasons: list[str] = []
+        if not gate_config.auto_promote:
+            reasons.append("promotion_gate.auto_promote is off (kill-switch)")
+        incumbent_row = _promoted_row(db_path if db_path is not None else Path(DEFAULT_DB_PATH))
+        if incumbent_row is None:
+            if not gate_config.allow_first:
+                reasons.append("no incumbent on record and allow_first is off")
+        else:
+            workspace = Path(incumbent_row.workspace_path).expanduser()
+            if not workspace.is_dir():
+                reasons.append(f"incumbent workspace `{workspace.name[:8]}` missing on disk")
+            elif load_metric_bundle(workspace).dated_returns is None:
+                reasons.append(
+                    f"incumbent `{workspace.name[:8]}` daily returns unreadable (ret.pkl) — "
+                    "the overlap comparison will fail"
+                )
+        if not reasons:
+            return None
+        return ":information_source: gate preview: report-only this run — " + "; ".join(reasons)
+    except Exception:  # noqa: BLE001 — advisory only, never block a launch
+        return None
 
 
 def snapshot_boot_note(
@@ -798,6 +840,7 @@ def gate_and_promote(
     try:
         from ops.promotion_gate import (
             DEFAULT_CONFIG_PATH,
+            align_overlap,
             evaluate_gate,
             load_confirmation_evidence,
             load_gate_config,
@@ -814,6 +857,7 @@ def gate_and_promote(
                 incumbent_row.workspace_path,
                 instrument_hash=_recorded_instrument_hash(incumbent_row.config),
             )
+            overlap = align_overlap(candidate, incumbent, gate_config.min_overlap_days)
             evidence = load_confirmation_evidence(
                 candidate_workspace,
                 incumbent_row.workspace_path,
@@ -821,7 +865,7 @@ def gate_and_promote(
                 dt.date.fromisoformat(dates.store_end),
                 **(confirm_kwargs or {}),
             )
-            verdict = evaluate_gate(candidate, incumbent, gate_config, evidence)
+            verdict = evaluate_gate(candidate, incumbent, gate_config, evidence, overlap)
     except Exception as exc:  # noqa: BLE001 — a gate error must never fail the run
         slack.post(
             f":warning: promotion gate errored ({exc}) — run finalizes unpromoted; "
@@ -976,6 +1020,7 @@ def run_pipeline(options: PipelineOptions) -> int:
                 dates,
                 instrument_hash,
                 snapshot_boot_note(options, booted_from_snapshot, inputs_hash),
+                gate_preview_note(),
             )
         )
 

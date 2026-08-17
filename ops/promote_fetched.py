@@ -167,6 +167,7 @@ def evaluate_advisory_gate(
         from ops.gpu_pipeline import compute_run_dates
         from ops.promotion_gate import (
             DEFAULT_CONFIG_PATH,
+            align_overlap,
             evaluate_gate,
             hash_instruments,
             load_confirmation_evidence,
@@ -197,7 +198,8 @@ def evaluate_advisory_gate(
             dt.date.fromisoformat(dates.store_end),
             store_path=resolved_store,
         )
-        return evaluate_gate(candidate, incumbent, gate_config, evidence), None
+        overlap = align_overlap(candidate, incumbent, gate_config.min_overlap_days)
+        return evaluate_gate(candidate, incumbent, gate_config, evidence, overlap), None
     except Exception as exc:  # noqa: BLE001 — advisory: the verdict degrades, main() decides
         return None, str(exc)
 

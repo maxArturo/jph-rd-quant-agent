@@ -1061,3 +1061,46 @@ Two changes:
   selected by every future run. The hash change orphans that snapshot by
   construction; delete image `rdq-gpu-base-94c67dc3b2b0-20260817-1130`
   (id 241539448) manually to stop paying for its storage.
+
+## 2026-08-17 — US-031/US-032: gate comparability by construction (overlap window)
+
+The first real run through the US-007 gate (thread 1786966914.860099) proved
+a structural flaw: parity required the candidate's and incumbent's RECORDED
+test windows and instrument hashes to be equal, but both drift by design —
+TEST_END rolls forward with the store every trading day (US-008) and the PIT
+universe membership evolves monthly (US-023). Any candidate launched after
+the incumbent's own run day could therefore never pass parity, and
+auto-promotion (US-011's whole point) was structurally unreachable after the
+first promotion: every future promotion would have needed a manual --force.
+
+Operator decision (Max, 2026-08-17): comparability is CONSTRUCTED at gate
+time instead of checked against recorded values — the same philosophy the
+confirmation leg already used (re-evaluate both strategies on the same
+window; refuse when either side can't be honestly evaluated).
+
+- The IR and MDD legs are now computed by `align_overlap` over the two
+  strategies' SHARED trading days, intersected from each side's dated
+  ret.pkl series. Fewer than `promotion_gate.min_overlap_days` (126, about
+  half a trading year) shared days, or unreadable returns, fails those legs
+  as `overlap_unavailable` — never a silent skip.
+- Hard parity shrank to what must never drift silently: market, topk,
+  n_drop, cost params. Window and instrument-hash differences are now
+  verdict `drift_notes` (Slack + JSON), informational only. Rationale: the
+  promotion question is "which strategy should trade tomorrow", and each
+  strategy trades its own deployed conf/universe — the confirmation leg
+  already re-predicts each side on exactly that basis.
+- The confirmation leg, its reproduction check (min_reproduction 0.98), the
+  IC floor, and all margins are unchanged.
+- US-032: the run-start message now carries a "gate preview: report-only
+  this run — …" line when a launch-knowable blocker exists (auto_promote
+  off, no incumbent with allow_first off, incumbent workspace or ret.pkl
+  unreadable), so GPU hours are never spent discovering at the verdict what
+  was known at launch. Warn-not-refuse: unpromotable runs still produce
+  knowledge and run-memory.
+
+Consequence for the 2026-08-17 verdict that triggered this: its parity legs
+(window + instrument hash) would now be drift notes, its IR leg would be
+recomputed on the shared window, and the decision would have rested on the
+MDD limit and the confirmation leg — which correctly refused because the
+incumbent c9587797 cannot reproduce its own predictions (see the 2026-08-15
+incident entry). That refusal is the system working.

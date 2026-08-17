@@ -320,6 +320,71 @@ Stories are ordered so each phase is independently shippable. Phase A (audit + g
 - Watchdog: 0 `FileNotFoundError` ticks; a deliberately orphaned droplet is destroyed within 25h.
 - After US-021, `rg -l server_ui` returns only docs/history, and `make check` passes with the stack gone.
 
+## Addendum (2026-08-17) — Gate comparability by construction
+
+The first real run through the gate (thread 1786966914.860099) exposed a
+structural flaw in US-002's parity design: parity was checked as **equality
+of recorded values**, but two of those values drift *by design* — the test
+window rolls forward with the store every trading day (US-007), and the PIT
+universe membership evolves monthly (US-010). So any candidate launched
+after the incumbent's own run day can never match the incumbent's recorded
+window, and auto-promotion (US-003's whole point) is structurally
+unreachable after the first promotion: every future promotion would need a
+manual `--force`. Operator decision 2026-08-17: parity must be
+**constructed at gate time** — evaluate both strategies on the same slice of
+history before comparing — rather than checked against recorded artifacts.
+The confirmation leg (US-008) already works this way; this addendum extends
+the same philosophy to the search-window legs.
+
+### US-031: Overlap-window comparison replaces recorded-value parity
+**Description:** As an operator, I want the gate's IR and MDD legs computed
+from both strategies' daily returns over their *shared* trading days, so two
+honestly-measured backtests from different launch days remain comparable and
+auto-promotion stays reachable, without weakening any honesty protection.
+
+**Acceptance Criteria:**
+- [ ] `ops/promotion_gate.py` gains a pure `align_overlap(candidate,
+  incumbent, min_days)` that intersects the two bundles' dated daily-return
+  series (`ret.pkl` with dates) and computes each side's annualized IR
+  (`ops.confirm_window.annualized_ir` convention) and max drawdown over the
+  shared days. Fewer than `promotion_gate.min_overlap_days` (default 126)
+  shared days, or missing dated returns on either side, yields an error —
+  the IR and MDD criteria then fail as `overlap_unavailable`, never a
+  silent skip (same contract as `confirmation_unavailable`).
+- [ ] The IR and MDD criteria compare the overlap-computed values (same
+  margins as before: IR × `ir_margin`, |MDD| × `mdd_tolerance`); recorded
+  qlib_res scalars are no longer used for the incumbent-relative legs. The
+  IC leg (candidate-only) still uses the recorded value.
+- [ ] Hard parity shrinks to the fields that must never drift silently:
+  market, topk, n_drop, cost params. Test-window and instrument-hash
+  differences become **drift notes** — rendered in the Slack verdict and
+  stored in the verdict JSON — stating what drifted and that the comparison
+  used the shared window / each strategy's own deployed universe.
+- [ ] `evaluate_gate` requires overlap evidence whenever an incumbent
+  exists (mirroring the confirmation-evidence contract); both the pipeline
+  auto-gate and `promote_fetched`'s advisory gate supply it.
+- [ ] The confirmation leg, reproduction check, IC floor, and all margins
+  are unchanged.
+- [ ] `make check` passes; tests cover overlap math (IR/MDD on shared days),
+  insufficient-overlap refusal, missing-returns refusal, window/universe
+  drift notes, hard-parity fields still failing the gate, and the pipeline
+  promoting across a window/universe drift when the metrics genuinely pass.
+
+### US-032: Launch-time gate preview
+**Description:** As an operator, I want the run-start Slack message to state
+when a run structurally cannot end in promotion, so I never spend GPU hours
+discovering that at the verdict.
+
+**Acceptance Criteria:**
+- [ ] At launch (before the loop starts), the pipeline evaluates the
+  launch-knowable blockers: `auto_promote` off, no incumbent with
+  `allow_first` off, incumbent workspace missing on disk, incumbent daily
+  returns unreadable. Any hit adds a "gate preview: report-only this run —
+  <reasons>" line to the run-start message.
+- [ ] The preview is advisory and never raises or blocks the launch (runs
+  still produce knowledge and run-memory when unpromotable).
+- [ ] `make check` passes; tests cover each blocker and the clean case.
+
 ## Open Questions
 
 None outstanding. All four were resolved with the operator on 2026-08-14:

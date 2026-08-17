@@ -122,6 +122,11 @@
   `universe_tickers` via hash_instruments (both canonicalize identically —
   verified matching on the real pair 2026-08-15). Status file gains
   `gate` (verdict dict or {"error": ...}) + `auto_promoted` fields.
+  Launch preview (US-032): `gate_preview_note(db_path, config_path)` adds a
+  "gate preview: report-only this run — …" line to the run-start message for
+  the launch-knowable blockers (auto_promote off, no incumbent with
+  allow_first off, incumbent workspace/returns unreadable); it is advisory
+  and NEVER raises — a broken preview must not cost a launch.
 - Base snapshots (US-022, `ops/gpu_snapshot.py`): worker boots are keyed on a
   short worker-inputs hash (research/PINNED_COMMIT + gpu_worker.sh + the
   Makefile venv targets + a STRUCTURAL store marker — field/calendar names
@@ -153,16 +158,27 @@
   `GpuBackend.active_run_lock()` → start_research refuses naming the owning
   thread; stop_run only cancels when the requesting thread owns the lock
   (cancel kills THE worker's tmux session, whoever's it is).
-- `ops/promotion_gate.py` (US-007) codifies "beats the incumbent":
-  `evaluate_gate(candidate, incumbent, config)` is PURE — callers do IO via
-  `load_metric_bundle(workspace, instrument_hash=...)` (every field degrades
-  independently; a missing parity input FAILS parity against an incumbent,
-  never guesses). Thresholds live in orchestrator/config.yaml
-  `promotion_gate:` (`load_gate_config`; missing section = defaults;
-  bootstrap_notion rewrites of config.yaml preserve the section but drop its
-  comments). Boundary semantics: IR margin and min_ic are strict `>`, the
-  MDD tolerance passes at-limit; MDD compares MAGNITUDES (abs) so qlib's
-  negative sign convention can't flip a verdict. `hash_instruments` is the
+- `ops/promotion_gate.py` (US-007/US-031) codifies "beats the incumbent":
+  `evaluate_gate(candidate, incumbent, config, confirmation, overlap)` is
+  PURE — callers do IO via `load_metric_bundle(workspace,
+  instrument_hash=...)` (every field degrades independently; a missing
+  HARD-parity input — market/topk/n_drop/costs — FAILS parity against an
+  incumbent, never guesses). Since US-031, test window and instrument hash
+  are NOT parity fields: they drift by design (rolling TEST_END, evolving PIT
+  universe), so recorded-equality made auto-promotion structurally
+  unreachable after the first promotion. Instead, the IR/MDD legs compare
+  values computed by `align_overlap(candidate, incumbent,
+  min_overlap_days)` over the two strategies' SHARED trading days (from
+  each side's dated ret.pkl series); < `min_overlap_days` (config, default
+  126) shared days, or missing dated returns, fails those legs as
+  `overlap_unavailable` — the exact mirror of confirmation_unavailable, no
+  silent skip. Window/universe drift surfaces as verdict `drift_notes`
+  (Slack + verdict JSON), informational only. Thresholds live in
+  orchestrator/config.yaml `promotion_gate:` (`load_gate_config`; missing
+  section = defaults; bootstrap_notion rewrites of config.yaml preserve the
+  section but drop its comments). Boundary semantics: IR margin and min_ic
+  are strict `>`, the MDD tolerance passes at-limit; MDD compares MAGNITUDES
+  (abs) so the negative sign convention can't flip a verdict. `hash_instruments` is the
   canonical universe hash (sorted/deduped/sha256[:16]) — US-008's
   pipeline_status hash and anything else comparing universes MUST use it.
   The verdict's `to_json()` is the promotion_history.gate_verdict payload;
