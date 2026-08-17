@@ -1059,4 +1059,5 @@ Two changes:
   would not have invalidated stale snapshots, and the broken environment
   baked at this run's teardown (hash `94c67dc3b2b0`) would have been
   selected by every future run. The hash change orphans that snapshot by
-  construction; it was also deleted manually.
+  construction; delete image `rdq-gpu-base-94c67dc3b2b0-20260817-1130`
+  (id 241539448) manually to stop paying for its storage.
