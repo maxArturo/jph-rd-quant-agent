@@ -43,10 +43,10 @@ US_TEMPLATES = Path(__file__).resolve().parent / "us_templates"
 US_FACTOR_TEMPLATE = US_TEMPLATES / "factor_template"
 US_MODEL_TEMPLATE = US_TEMPLATES / "model_template"
 
-# Per-run custom universe override (US-023): research/server_ui.py sets this
-# to the universe's rendered template copy (~/rdq-data/templates/<name>)
-# before forking the run, so every experiment backtests `market: <name>`
-# instead of the us_liquid default.
+# Per-run custom universe override (US-023): the run env (gpu_worker.sh run
+# exports) sets this to the universe's rendered template copy
+# (~/rdq-data/templates/<name>) before the loop starts, so every experiment
+# backtests `market: <name>` instead of the us_liquid default.
 TEMPLATES_ENV_VAR = "RDQ_UNIVERSE_TEMPLATES"
 
 

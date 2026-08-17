@@ -71,14 +71,12 @@ probing the US store, the factor env becomes a plain ``LocalEnv`` whose
 ops points at the same interpreter — and the model env keeps its docker
 mounts per call (#4). Model training and qlib backtests still follow
 ``MODEL_CoSTEER_ENV_TYPE=docker`` (QTDockerEnv, local_qlib:latest), wired in
-ops/rdq-research.service and run_us_quant.sh.
+run_us_quant.sh.
 
 ``install_us_validation()`` runs at ``research.us_quant`` import — every
 fin_quant process resolves the QLIB_QUANT_*_HYPOTHESIS2EXPERIMENT class paths
-(and therefore imports us_quant) while the loop object is constructed, before
-the interaction gate — and again from ``research.server_ui.main()`` so
-UI-forked children inherit patched modules even if the class-path env vars
-are ever unset. Assignment must cover the ``from x import y`` binding in each
+(and therefore imports us_quant) while the loop object is constructed.
+Assignment must cover the ``from x import y`` binding in each
 consuming module, not just the defining module; keep the target list in sync
 with upstream call sites when bumping research/PINNED_COMMIT.
 

@@ -1,17 +1,14 @@
 """fin_quant CLI wrapper that seeds the loop's user instruction (directive).
 
-Why: the operator's research directive reaches server_ui runs through the
-user-interaction queues (`RdAgentClient.start_run` pre-seeds
-``{"user_instruction": ...}``), but plain CLI runs (`rdagent fin_quant`, the
-GPU-worker path) have no interaction channel — `QuantRDLoop._interact_init_params`
-only runs when the queues exist, so CLI runs ignore the directive entirely.
+Why: plain CLI runs (`rdagent fin_quant`, the GPU-worker path) have no
+user-interaction channel — `QuantRDLoop._interact_init_params` only runs when
+the IPC queues exist, so CLI runs ignore the directive entirely.
 
 This wrapper replicates ``rdagent.app.qlib_rd_loop.quant.main`` for a FRESH
 run and seeds ``loop.plan["user_instruction"]`` before the loop starts — the
 exact key the proposal step reads (`components/proposal/__init__.py`,
 ``plan.get("user_instruction")``). The pinned upstream tree stays unmodified
-(research/CLAUDE.md rule); this is the same replicate-main pattern as
-research/server_ui.py.
+(research/CLAUDE.md rule).
 
 Usage (normally via ops/run_us_quant.sh with RDQ_USER_INSTRUCTION set):
 

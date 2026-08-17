@@ -428,8 +428,8 @@
         "Typecheck passes (make check: ruff + pyright + pytest)"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "rdagent_client.py + research/server_ui.py deleted (with their test modules); RunArtifacts/ArtifactNotFoundError/locate_artifacts moved into gpu_backend.py (locate_run_artifacts stays the single promotion locate, and is now PromotionFlow's default). ConversationCore: rdagent param, ResearchLauncher protocol, resume_run tool and format_run_stopped/resumed removed; stop_run refuses legacy backends naming the decommission. RDQ_MAX_HYPOTHESES loader removed (config.yaml had no server_ui keys). Legacy rows readable + tolerated (tests; E2E on a live-DB copy: 16 server_ui rows read, 10 real traces still locate, stop refusal leaves the row untouched). docs/decisions.md 2026-08-17 records the accepted brake loss. rg server_ui hits only docs/tests/legacy-data comments and on-disk path literals (sweep roots, health.sh retired-port guard)."
     },
     {
       "id": "US-029",

@@ -227,7 +227,7 @@ def promotion_candidate(reports: list[LoopReport]) -> LoopReport | None:
 
     Mirrors the operator rule for control-box runs ("stop at a SOTA result,
     then promote"): feedback decisions are the SOTA signal, qlib_res.csv is
-    the artifact gate (same gate rdagent_client.locate_artifacts applies).
+    the artifact gate (same gate gpu_backend.locate_artifacts applies).
     """
     for report in reversed(reports):
         if report.decision and report.workspace and report.metrics:

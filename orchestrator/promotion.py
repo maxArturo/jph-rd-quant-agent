@@ -38,8 +38,8 @@ from typing import Any
 from execution import pred_refresh, signal
 from execution.rebalance import DEFAULT_STORE_PATH
 from orchestrator import summary
+from orchestrator.gpu_backend import ArtifactNotFoundError, RunArtifacts, locate_run_artifacts
 from orchestrator.notion_recorder import NotionRecorder
-from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, locate_artifacts
 from orchestrator.state import PromotedStrategy, Run, StateStore
 
 logger = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ class PromotionFlow:
         self,
         store: StateStore,
         recorder: NotionRecorder | None = None,
-        locate: Callable[[str | Path], RunArtifacts] = locate_artifacts,
+        locate: Callable[[str | Path], RunArtifacts] = locate_run_artifacts,
         load_params: Callable[[Path], signal.StrategyParams] = signal.load_strategy_params,
         snapshot: Callable[[Path], object] = pred_refresh.snapshot_pred_refresh,
         load_market: Callable[[Path], str] = signal.load_market,

@@ -52,36 +52,21 @@
   context must reload from SQLite into the system prompt (in-memory history
   is lost on restart by design).
 
-- All talk to rdagent server_ui goes through `orchestrator/rdagent_client.py`
-  (`RdAgentClient`, default `http://127.0.0.1:19899`). It speaks the REAL
-  upstream protocol, which differs from the PRD sketch — see the endpoint
-  mapping table in docs/decisions.md (US-019 entry). Key semantics: runs
-  start via POST /upload; `pending()` piggybacks on the POST /trace message
-  poll (each poll drains ≤1 pending interaction server-side, and answered
-  requests stay in the stream — dedup with `PendingInteraction.key`, and skip
-  kinds `init_params`/`base_features`, which `start_run()` auto-answers);
-  `submit()` answers the OLDEST unanswered interaction (FIFO queue, not
-  addressed to a specific request); `resume()` needs the research/server_ui.py
-  resume extension (a bare upstream server raises `UnsupportedActionError`)
-  and MUST be passed `directive=`/`universe=` — a resumed run re-blocks on
-  the init interactions like a fresh start, and the poller never answers
-  those kinds, so resume re-seeds them the way `start_run` does.
-  `locate_artifacts(trace_dir)` unpickles `runner result` pkls — trace dirs
-  for server-started runs live under `~/rdq-runs/server_ui/traces/<trace_id>`,
-  NOT under the LOG_TRACE_PATH convention of the CLI wrappers. Tests: stub
-  the server with a real threaded Flask app (StubServerUi in
-  tests/test_rdagent_client.py — reuse it for poller/tool tests) and pass
-  `base_features={...}` so the client never imports rdagent.
-- Session-path convention (US-020): `runs.session_path` stores
-  `str(client.trace_dir(handle.trace_id))`; recover the trace id for API
-  calls with `client.trace_id_of(session_path)`. Run-lifecycle tools should
-  depend on the `ResearchLauncher` protocol in conversation.py
-  (start_run/trace_dir/trace_id_of/stop/resume; stub-friendly — see
-  StubLauncher in tests/test_conversation.py) rather than the concrete client.
-- Run lifecycle via `runs.status` (US-024): stop_run flips
-  running -> 'stopped'; resume_run flips back to 'running' (legacy
-  server_ui path only — GPU runs cannot be resumed). Never flip a row to
-  'running' without actually resuming the server-side process.
+- The legacy control-plane client (`orchestrator/rdagent_client.py`) and the
+  `resume_run` tool were removed in US-028 (the service itself went in
+  US-026). The artifact helpers promotion still needs — `RunArtifacts`,
+  `ArtifactNotFoundError`, `locate_artifacts` — live in
+  `orchestrator/gpu_backend.py`; `locate_run_artifacts` there is the single
+  promotion locate for both fetched GPU traces and legacy on-box trace dirs
+  (`~/rdq-runs/server_ui/traces/...` paths in old rows still resolve).
+- Legacy `runs` rows keep `backend='server_ui'` (no destructive migration):
+  every code path iterating runs must tolerate that value —
+  check_research_status reports them plainly, stop_run refuses them with an
+  explanation, the run reaper filters on `backend == 'gpu'`.
+- Run lifecycle via `runs.status`: GPU stop_run sends cancel and leaves the
+  row 'running' — the PIPELINE flips it to 'stopped' when it finalizes. Runs
+  are never resumable; never flip a row to 'running' without a live process
+  behind it.
 
 - Notion writes go through `orchestrator/notion_client.py` (`NotionClient`):
   bare HTTPS with only `Notion-Version: 2022-06-28` — NEVER add an

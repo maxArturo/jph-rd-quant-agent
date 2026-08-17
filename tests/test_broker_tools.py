@@ -27,7 +27,7 @@ from orchestrator.conversation import (
 )
 from orchestrator.llm import ModelRouter
 from orchestrator.state import StateStore
-from tests.test_conversation import THREAD, RecordingSay, StubLauncher
+from tests.test_conversation import THREAD, RecordingSay
 from tests.test_llm import FakeClient, message, text_block, tool_use_block
 from tests.test_trading_halt import make_breaker
 
@@ -140,7 +140,6 @@ def make_core(
     return ConversationCore(
         store=StateStore(db_path=tmp_path / "conv.sqlite"),
         router=ModelRouter(client=client),
-        rdagent=StubLauncher(),
         breaker=make_breaker(tmp_path),
         broker=broker,
     )

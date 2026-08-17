@@ -999,3 +999,38 @@ system inherits this until the backfill lands.
 4. Symbol-reuse dedup: a delisted symbol later reused by a different
    company must not splice two price histories together (key tickers by
    symbol + listing era, dedup on FMP's company identifiers).
+
+## 2026-08-17 — US-028: server_ui fully removed; poller-era brakes are accepted behavior loss on the GPU path
+
+The last server_ui code is gone: `orchestrator/rdagent_client.py` (the HTTP
+client for the retired control plane) and `research/server_ui.py` (the
+loopback launcher + resume extension) are deleted, along with
+ConversationCore's launcher wiring, the `resume_run` tool, and the
+`RDQ_MAX_HYPOTHESES` config loader. The artifact helpers the promotion path
+still needs (`RunArtifacts`, `ArtifactNotFoundError`, `locate_artifacts`)
+moved to `orchestrator/gpu_backend.py`, whose `locate_run_artifacts` remains
+the single promotion locate for both fetched GPU traces and legacy on-box
+trace dirs. Legacy `runs` rows with `backend='server_ui'` remain readable
+(no destructive migration): check_research_status reports them plainly,
+stop_run refuses them with an explanation, and the run reaper ignores them.
+
+**Accepted behavior loss.** The poller-era brakes existed only on the
+server_ui path and do NOT exist on the GPU path:
+
+- `RDQ_MAX_HYPOTHESES` (the poller's per-run budget cap) — gone. The GPU
+  equivalent is `loop_n` (start_research arg, default 10, hard 1..50).
+- The identical-error abort (poller killed a run after repeated identical
+  hypothesis failures) — gone. A GPU run that loops on errors runs to its
+  `loop_n` budget or the 24h `all_duration` cap.
+- Per-hypothesis Notion rows (Hypothesis Log / Backtest Results written at
+  feedback time) — gone. GPU runs record per-loop digests in the Slack
+  thread and one Strategy Notes row with the machine-readable run_summary
+  JSON (US-013); the NotionRecorder methods for the per-hypothesis rows are
+  production-dead.
+
+The GPU run's protections are: the `loop_n` hypothesis budget, the 24h
+worker duration cap (run_us_quant.sh `all_duration`), and the hourly
+billing watchdog (`rdq-gpu-watchdog`, destroys orphaned droplets). This is
+accepted: runs are autonomous by design (US-045 decision carried over), and
+the cost exposure is bounded by the watchdog rather than by mid-run
+hypothesis-quality brakes.

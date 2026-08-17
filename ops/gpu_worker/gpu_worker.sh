@@ -381,8 +381,8 @@ cmd_run() {
   load_state
 
   # Custom universe: hard-refuse when its artifacts are missing on the worker
-  # (a silent us_liquid fallback is exactly the 2026-08-05 mislabeling bug the
-  # server_ui path 400s on). us_liquid/empty means the pinned defaults.
+  # (a silent us_liquid fallback is exactly the 2026-08-05 mislabeling bug).
+  # us_liquid/empty means the pinned defaults.
   local universe_exports=""
   if [[ -n "${universe}" && "${universe}" != "us_liquid" ]]; then
     remote "test -d /root/rdq-data/factor_source/${universe}/data_folder \

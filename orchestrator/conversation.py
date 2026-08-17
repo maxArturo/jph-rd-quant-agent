@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from orchestrator import prompts
 from orchestrator.llm import LLMError, ModelRouter, RefusalError, ToolSpec
 from orchestrator.notion_recorder import NotionRecorder
-from orchestrator.rdagent_client import RunHandle
 from orchestrator.run_memory import Digest, compose_instruction
 from orchestrator.state import (
     Directive,
@@ -74,26 +73,6 @@ class GpuRunner(Protocol):
 
     def read_status(self) -> dict | None: ...
 
-
-class ResearchLauncher(Protocol):
-    """What the run-lifecycle tools need from RdAgentClient (stub-friendly)."""
-
-    def start_run(self, directive: str, universe: str) -> RunHandle: ...
-
-    def trace_dir(self, trace_id: str) -> Path: ...
-
-    def trace_id_of(self, session_path: str | Path) -> str: ...
-
-    def stop(self, trace_id: str) -> None: ...
-
-    def resume(
-        self,
-        trace_id: str,
-        session_path: str | Path | None = None,
-        *,
-        directive: str | None = None,
-        universe: str = "",
-    ) -> None: ...
 
 class UniverseManager(Protocol):
     """What the set_universe tools need from UniverseService (stub-friendly)."""
@@ -193,12 +172,6 @@ CHECK_RESEARCH_STATUS_SCHEMA: dict[str, Any] = {
 
 STOP_RUN_SCHEMA: dict[str, Any] = {
     # No inputs: stops the thread's run.
-    "type": "object",
-    "properties": {},
-}
-
-RESUME_RUN_SCHEMA: dict[str, Any] = {
-    # No inputs: resumes the thread's run from its stored session.
     "type": "object",
     "properties": {},
 }
@@ -391,26 +364,6 @@ def format_universe_ready(materialized: MaterializedUniverse) -> str:
     )
 
 
-def format_run_stopped(run: Run) -> str:
-    """Slack mrkdwn confirmation posted when the operator stops the run."""
-    return (
-        ":octagonal_sign: *Research run stopped.*\n"
-        f"*Session:* `{run.session_path}`\n"
-        "Progress up to the last completed step is checkpointed — say the word"
-        " and I'll resume it from there."
-    )
-
-
-def format_run_resumed(run: Run) -> str:
-    """Slack mrkdwn confirmation posted when a stopped run is resumed."""
-    return (
-        ":arrow_forward: *Research run resumed*\n"
-        f"*Universe:* {run.universe}\n"
-        f"*Session:* `{run.session_path}`\n"
-        "Picking up from the last checkpoint."
-    )
-
-
 def format_trading_halted(note: str, halt_file: Path) -> str:
     """Slack mrkdwn confirmation posted when the operator halts trading."""
     return (
@@ -542,15 +495,14 @@ class ConversationCore:
 
     Share one instance per process (like StateStore/ModelRouter); the Bolt
     message handler calls handle_message for every actionable message.
-    ``rdagent`` is injectable for tests; by default it is the real client
-    talking to the supervised server_ui instance (US-018).
+    Research runs execute exclusively on the GPU backend (``gpu``, US-028
+    removed the legacy on-box control plane).
     """
 
     def __init__(
         self,
         store: StateStore,
         router: ModelRouter,
-        rdagent: ResearchLauncher | None = None,
         universes: UniverseManager | None = None,
         recorder: NotionRecorder | None = None,
         breaker: TradingBreaker | None = None,
@@ -559,10 +511,6 @@ class ConversationCore:
         gpu: GpuRunner | None = None,
         digest_builder: Callable[[], Digest] | None = None,
     ) -> None:
-        if rdagent is None:
-            from orchestrator.rdagent_client import RdAgentClient
-
-            rdagent = RdAgentClient()
         if universes is None:
             from orchestrator.universe import UniverseService
 
@@ -582,7 +530,6 @@ class ConversationCore:
             broker = AlpacaClient()
         self._store = store
         self._router = router
-        self._rdagent: ResearchLauncher = rdagent
         # DELIBERATELY no real default: GpuBackend.launch starts billable
         # cloud infrastructure via systemd-run, so callers must opt in
         # explicitly (app.py wires the real one; tests pass stubs). A leaked
@@ -617,7 +564,6 @@ class ConversationCore:
             self._save_directive_tool(thread_ts, say),
             self._start_research_tool(thread_ts, say),
             self._stop_run_tool(thread_ts, say),
-            self._resume_run_tool(thread_ts, say),
             self._set_universe_tool(thread_ts, say),
             self._confirm_universe_tool(thread_ts, say),
             self._halt_trading_tool(thread_ts, say),
@@ -865,113 +811,57 @@ class ConversationCore:
                     f"the run in this thread is not running (status: {run.status})"
                     " — nothing to stop"
                 )
-            if run.backend == "gpu":
-                if self._gpu is None:
-                    raise ValueError("the GPU research backend is not wired — cannot cancel")
-                # US-020: cancel kills THE worker's tmux session — only the
-                # lock-owning thread may do that, or a stop here would kill
-                # another thread's run.
-                active_lock, broken_lock = self._gpu.active_run_lock()
-                if broken_lock is not None:
-                    say(
-                        text=(
-                            f":broom: cleared a stale GPU run lock left by"
-                            f" {broken_lock.describe()} — the owning unit is no"
-                            " longer active."
-                        ),
-                        thread_ts=thread_ts,
-                    )
-                if active_lock is not None and active_lock.thread_ts != thread_ts:
-                    raise ValueError(
-                        f"the active GPU run belongs to {active_lock.describe()}"
-                        " — this thread's run is not the one running. Stop it"
-                        " from its own thread."
-                    )
-                message = self._gpu.cancel()
-                say(text=f":octagonal_sign: {message}", thread_ts=thread_ts)
-                logger.info("cancelled GPU research run for thread %s", thread_ts)
-                return (
-                    "Cancel signal sent to the GPU worker. The pipeline will fetch"
-                    " the loops finished so far, post the final summary (any SOTA"
-                    " candidate stays promotable), mark the run stopped, and"
-                    " destroy the droplet. GPU runs cannot be resumed — a new"
-                    " start_research begins fresh. Confirm briefly to the operator."
+            if run.backend != "gpu":
+                # Legacy pre-GPU rows (backend 'server_ui') stay readable, but
+                # their control plane was removed (US-026/US-028) — there is
+                # no process left to stop.
+                raise ValueError(
+                    f"this run predates the GPU backend (backend: {run.backend})"
+                    " and its control plane was decommissioned — there is no"
+                    " process to stop. Start fresh research with start_research"
+                    " in a new thread."
                 )
-            self._rdagent.stop(self._rdagent.trace_id_of(run.session_path))
-            run = self._store.update_run_status(thread_ts, "stopped")
-            say(text=format_run_stopped(run), thread_ts=thread_ts)
-            if self._recorder is not None:
-                self._recorder.record_idea_status(thread_ts, "stopped")
-            logger.info("stopped research run %s for thread %s", run.session_path, thread_ts)
+            if self._gpu is None:
+                raise ValueError("the GPU research backend is not wired — cannot cancel")
+            # US-020: cancel kills THE worker's tmux session — only the
+            # lock-owning thread may do that, or a stop here would kill
+            # another thread's run.
+            active_lock, broken_lock = self._gpu.active_run_lock()
+            if broken_lock is not None:
+                say(
+                    text=(
+                        f":broom: cleared a stale GPU run lock left by"
+                        f" {broken_lock.describe()} — the owning unit is no"
+                        " longer active."
+                    ),
+                    thread_ts=thread_ts,
+                )
+            if active_lock is not None and active_lock.thread_ts != thread_ts:
+                raise ValueError(
+                    f"the active GPU run belongs to {active_lock.describe()}"
+                    " — this thread's run is not the one running. Stop it"
+                    " from its own thread."
+                )
+            message = self._gpu.cancel()
+            say(text=f":octagonal_sign: {message}", thread_ts=thread_ts)
+            logger.info("cancelled GPU research run for thread %s", thread_ts)
             return (
-                "The research run was stopped and its row marked 'stopped'; the"
-                " stop notice was posted. It can be resumed later with resume_run."
-                " Confirm briefly to the operator."
+                "Cancel signal sent to the GPU worker. The pipeline will fetch"
+                " the loops finished so far, post the final summary (any SOTA"
+                " candidate stays promotable), mark the run stopped, and"
+                " destroy the droplet. GPU runs cannot be resumed — a new"
+                " start_research begins fresh. Confirm briefly to the operator."
             )
 
         return ToolSpec(
             name="stop_run",
             description=(
-                "Stop this thread's in-flight research run (checkpointed — it can"
-                " be resumed later with resume_run). Call it only when the operator"
-                " explicitly asks to stop, pause, or kill the run."
+                "Stop this thread's in-flight research run. The run's finished"
+                " loops stay promotable, but a stopped GPU run cannot be resumed"
+                " — new research means a fresh start_research. Call it only when"
+                " the operator explicitly asks to stop, pause, or kill the run."
             ),
             input_schema=STOP_RUN_SCHEMA,
-            handler=handler,
-        )
-
-    def _resume_run_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
-        def handler(args: dict[str, Any]) -> str:
-            del args  # no inputs — resumes the thread's stored session
-            run = self._store.get_run(thread_ts)
-            if run is None:
-                raise ValueError(
-                    "no research run exists in this thread — start one with"
-                    " start_research instead"
-                )
-            if run.status == "running":
-                raise ValueError(
-                    f"the run in this thread is already running (session:"
-                    f" {run.session_path}) — nothing to resume"
-                )
-            if run.backend == "gpu":
-                raise ValueError(
-                    "GPU-backend runs cannot be resumed (the worker was destroyed"
-                    " with the run's live state) — offer to start a fresh run with"
-                    " start_research; fetched results from the previous run remain"
-                    " available for promotion"
-                )
-            directive = self._store.get_directive(thread_ts)
-            if directive is None:
-                raise ValueError(
-                    "no saved directive for this thread — a resumed run re-asks for"
-                    " its instruction, so save_directive must be called first"
-                )
-            self._rdagent.resume(
-                self._rdagent.trace_id_of(run.session_path),
-                run.session_path,
-                directive=directive_instruction(directive),
-                universe=run.universe or DEFAULT_UNIVERSE,
-            )
-            run = self._store.update_run_status(thread_ts, "running")
-            say(text=format_run_resumed(run), thread_ts=thread_ts)
-            if self._recorder is not None:
-                self._recorder.record_idea_status(thread_ts, "researching")
-            logger.info("resumed research run %s for thread %s", run.session_path, thread_ts)
-            return (
-                "The run was resumed from its stored session and its row is"
-                " 'running' again; the resume notice was posted. Confirm"
-                " briefly to the operator."
-            )
-
-        return ToolSpec(
-            name="resume_run",
-            description=(
-                "Resume this thread's previously stopped research run from its"
-                " checkpointed session. Call it only when the operator explicitly"
-                " asks to resume/continue the run."
-            ),
-            input_schema=RESUME_RUN_SCHEMA,
             handler=handler,
         )
 
@@ -1147,7 +1037,7 @@ class ConversationCore:
                 "RESUME paper trading by removing the circuit-breaker halt file"
                 " written by halt_trading. Call it only when the operator"
                 " explicitly asks to resume trading; it does not touch research"
-                " runs (that is resume_run)."
+                " runs."
             ),
             input_schema=RESUME_TRADING_SCHEMA,
             handler=handler,

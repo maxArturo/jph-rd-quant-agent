@@ -38,7 +38,6 @@ from tests.test_conversation import (
     THREAD,
     RecordingSay,
     StubGpu,
-    StubLauncher,
     start_research_script,
 )
 from tests.test_llm import FakeClient, message, text_block, tool_use_block
@@ -317,14 +316,12 @@ def make_core(
     tmp_path: Path,
     client: FakeClient,
     service: StubUniverseService,
-    launcher: StubLauncher | None = None,
     gpu: StubGpu | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
         store=store,
         router=ModelRouter(client=client),
-        rdagent=launcher if launcher is not None else StubLauncher(),
         universes=service,
         gpu=gpu if gpu is not None else StubGpu(),
     )
@@ -512,8 +509,8 @@ def test_start_research_uses_confirmed_universe_and_stores_tickers(
 def test_start_research_rejected_while_universe_unconfirmed(tmp_path: Path) -> None:
     service = StubUniverseService()
     client = FakeClient(judgment_messages=start_research_script("Confirm it first."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, service, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, service, gpu=gpu)
     store.create_directive(THREAD, objective="Momentum within AI semis")
     store.propose_thread_universe(THREAD, "ai_semis", ["NVDA", "AMD"])
 
@@ -522,5 +519,5 @@ def test_start_research_rejected_while_universe_unconfirmed(tmp_path: Path) -> N
     result = tool_result_of(client)
     assert result["is_error"] is True
     assert "not confirmed" in result["content"]
-    assert launcher.started == []
+    assert gpu.launched == []
     assert store.get_run(THREAD) is None

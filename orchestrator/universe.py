@@ -23,9 +23,9 @@ Layout convention (mirrors the us_liquid wiring from US-017):
 - factor source:    ``<factor_source_root>/<name>/{data_folder,data_folder_debug}``
 - template copy:    ``<templates_root>/<name>/{factor_template,model_template}``
 
-NOTE: rdq-research.service still points FACTOR_CoSTEER_DATA_FOLDER and the
-us_quant hooks at us_liquid, so server-spawned runs cannot consume these
-artifacts yet — per-run env wiring is future work (docs/decisions.md US-023).
+GPU runs consume these artifacts via the launch env: gpu_worker.sh points
+FACTOR_CoSTEER_DATA_FOLDER and the us_quant hooks at the run's universe
+(us_liquid or a materialized custom one) before starting the loop.
 """
 
 from __future__ import annotations

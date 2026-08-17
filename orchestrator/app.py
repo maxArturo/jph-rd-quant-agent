@@ -166,13 +166,11 @@ def main() -> None:
         load_notion_databases,
     )
     from orchestrator.promotion import PromotionFlow
-    from orchestrator.rdagent_client import RdAgentClient
     from orchestrator.state import StateStore
 
     logging.basicConfig(level=logging.INFO)
     config = load_slack_config()
     store = StateStore()
-    rdagent = RdAgentClient()
     # One WebClient shared by Bolt and the background threads (approvals
     # bridge, run reaper — they post outside any Bolt request context, so
     # they need the client directly). proxy=None immediately: slack_sdk loads
@@ -208,7 +206,7 @@ def main() -> None:
         recorder = NotionRecorder(NotionClient(), databases, store, permalink=_permalink)
 
     # locate understands both backends: fetched GPU traces (remapped pickled
-    # paths, last-SOTA candidate) and classic server_ui traces.
+    # paths, last-SOTA candidate) and legacy pre-GPU trace dirs.
     from orchestrator.gpu_backend import GpuBackend, locate_run_artifacts
 
     promotions = PromotionFlow(store, recorder=recorder, locate=locate_run_artifacts)
@@ -218,7 +216,6 @@ def main() -> None:
     conversation = ConversationCore(
         store=store,
         router=ModelRouter(),
-        rdagent=rdagent,
         recorder=recorder,
         # Promotion is conversational (US-044): promote_run/confirm_promotion
         # tools drive the PromotionFlow handlers directly.

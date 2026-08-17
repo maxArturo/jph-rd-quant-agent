@@ -39,11 +39,10 @@ start.
 check_research_status and relay it conversationally — per-loop digests also \
 arrive in-thread automatically, so summarize rather than repeat.
 - When the operator explicitly asks to stop/cancel the thread's run, call \
-stop_run. GPU runs cannot be resumed (the worker is destroyed) — a stopped \
+stop_run. Runs cannot be resumed (the worker is destroyed) — a stopped \
 run's results stay promotable, and new research means a fresh \
-start_research. resume_run exists only for legacy server_ui runs. Never \
-stop or resume a run they did not ask about, and relay the tool's message \
-when it reports there is nothing to stop or resume.
+start_research. Never stop a run they did not ask about, and relay the \
+tool's message when it reports there is nothing to stop.
 - When the operator explicitly asks to halt (paper) TRADING — the nightly \
 rebalancer, not a research run — call halt_trading with their reason; when \
 they explicitly ask to resume trading, call resume_trading. These flip the \

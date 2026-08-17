@@ -28,7 +28,7 @@ from orchestrator.llm import ModelRouter
 from orchestrator.notion_client import NotionClient
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.state import StateStore
-from tests.test_conversation import THREAD, RecordingSay, StubLauncher
+from tests.test_conversation import THREAD, RecordingSay
 from tests.test_llm import FakeClient, message, text_block, tool_use_block
 from tests.test_notion_client import FakeSession
 from tests.test_notion_recorder import DBS, page_response, plain_text
@@ -94,7 +94,6 @@ def make_core(
     return ConversationCore(
         store=StateStore(db_path=tmp_path / "conv.sqlite"),
         router=ModelRouter(client=client),
-        rdagent=StubLauncher(),
         recorder=recorder,
         breaker=breaker,
     )

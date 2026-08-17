@@ -13,23 +13,90 @@ this box is the control plane. The pieces:
 - ``locate_run_artifacts`` is the promotion locate that understands BOTH
   backends: fetched GPU traces (worker-absolute pickled paths need the
   prefix remap, and the candidate is the last SOTA loop, not the last loop)
-  and classic server_ui traces (delegates to ``locate_artifacts``).
+  and legacy on-box trace dirs from pre-GPU runs (delegates to
+  ``locate_artifacts``, which lives here since the US-028 removal of the
+  old control-plane client).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import pickle
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ops import run_lock
 from ops.gpu_trace import loop_reports, promotion_candidate
 from ops.run_lock import RunLock
-from orchestrator.rdagent_client import ArtifactNotFoundError, RunArtifacts, locate_artifacts
 
 logger = logging.getLogger(__name__)
+
+
+class ArtifactNotFoundError(RuntimeError):
+    """No finished loop with backtest artifacts could be resolved."""
+
+
+@dataclass(frozen=True)
+class RunArtifacts:
+    """A finished loop's backtest outputs, resolved from its trace dir."""
+
+    workspace_path: Path
+    qlib_res_csv: Path
+    ret_pkl: Path | None  # equity-curve DataFrame; absent on some failures
+    source_pkl: Path  # the trace pkl the workspace was resolved from
+
+
+def locate_artifacts(trace_path: str | Path) -> RunArtifacts:
+    """Resolve a finished loop's workspace + qlib_res.csv + ret.pkl from a trace dir.
+
+    rdagent logs each finished backtest experiment under a ``runner result``
+    tag (FileStorage pkl whose object carries
+    ``experiment_workspace.workspace_path``); qlib_res.csv / ret.pkl live in
+    that workspace (written by the workspace's read_exp_res.py). Newest
+    result wins; unreadable pkls and workspaces without qlib_res.csv are
+    skipped.
+    """
+    trace_path = Path(trace_path).expanduser()
+    if not trace_path.is_dir():
+        raise ArtifactNotFoundError(f"trace directory does not exist: {trace_path}")
+
+    candidates = sorted(
+        trace_path.glob("**/runner result/**/*.pkl"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    problems: list[str] = []
+    for pkl_file in candidates:
+        try:
+            with pkl_file.open("rb") as handle:
+                obj = pickle.load(handle)
+        except Exception as exc:  # noqa: BLE001 - any unpickle failure just skips this candidate
+            problems.append(f"{pkl_file}: failed to unpickle ({exc})")
+            continue
+        workspace = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
+        if workspace is None:
+            problems.append(f"{pkl_file}: object has no experiment_workspace.workspace_path")
+            continue
+        workspace_path = Path(workspace)
+        qlib_res_csv = workspace_path / "qlib_res.csv"
+        if not qlib_res_csv.is_file():
+            problems.append(f"{pkl_file}: no qlib_res.csv in workspace {workspace_path}")
+            continue
+        ret_pkl = workspace_path / "ret.pkl"
+        return RunArtifacts(
+            workspace_path=workspace_path,
+            qlib_res_csv=qlib_res_csv,
+            ret_pkl=ret_pkl if ret_pkl.is_file() else None,
+            source_pkl=pkl_file,
+        )
+
+    detail = "; ".join(problems) if problems else "no 'runner result' pkl found"
+    raise ArtifactNotFoundError(
+        f"no finished loop with backtest artifacts under {trace_path}: {detail}"
+    )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GPU_WORKER_SH = REPO_ROOT / "ops" / "gpu_worker" / "gpu_worker.sh"

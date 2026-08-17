@@ -29,8 +29,6 @@ from orchestrator.state import Directive, StateStore
 from tests.test_conversation import (
     RecordingSay,
     StubGpu,
-    StubLauncher,
-    lifecycle_script,
     save_directive_script,
     start_research_script,
 )
@@ -353,7 +351,6 @@ def make_core(
     core = ConversationCore(
         store=store,
         router=ModelRouter(client=client),
-        rdagent=StubLauncher(),
         recorder=recorder,
         gpu=StubGpu(),
     )
@@ -397,30 +394,7 @@ def test_start_research_records_researching_status(tmp_path: Path) -> None:
     assert plain_text(props["Universe"], "rich_text") == "us_liquid"
 
 
-def test_stop_run_records_stopped_status(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Stopped."))
-    core, store, session = make_core(tmp_path, client, [page_response("page-idea")])
-    store.create_run(THREAD, str(StubLauncher.TRACE_FOLDER / "t/1"), universe="us_liquid")
-    store.set_notion_page("idea", THREAD, "page-idea")
-
-    core.handle_message(THREAD, "stop the run", say=RecordingSay())
-
-    (stopped,) = session.calls
-    assert stopped["url"].endswith("/v1/pages/page-idea")
-    assert stopped["json"]["properties"]["Status"] == {"select": {"name": "stopped"}}
-
-
-def test_resume_run_records_researching_status(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "Resumed."))
-    core, store, session = make_core(tmp_path, client, [page_response("page-idea")])
-    store.create_directive(THREAD, objective="Momentum beats SPY")
-    store.create_run(
-        THREAD, str(StubLauncher.TRACE_FOLDER / "t/1"), universe="us_liquid", status="stopped"
-    )
-    store.set_notion_page("idea", THREAD, "page-idea")
-
-    core.handle_message(THREAD, "resume the run", say=RecordingSay())
-
-    (call,) = session.calls
-    assert call["json"]["properties"]["Status"] == {"select": {"name": "researching"}}
+# NOTE (US-028): stop_run/resume_run no longer drive idea-status recording —
+# GPU cancels are finalized by the pipeline, resume_run was removed with the
+# legacy control plane, and the 'promoted' status is covered in test_promotion.
 

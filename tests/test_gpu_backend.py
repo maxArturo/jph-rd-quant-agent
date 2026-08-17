@@ -12,12 +12,12 @@ import pytest
 
 import orchestrator.gpu_backend as gpu_backend
 from orchestrator.gpu_backend import (
+    ArtifactNotFoundError,
     GpuBackend,
     GpuLaunchError,
     format_gpu_status,
     locate_run_artifacts,
 )
-from orchestrator.rdagent_client import ArtifactNotFoundError
 
 
 class RecordingRunner:
@@ -220,7 +220,83 @@ class TestLocateDispatch:
         with pytest.raises(ArtifactNotFoundError, match="no SOTA loop"):
             locate_run_artifacts(trace)
 
-    def test_non_gpu_path_delegates_to_server_ui_locate(self, tmp_path: Path, monkeypatch) -> None:
+    def test_non_gpu_path_delegates_to_legacy_locate(self, tmp_path: Path, monkeypatch) -> None:
         sentinel = object()
         monkeypatch.setattr(gpu_backend, "locate_artifacts", lambda p: sentinel)
         assert locate_run_artifacts(tmp_path / "server_ui" / "traces" / "x") is sentinel
+
+
+# -- legacy trace-dir artifact locator (moved here from rdagent_client in US-028)
+
+
+def _write_runner_result(
+    trace_dir: Path, workspace: Path, stamp: str, obj: object = None
+) -> Path:
+    pkl_dir = trace_dir / "Loop_0" / "running" / "runner result" / "12345"
+    pkl_dir.mkdir(parents=True, exist_ok=True)
+    pkl_path = pkl_dir / f"{stamp}.pkl"
+    if obj is None:
+        obj = SimpleNamespace(
+            experiment_workspace=SimpleNamespace(workspace_path=workspace)
+        )
+    pkl_path.write_bytes(pickle.dumps(obj))
+    return pkl_path
+
+
+def _make_workspace(root: Path, name: str, ret: bool = True) -> Path:
+    workspace = root / name
+    workspace.mkdir(parents=True)
+    (workspace / "qlib_res.csv").write_text("IC,0.05\n")
+    if ret:
+        (workspace / "ret.pkl").write_bytes(pickle.dumps({"ret": [0.01]}))
+    return workspace
+
+
+class TestLocateArtifacts:
+    def test_resolves_workspace(self, tmp_path: Path) -> None:
+        trace = tmp_path / "trace"
+        workspace = _make_workspace(tmp_path, "ws1")
+        pkl = _write_runner_result(trace, workspace, "2026-07-08_10-00-00-000000")
+        result = gpu_backend.locate_artifacts(trace)
+        assert result.workspace_path == workspace
+        assert result.qlib_res_csv == workspace / "qlib_res.csv"
+        assert result.ret_pkl == workspace / "ret.pkl"
+        assert result.source_pkl == pkl
+
+    def test_newest_result_wins(self, tmp_path: Path) -> None:
+        trace = tmp_path / "trace"
+        old_ws = _make_workspace(tmp_path, "ws_old")
+        new_ws = _make_workspace(tmp_path, "ws_new")
+        _write_runner_result(trace, old_ws, "2026-07-08_10-00-00-000000")
+        _write_runner_result(trace, new_ws, "2026-07-08_11-00-00-000000")
+        assert gpu_backend.locate_artifacts(trace).workspace_path == new_ws
+
+    def test_skips_unreadable_and_incomplete(self, tmp_path: Path) -> None:
+        trace = tmp_path / "trace"
+        good_ws = _make_workspace(tmp_path, "ws_good")
+        empty_ws = tmp_path / "ws_empty"  # no qlib_res.csv
+        empty_ws.mkdir()
+        _write_runner_result(trace, good_ws, "2026-07-08_10-00-00-000000")
+        _write_runner_result(trace, empty_ws, "2026-07-08_11-00-00-000000")
+        corrupt = trace / "Loop_0" / "running" / "runner result" / "12345"
+        (corrupt / "2026-07-08_12-00-00-000000.pkl").write_bytes(b"not a pickle")
+        assert gpu_backend.locate_artifacts(trace).workspace_path == good_ws
+
+    def test_ret_pkl_optional(self, tmp_path: Path) -> None:
+        trace = tmp_path / "trace"
+        workspace = _make_workspace(tmp_path, "ws1", ret=False)
+        _write_runner_result(trace, workspace, "2026-07-08_10-00-00-000000")
+        assert gpu_backend.locate_artifacts(trace).ret_pkl is None
+
+    def test_errors(self, tmp_path: Path) -> None:
+        with pytest.raises(ArtifactNotFoundError, match="does not exist"):
+            gpu_backend.locate_artifacts(tmp_path / "missing")
+        empty_trace = tmp_path / "trace"
+        empty_trace.mkdir()
+        with pytest.raises(ArtifactNotFoundError, match="no 'runner result'"):
+            gpu_backend.locate_artifacts(empty_trace)
+        ws = tmp_path / "ws_no_csv"
+        ws.mkdir()
+        _write_runner_result(empty_trace, ws, "2026-07-08_10-00-00-000000")
+        with pytest.raises(ArtifactNotFoundError, match="no qlib_res.csv"):
+            gpu_backend.locate_artifacts(empty_trace)

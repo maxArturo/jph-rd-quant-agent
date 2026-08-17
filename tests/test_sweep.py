@@ -4,7 +4,7 @@ Fixture directory trees mirror the real layout: workspace dirs under
 ``<run_root>/*/workspace/``, trace logs under
 ``<run_root>/server_ui/traces/<trace>/Loop_<n>/<step>/<tag>/<pid>/<ts>.pkl``
 (the FileStorage layout locate_artifacts reads). SOTA pkls use
-SimpleNamespace stand-ins, same as tests/test_rdagent_client.py.
+SimpleNamespace stand-ins, same as tests/test_gpu_backend.py.
 """
 
 from __future__ import annotations

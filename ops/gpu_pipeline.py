@@ -46,8 +46,8 @@ ops/gpu_worker/gpu_worker.sh so the lifecycle mechanics live in one place):
    kill-switch.
 
 Slack posting: root message to SLACK_CHANNEL_ID (repo-root .env), then a
-thread per run — same channel the orchestrator uses, but these runs live
-outside server_ui, so thread replies do NOT drive approve/stop/promote; the
+thread per run — same channel the orchestrator uses, but this pipeline does
+not read the thread, so replies here do NOT drive approve/stop/promote; the
 loop auto-runs to its budget. Stop early with:
   ops/gpu_worker/gpu_worker.sh ssh tmux kill-session -t rdq-run
 """

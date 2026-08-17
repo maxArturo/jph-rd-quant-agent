@@ -18,10 +18,10 @@ import pytest
 
 from execution.promoted import NoPromotedStrategyError, load_promoted_strategy
 from execution.signal import SignalError, StrategyParams, load_strategy_params
+from orchestrator.gpu_backend import RunArtifacts
 from orchestrator.notion_client import NotionClient
 from orchestrator.notion_recorder import NotionRecorder
 from orchestrator.promotion import PromotionFlow
-from orchestrator.rdagent_client import RunArtifacts
 from orchestrator.state import StateStore
 from tests.test_notion_client import FakeResponse, FakeSession
 from tests.test_notion_recorder import DBS, page_response

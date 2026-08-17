@@ -58,27 +58,14 @@
   `ModelBasePropSetting()` and render workspace conf jinja vars from
   `QLIB_FACTOR_*` / `QLIB_MODEL_*`. Export the SAME dates under all three
   prefixes (ops/run_us_quant.sh does) or runs silently backtest on CN defaults.
-- server_ui: launch via `python -m research.server_ui` (or
-  ops/rdq-research.service), NEVER `rdagent server_ui` directly — upstream
-  `main()` binds Flask to 0.0.0.0; the wrapper forces 127.0.0.1. The `UI_`
-  env vars (UI_TRACE_FOLDER, UI_STATIC_PATH) are read at import time of
-  `rdagent.log.ui.conf` and default to CWD-relative `./git_ignore_folder/` —
-  set them (the unit points at ~/rdq-runs/server_ui/) before import.
-- server_ui also installs the `/control` resume extension (US-024,
-  `install_resume_control()`): it wraps the registered Flask view at RUNTIME
-  (`app.view_functions["control_process"]`) — the supported pattern for
-  changing upstream endpoint behavior without touching the pinned tree.
-  Handlers must read `log_folder_path`/`rdagent_processes`/`RDAgentTask`
-  through the `rdagent.log.server.app` module at call time so tests can
-  monkeypatch them. When re-registering a task for the same trace id, carry
-  `messages` over WITHOUT `END` tags or the run reads as already finished.
-- Per-run universes (US-023, `install_universe_env()`): /upload's `universe`
-  form field and resume's `universe` key wire the run to a materialized
-  custom universe. The env (`FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)` +
-  `RDQ_UNIVERSE_TEMPLATES`) is patched into os.environ around the task fork
-  under `_spawn_env_lock` — RDAgentTask.start() forks, so ONLY the child
-  sees it; missing artifacts 400 (never a silent default-env fallback), and
-  `us_liquid`/empty applies nothing. `us_quant.py`'s `_template_root()`
-  reads RDQ_UNIVERSE_TEMPLATES at call time and raises on a set-but-broken
+- The server_ui control plane was removed (research/server_ui.py deleted in
+  US-028; its service decommissioned in US-026). Research runs execute only
+  on the GPU worker via ops/run_us_quant.sh + research/quant_runner.py.
+- Per-run universes (US-023): the run env wires a materialized custom
+  universe — `FACTOR_CoSTEER_DATA_FOLDER(_DEBUG)` + `RDQ_UNIVERSE_TEMPLATES`
+  are exported by gpu_worker.sh before the loop starts; missing artifacts
+  hard-fail (never a silent default-env fallback), and `us_liquid`/empty
+  applies nothing. `us_quant.py`'s `_template_root()` reads
+  RDQ_UNIVERSE_TEMPLATES at call time and raises on a set-but-broken
   override; artifact roots are env-overridable (RDQ_FACTOR_SOURCE_ROOT /
   RDQ_TEMPLATES_ROOT) for tests.

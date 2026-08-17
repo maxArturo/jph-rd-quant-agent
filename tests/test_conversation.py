@@ -1,7 +1,7 @@
 """US-009: conversational core — idea -> directive -> echo; US-020:
 start_research — directive -> run row + duplicate rejection. Mocked Anthropic
 (FakeClient from tests/test_llm.py), mocked Slack (a recording say callable),
-stubbed rdagent client (StubLauncher). No network anywhere.
+stubbed GPU backend (StubGpu). No network anywhere.
 """
 
 from __future__ import annotations
@@ -17,12 +17,9 @@ from orchestrator.conversation import (
     ConversationCore,
     directive_instruction,
     format_directive_summary,
-    format_run_resumed,
     format_run_started,
-    format_run_stopped,
 )
 from orchestrator.llm import ModelRouter
-from orchestrator.rdagent_client import RunHandle
 from orchestrator.run_memory import MEMORY_DELIMITER, Digest
 from orchestrator.state import Run, StateStore
 from tests.test_llm import (
@@ -44,50 +41,6 @@ class RecordingSay:
 
     def __call__(self, *, text: str, thread_ts: str) -> None:
         self.calls.append({"text": text, "thread_ts": thread_ts})
-
-
-class StubLauncher:
-    """Stubbed rdagent_client: records start_run/stop/resume, deterministic ids."""
-
-    TRACE_FOLDER = Path("/stub-traces")
-
-    def __init__(self) -> None:
-        self.started: list[dict[str, str]] = []
-        self.stopped: list[str] = []
-        self.resumed: list[dict[str, Any]] = []
-
-    def start_run(self, directive: str, universe: str) -> RunHandle:
-        self.started.append({"directive": directive, "universe": universe})
-        trace_id = f"Finance Whole Pipeline/trace_{len(self.started)}"
-        return RunHandle(
-            trace_id=trace_id, directive=directive, universe=universe, interaction=True
-        )
-
-    def trace_dir(self, trace_id: str) -> Path:
-        return self.TRACE_FOLDER / trace_id
-
-    def trace_id_of(self, session_path: str | Path) -> str:
-        return Path(session_path).relative_to(self.TRACE_FOLDER).as_posix()
-
-    def stop(self, trace_id: str) -> None:
-        self.stopped.append(trace_id)
-
-    def resume(
-        self,
-        trace_id: str,
-        session_path: str | Path | None = None,
-        *,
-        directive: str | None = None,
-        universe: str = "",
-    ) -> None:
-        self.resumed.append(
-            {
-                "trace_id": trace_id,
-                "session_path": None if session_path is None else str(session_path),
-                "directive": directive,
-                "universe": universe,
-            }
-        )
 
 
 class StubGpu:
@@ -144,7 +97,6 @@ class StubGpu:
 def make_core(
     tmp_path: Path,
     client: FakeClient,
-    launcher: StubLauncher | None = None,
     promotions: Any | None = None,
     gpu: StubGpu | None = None,
     digest_builder: Any | None = None,
@@ -153,7 +105,6 @@ def make_core(
     core = ConversationCore(
         store=store,
         router=ModelRouter(client=client),
-        rdagent=launcher if launcher is not None else StubLauncher(),
         promotions=promotions,
         gpu=gpu if gpu is not None else StubGpu(),
         digest_builder=digest_builder,
@@ -371,9 +322,8 @@ def start_research_script(
 
 def test_start_research_launches_gpu_pipeline_and_writes_row(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=start_research_script())
-    launcher = StubLauncher()
     gpu = StubGpu()
-    core, store = make_core(tmp_path, client, launcher, gpu=gpu)
+    core, store = make_core(tmp_path, client, gpu=gpu)
     store.create_directive(
         THREAD,
         objective="Test whether 12-1 momentum beats SPY",
@@ -384,9 +334,7 @@ def test_start_research_launches_gpu_pipeline_and_writes_row(tmp_path: Path) -> 
 
     reply = core.handle_message(THREAD, "research it", say)
 
-    # the GPU pipeline was launched with the thread's directive; the legacy
-    # server_ui launcher is untouched.
-    assert launcher.started == []
+    # the GPU pipeline was launched with the thread's directive
     assert gpu.launched == [
         {
             "thread_ts": THREAD,
@@ -550,12 +498,12 @@ def test_start_research_without_directive_is_rejected(tmp_path: Path) -> None:
     client = FakeClient(
         judgment_messages=start_research_script("Save a directive first.")
     )
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
 
     core.handle_message(THREAD, "research it", RecordingSay())
 
-    assert launcher.started == []
+    assert gpu.launched == []
     assert store.get_run(THREAD) is None
     tool_result = client.stream_calls[1]["messages"][2]["content"][0]
     assert tool_result["is_error"] is True
@@ -566,15 +514,15 @@ def test_duplicate_start_rejected_pointing_at_active_run(tmp_path: Path) -> None
     client = FakeClient(
         judgment_messages=start_research_script("A run is already going here.")
     )
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
     store.create_directive(THREAD, objective="Momentum on US large caps")
     existing = store.create_run(THREAD, "/stub-traces/existing/run", universe="us_liquid")
 
     core.handle_message(THREAD, "research it again", RecordingSay())
 
     # nothing new was launched; the existing row is untouched
-    assert launcher.started == []
+    assert gpu.launched == []
     assert store.get_run(THREAD) == existing
 
     # the rejection points the model at the active run
@@ -665,9 +613,7 @@ def test_lost_start_race_stops_the_orphan_pipeline(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=start_research_script("Already running."))
     gpu = StubGpu()
     store = RaceyStore(db_path=tmp_path / "state.sqlite")
-    core = ConversationCore(
-        store=store, router=ModelRouter(client=client), rdagent=StubLauncher(), gpu=gpu
-    )
+    core = ConversationCore(store=store, router=ModelRouter(client=client), gpu=gpu)
     store.create_directive(THREAD, objective="Momentum on US large caps")
     existing = store.create_run(THREAD, "/stub-traces/winner/run", universe="us_liquid")
 
@@ -681,15 +627,16 @@ def test_lost_start_race_stops_the_orphan_pipeline(tmp_path: Path) -> None:
     assert existing.session_path in tool_result["content"]
 
 
-# --- stop_run / resume_run (US-024) ---------------------------------------------
+# --- stop_run (US-024, GPU-only since US-028) ------------------------------------
 
 
-SESSION_PATH = str(StubLauncher.TRACE_FOLDER / "Finance Whole Pipeline/trace_9")
-TRACE_ID = "Finance Whole Pipeline/trace_9"
+# A legacy pre-GPU row's stored session path (backend 'server_ui'): the
+# control plane is gone, but the row must stay readable and tolerated.
+SESSION_PATH = "/stub-traces/Finance Whole Pipeline/trace_9"
 
 
 def lifecycle_script(tool: str, final_reply: str) -> list[Any]:
-    """Model turn 1: call *tool* (stop_run/resume_run); turn 2: confirm in text."""
+    """Model turn 1: call *tool* (e.g. stop_run); turn 2: confirm in text."""
     return [
         message("tool_use", [tool_use_block("tu_lc", tool, {})]),
         message("end_turn", [text_block(final_reply)]),
@@ -742,21 +689,6 @@ def test_stop_run_acts_when_this_thread_owns_the_lock(tmp_path: Path) -> None:
     assert gpu.cancels == 1
 
 
-def test_resume_run_refused_for_gpu_backend(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "Can't resume."))
-    gpu = StubGpu()
-    core, store = make_core(tmp_path, client, gpu=gpu)
-    store.create_run(
-        THREAD, str(gpu.status_file), universe="us_liquid", backend="gpu", status="stopped"
-    )
-
-    core.handle_message(THREAD, "resume it", RecordingSay())
-
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "cannot be resumed" in tool_result["content"]
-
-
 def check_status_script(final_reply: str = "Here's the status.") -> list[Any]:
     return [
         message("tool_use", [tool_use_block("tu_st", "check_research_status", {})]),
@@ -803,37 +735,16 @@ def test_check_research_status_flags_foreign_pipeline(tmp_path: Path) -> None:
     assert "queued" not in tool_result["content"] or "never queued" in tool_result["content"]
 
 
-def test_stop_run_stops_run_and_updates_status(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Stopped."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
-    store.create_run(THREAD, SESSION_PATH, universe="us_liquid")
-    say = RecordingSay()
-
-    reply = core.handle_message(THREAD, "stop the run", say)
-
-    # POST /control stop went out for the thread's run...
-    assert launcher.stopped == [TRACE_ID]
-    # ...and the run row transitioned running -> stopped
-    run = store.get_run(THREAD)
-    assert run is not None
-    assert run.status == "stopped"
-    # stop notice posted in-thread, then the model's final reply
-    assert [c["thread_ts"] for c in say.calls] == [THREAD, THREAD]
-    assert say.calls[0]["text"] == format_run_stopped(run)
-    assert reply == "Stopped."
-
-
 def test_stop_run_without_run_is_rejected(tmp_path: Path) -> None:
     client = FakeClient(
         judgment_messages=lifecycle_script("stop_run", "There is nothing to stop.")
     )
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
 
     core.handle_message(THREAD, "stop it", RecordingSay())
 
-    assert launcher.stopped == []
+    assert gpu.cancels == 0
     tool_result = client.stream_calls[1]["messages"][2]["content"][0]
     assert tool_result["is_error"] is True
     assert "nothing to stop" in tool_result["content"]
@@ -841,13 +752,13 @@ def test_stop_run_without_run_is_rejected(tmp_path: Path) -> None:
 
 def test_stop_run_on_non_running_run_is_rejected(tmp_path: Path) -> None:
     client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Not running."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
     store.create_run(THREAD, SESSION_PATH, universe="us_liquid", status="completed")
 
     core.handle_message(THREAD, "stop it", RecordingSay())
 
-    assert launcher.stopped == []
+    assert gpu.cancels == 0
     run = store.get_run(THREAD)
     assert run is not None and run.status == "completed"  # status untouched
     tool_result = client.stream_calls[1]["messages"][2]["content"][0]
@@ -855,84 +766,40 @@ def test_stop_run_on_non_running_run_is_rejected(tmp_path: Path) -> None:
     assert "completed" in tool_result["content"]
 
 
-def test_resume_run_resumes_session_and_reactivates_polling(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "Resumed."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
-    store.create_directive(
-        THREAD,
-        objective="Test whether 12-1 momentum beats SPY",
-        constraints="long-only, monthly rebalance",
+def test_stop_run_refuses_legacy_backend_run(tmp_path: Path) -> None:
+    """US-028: a legacy 'server_ui' row stays readable, but its control plane
+    is gone — stop_run explains that instead of crashing or touching the row."""
+    client = FakeClient(judgment_messages=lifecycle_script("stop_run", "Can't stop that."))
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_run(THREAD, SESSION_PATH, universe="us_liquid", backend="server_ui")
+
+    core.handle_message(THREAD, "stop it", RecordingSay())
+
+    assert gpu.cancels == 0
+    run = store.get_run(THREAD)
+    assert run is not None and run.status == "running"  # row untouched
+    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "decommissioned" in tool_result["content"]
+    assert "server_ui" in tool_result["content"]
+
+
+def test_check_research_status_tolerates_legacy_backend_row(tmp_path: Path) -> None:
+    """US-028: iterating/reporting code paths tolerate backend='server_ui'."""
+    client = FakeClient(judgment_messages=check_status_script())
+    gpu = StubGpu()
+    core, store = make_core(tmp_path, client, gpu=gpu)
+    store.create_run(
+        THREAD, SESSION_PATH, universe="us_liquid", backend="server_ui", status="stopped"
     )
-    store.create_run(THREAD, SESSION_PATH, universe="us_liquid", status="stopped")
-    say = RecordingSay()
 
-    reply = core.handle_message(THREAD, "resume the run", say)
+    core.handle_message(THREAD, "status?", RecordingSay())
 
-    # resumed from the STORED session path, re-seeding the thread's directive
-    assert launcher.resumed == [
-        {
-            "trace_id": TRACE_ID,
-            "session_path": SESSION_PATH,
-            "directive": (
-                "Test whether 12-1 momentum beats SPY\nConstraints: long-only, monthly rebalance"
-            ),
-            "universe": "us_liquid",
-        }
-    ]
-    # the run row transitioned stopped -> running
-    run = store.get_run(THREAD)
-    assert run is not None
-    assert run.status == "running"
-    assert say.calls[0]["text"] == format_run_resumed(run)
-    assert reply == "Resumed."
-
-
-def test_resume_run_while_running_is_rejected(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "Already live."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
-    store.create_directive(THREAD, objective="Momentum")
-    store.create_run(THREAD, SESSION_PATH, universe="us_liquid")  # status running
-
-    core.handle_message(THREAD, "resume", RecordingSay())
-
-    assert launcher.resumed == []
-    run = store.get_run(THREAD)
-    assert run is not None and run.status == "running"
     tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "already running" in tool_result["content"]
-
-
-def test_resume_run_without_run_is_rejected(tmp_path: Path) -> None:
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "No run here."))
-    launcher = StubLauncher()
-    core, _ = make_core(tmp_path, client, launcher)
-
-    core.handle_message(THREAD, "resume", RecordingSay())
-
-    assert launcher.resumed == []
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "start_research" in tool_result["content"]
-
-
-def test_resume_run_without_directive_is_rejected(tmp_path: Path) -> None:
-    """A resumed run re-asks for its instruction — refuse when none is saved."""
-    client = FakeClient(judgment_messages=lifecycle_script("resume_run", "No directive."))
-    launcher = StubLauncher()
-    core, store = make_core(tmp_path, client, launcher)
-    store.create_run(THREAD, SESSION_PATH, universe="us_liquid", status="stopped")
-
-    core.handle_message(THREAD, "resume", RecordingSay())
-
-    assert launcher.resumed == []
-    run = store.get_run(THREAD)
-    assert run is not None and run.status == "stopped"  # status untouched
-    tool_result = client.stream_calls[1]["messages"][2]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "save_directive" in tool_result["content"]
+    assert tool_result.get("is_error") is not True
+    assert "stopped" in tool_result["content"]
+    assert "server_ui" in tool_result["content"]
 
 
 # --- US-044: conversational promotion ----------------------------------------
