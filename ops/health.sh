@@ -48,10 +48,12 @@ ONESHOTS=(
 
 # PLAN.md §1 port table: tailscale serve allowlist, serve port -> proxy target.
 # 443/3100 are pre-existing box mappings (OneCLI UI, not ours to change);
+# 8443 is jph-master-tracker.service (Jeff's executive dashboard, not ours);
 # 19900 is the rdagent trace viewer, added on demand by ops/expose_traces.sh.
 declare -A ALLOWED_SERVE=(
   [443]="http://127.0.0.1:10254"
   [3100]="http://127.0.0.1:3001"
+  [8443]="http://127.0.0.1:3200"
   [19900]="http://127.0.0.1:19900"
 )
 # Repo-reserved ports that must be loopback-only regardless of owning process.

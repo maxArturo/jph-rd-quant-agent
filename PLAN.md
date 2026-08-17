@@ -116,6 +116,7 @@ Base URL choice = credential choice (nanoclaw's design, kept): `paper-api.alpaca
 | ~~`rdagent server_ui` (control API :19899)~~ | — | **retired** (US-026): the service is decommissioned and nothing may ever listen on 19899 again — `ops/health.sh` fails the audit if the port lights up or gets a serve mapping |
 | `rdagent ui` (Streamlit trace viewer on :19900; legacy on-box traces only — GPU runs are monitored via Slack digests) | 127.0.0.1 | `tailscale serve --bg --https=19900 http://127.0.0.1:19900` when trace monitoring is wanted |
 | OneCLI web UI (:10254) | 127.0.0.1 | already served at `https://nanoclaw-prod.tail05c9bf.ts.net/` — used for approval rules (Phase 6) and manual approvals fallback |
+| jph-master-tracker (:3200, not this repo — Jeff's executive dashboard, `jph-master-tracker.service`) | 127.0.0.1 | tailnet-only serve at `:8443 → 127.0.0.1:3200` (pre-existing box mapping, allowlisted in `ops/health.sh`) |
 | Any future dashboard (e.g. P&L page) | 127.0.0.1 | new tailnet-only serve mapping on a dedicated HTTPS port; pick ports that don't collide with the existing 443/3100 mappings |
 
 `NO_PROXY` for all our processes must include `127.0.0.1,localhost` and the tailnet hostname/`100.64.0.0/10` range, so localhost control traffic and tailnet dashboard traffic never route through the OneCLI proxy.
