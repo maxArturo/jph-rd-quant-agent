@@ -111,6 +111,27 @@ class TestScriptContract:
         assert '${SNAPSHOT_PREFIX}-${inputs_hash:+${inputs_hash}-}' in text
         assert "ops.gpu_snapshot prune" in text
 
+    def test_run_log_is_truncated_not_appended(self) -> None:
+        """2026-08-17 incident: a snapshot-booted worker carries the previous
+        run's log; 'tee -a' left its exit trailer for the pipeline's
+        completion poll to misread as the new run finishing."""
+        text = SCRIPT.read_text()
+        assert "tee ${RUN_LOG}" in text
+        assert "tee -a ${RUN_LOG}" not in text
+
+    def test_snapshot_clears_run_state_before_bake(self) -> None:
+        """The baked image must be pristine: no run log (stale exit trailer),
+        no traces/workspaces, no launch script, and no per-agent proxy token.
+        A failed cleanup must refuse to bake, not ship a polluted image."""
+        text = SCRIPT.read_text()
+        bake = text.split("cmd_snapshot()")[1].split("\n}")[0]
+        assert "rm -rf /root/rdq-runs" in bake
+        assert "${PROXY_ENV_FILE}" in bake
+        assert "/root/rdq-launch.sh" in bake
+        assert "refusing to bake" in bake
+        # Cleanup happens BEFORE the power-off that precedes the snapshot.
+        assert bake.index("rm -rf /root/rdq-runs") < bake.index("power-off")
+
     def test_tunnel_never_persists_token_locally(self) -> None:
         """The proxy URL (with auth token) may be written only to the worker;
         nothing should redirect it into the local state dir."""

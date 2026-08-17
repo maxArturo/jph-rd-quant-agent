@@ -33,6 +33,7 @@ from typing import Any
 
 _LOOP_DIR = re.compile(r"^Loop_(\d+)$")
 _EXIT_LINE = re.compile(r"^=== run exit=(\d+)")
+_START_LINE = re.compile(r"^=== run start ")
 
 HYPOTHESIS_GLOB = "direct_exp_gen/hypothesis generation/*/*.pkl"
 RUNNER_GLOB = "running/runner result/*/*.pkl"
@@ -211,12 +212,22 @@ def latest_trace_dir(log_root: Path) -> Path | None:
 
 
 def run_exit_code(run_log: Path) -> int | None:
-    """Exit code from the launch wrapper's '=== run exit=N ===' trailer."""
+    """Exit code from the launch wrapper's '=== run exit=N ===' trailer.
+
+    Only trailers AFTER the last '=== run start ===' marker count: a
+    snapshot-booted or reused worker can carry a previous run's log, and its
+    stale trailer must never read as the current run finishing (2026-08-17
+    incident — the pipeline tore the worker down two minutes into loop 0).
+    """
     if not run_log.is_file():
         return None
     exit_code: int | None = None
     for line in run_log.read_text(errors="replace").splitlines():
-        match = _EXIT_LINE.match(line.strip())
+        stripped = line.strip()
+        if _START_LINE.match(stripped):
+            exit_code = None  # a new run began — prior trailers no longer apply
+            continue
+        match = _EXIT_LINE.match(stripped)
         if match:
             exit_code = int(match.group(1))
     return exit_code

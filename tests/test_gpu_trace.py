@@ -165,6 +165,23 @@ class TestCandidateAndHelpers:
         log.write_text("=== run exit=2 x ===\nmore\n=== run exit=1 y ===\n")
         assert run_exit_code(log) == 1
 
+    def test_run_exit_code_ignores_trailers_before_the_last_start(self, tmp_path: Path) -> None:
+        """2026-08-17 incident: a snapshot-booted worker carried the previous
+        run's log; its stale exit trailer must not read as the CURRENT run
+        (which appended a fresh start marker) having finished."""
+        log = tmp_path / "run.log"
+        log.write_text(
+            "=== run start 2026-08-17T11:53:46Z loop_n=10 ===\n"
+            "old run output\n"
+            "=== run exit=0 2026-08-17T13:32:13Z ===\n"
+            "=== run start 2026-08-17T19:10:54Z loop_n=10 ===\n"
+            "new run output, still going\n"
+        )
+        assert run_exit_code(log) is None
+        with log.open("a") as handle:
+            handle.write("=== run exit=1 2026-08-17T21:00:00Z ===\n")
+        assert run_exit_code(log) == 1
+
     def test_latest_trace_dir(self, tmp_path: Path) -> None:
         assert latest_trace_dir(tmp_path / "nope") is None
         (tmp_path / "2026-08-01_00-00-00").mkdir()

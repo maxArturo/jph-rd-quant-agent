@@ -1104,3 +1104,27 @@ recomputed on the shared window, and the decision would have rested on the
 MDD limit and the confirmation leg — which correctly refused because the
 incumbent c9587797 cannot reproduce its own predictions (see the 2026-08-15
 incident entry). That refusal is the system working.
+
+## 2026-08-17 — snapshot-booted worker false completion (stale exit sentinel)
+
+The first snapshot-booted run (thread 1786993641.480119, the 52-week-high
+E2E test) was torn down ~2 minutes into loop 0: the US-022 bake had captured
+the previous run's `/root/rdq-runs/gpu-run.log` inside the image, the new
+run's launch script APPENDED (`tee -a`), and `gpu_trace.run_exit_code` —
+which took the last `=== run exit=N ===` anywhere in the log — read the
+baked run's trailer as the new run finishing (exit 0). The pipeline fetched
+and destroyed the worker mid-loop and finalized the run row `completed`.
+
+Three fixes, each sufficient alone:
+
+- the launch script now TRUNCATES the run log (`tee`, never `tee -a`);
+- `run_exit_code` only honors trailers after the LAST `=== run start ===`
+  marker (also protects `--reuse-worker`);
+- `cmd_snapshot` clears run state before baking (`/root/rdq-runs`, the
+  launch script, and `/root/rdq-proxy.env` — the per-agent proxy token has
+  no business living inside an image; every run's tunnel step rewrites it)
+  and refuses to bake when the cleanup fails.
+
+The gpu_worker.sh change rotates the worker-inputs hash, so the polluted
+image `rdq-gpu-base-0eefb763d650-*` is orphaned by construction (prune will
+drop it after two newer bakes; deleting it manually is fine too).

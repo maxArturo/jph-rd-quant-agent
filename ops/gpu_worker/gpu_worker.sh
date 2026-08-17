@@ -427,7 +427,11 @@ mkdir -p /root/rdq-runs
   echo "=== run start \$(date -u +%FT%TZ) loop_n=${loop_n}${all_duration:+ all_duration=${all_duration}} ==="
   ${REMOTE_REPO}/ops/run_us_quant.sh --loop_n ${loop_n}${all_duration:+ --all_duration ${all_duration}} 2>&1
   echo "=== run exit=\$? \$(date -u +%FT%TZ) ==="
-} | tee -a ${RUN_LOG}
+} | tee ${RUN_LOG}
+# tee TRUNCATES (never -a): a snapshot-booted worker carries the previous
+# run's log, and appending would leave its '=== run exit ===' trailer for
+# the pipeline's completion poll to misread as THIS run finishing
+# (2026-08-17 incident: run torn down 2 min in, mid-loop-0).
 EOF
 
   remote "tmux new-session -d -s ${RUN_SESSION} /root/rdq-launch.sh"
@@ -464,6 +468,14 @@ cmd_snapshot() {
   fi
   local name
   name="${SNAPSHOT_PREFIX}-${inputs_hash:+${inputs_hash}-}$(date -u +%Y%m%d-%H%M)"
+  # Bake a PRISTINE image: run outputs (log with its exit trailer, traces,
+  # workspaces), the launch script, and the per-agent proxy token must not
+  # ride into future boots — a baked run log's stale exit sentinel made the
+  # next run's completion poll fire 2 min in (2026-08-17 incident), and the
+  # proxy token is re-written fresh by every run's tunnel step anyway.
+  note "clearing run state before bake (log/traces/workspaces/launch script/proxy env)"
+  remote "rm -rf /root/rdq-runs && rm -f /root/rdq-launch.sh ${PROXY_ENV_FILE}" \
+    || fail "could not clear run state — refusing to bake a polluted image"
   note "powering off ${DROPLET_ID} for a consistent snapshot"
   doctl compute droplet-action power-off "${DROPLET_ID}" --wait >/dev/null
   note "taking snapshot ${name} (several minutes)"
