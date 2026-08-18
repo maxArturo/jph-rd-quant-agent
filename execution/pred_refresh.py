@@ -4,8 +4,9 @@ Two halves, both promoted-workspace-local:
 
 * **Snapshot (promote time).** ``snapshot_pred_refresh(workspace)`` writes the
   three files a refresh needs so there is no log archaeology later:
-  ``conf_pred_refresh.yaml`` — the conf the SOTA run actually used (the sota
-  variant when its combined-factors parquet still exists, else the baseline)
+  ``conf_pred_refresh.yaml`` — the conf the SOTA run actually used (matched
+  against the backtested run's recorded task: model class, parquet deps,
+  learn/infer processors — see choose_source_conf)
   with ``record:`` reduced to SignalRecord ONLY —, ``pred_refresh.env`` —
   the rendered jinja context recovered from the workspace's
   docker_execution logs (plus ``num_features`` from the training log, and the
@@ -133,26 +134,145 @@ _SOURCE_CONF_CANDIDATES = (
     "conf_baseline.yaml",
 )
 
+# The structural fields that make a conf's task interchangeable with the
+# backtested run's recorded task for re-prediction: same model class, same
+# static parquet inputs, same feature/label processing. Dates and model
+# hyperparameters are deliberately excluded — the refresh overrides test_end
+# and never re-fits.
+_TaskSignature = tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+
+
+def _class_name(value: object) -> str:
+    return str(value).rsplit(".", 1)[-1]
+
+
+def _task_signature(task: object) -> _TaskSignature | None:
+    """(model class, static parquets, infer processors, learn processors)
+    of a qlib task dict — the same extractor works on a conf's rendered
+    ``task:`` section and on a run's pickled ``task`` artifact."""
+    try:
+        model = _class_name(task["model"]["class"])  # type: ignore[index]
+        handler = task["dataset"]["kwargs"]["handler"]["kwargs"]  # type: ignore[index]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(handler, dict):
+        return None
+    loader = handler.get("data_loader") or {}
+    loaders = loader.get("kwargs", {}).get("dataloader_l") or [loader]
+    parquets = tuple(
+        sorted(
+            str(entry.get("kwargs", {}).get("config"))
+            for entry in loaders
+            if isinstance(entry, dict)
+            and _class_name(entry.get("class", "")) == "StaticDataLoader"
+        )
+    )
+
+    def processors(key: str) -> tuple[str, ...]:
+        return tuple(
+            _class_name(entry.get("class", "") if isinstance(entry, dict) else entry)
+            for entry in handler.get(key) or ()
+        )
+
+    return (model, parquets, processors("infer_processors"), processors("learn_processors"))
+
+
+def _conf_task_signature(conf_text: str) -> _TaskSignature | None:
+    """Signature of a workspace conf's task; None when unparseable.
+
+    Workspace confs keep their jinja placeholders (qrun renders at run time),
+    so render with tolerant undefineds first — signal.py's _rendered_confs
+    pattern. The compared fields never contain placeholders.
+    """
+    import yaml
+    from jinja2 import Environment, Undefined
+
+    env = Environment(undefined=Undefined, autoescape=False)
+    try:
+        data = yaml.safe_load(env.from_string(conf_text).render())
+    except Exception:  # noqa: BLE001 — unparseable conf is simply not a match
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("task"), dict):
+        return None
+    return _task_signature(data["task"])
+
+
+def _backtest_task_signature(workspace: Path) -> _TaskSignature | None:
+    """Signature of the backtested run's recorded task, or None when the
+    workspace has no backtested run or no readable ``task`` artifact (then
+    the caller falls back to filename precedence alone)."""
+    import pickle
+
+    try:
+        params = locate_promoted_params(workspace)
+    except PredRefreshError:
+        return None
+    task_path = params.parent / "task"
+    if not task_path.is_file():
+        return None
+    try:
+        task = pickle.loads(task_path.read_bytes())  # noqa: S301 — our own artifact
+    except Exception:  # noqa: BLE001 — unreadable artifact: no basis to match on
+        return None
+    return _task_signature(task)
+
+
+def _format_signature(signature: _TaskSignature | None) -> str:
+    if signature is None:
+        return "unparseable task"
+    model, parquets, infer, learn = signature
+    return (
+        f"model {model}, parquets {list(parquets) or 'none'}, "
+        f"infer_processors {list(infer) or 'none'}, learn_processors {list(learn) or 'none'}"
+    )
+
 
 def choose_source_conf(workspace: Path) -> Path:
     """The conf the promoted run actually executed.
 
-    The combined/sota variants need combined_factors_df.parquet, which
-    RD-Agent cleans up after runs without SOTA factor experiments — a conf is
-    only the right source when its data dependencies still exist; otherwise
-    the plain baseline conf is what produced the promoted artifacts.
+    Filename precedence alone is not enough: a factor workspace holds both
+    conf_combined_factors.yaml (the LGBM run that produced the backtested
+    artifacts) and conf_combined_factors_sota_model.yaml (the SOTA-model
+    variant, different model AND different infer processors), and the parquet
+    both need is the same file. Snapshotting the wrong one re-predicts the
+    model through feature processing it was never trained on and the scores
+    come out degenerate — the c9587797 incident (2026-08-15) and the 3062cb19
+    gate failure (2026-08-18). So when the backtested run recorded its task
+    (the mlflow ``task`` artifact — every qrun writes one), a candidate conf
+    must MATCH it on model class, static parquet deps, and learn/infer
+    processors. Without a recorded task the old rule stands: most-specific
+    conf whose parquet dependencies still exist (RD-Agent cleans the parquet
+    up after runs without SOTA factor experiments — then the baseline conf is
+    what produced the artifacts).
     """
+    expected = _backtest_task_signature(workspace)
+    rejected: list[str] = []
     for name in _SOURCE_CONF_CANDIDATES:
         conf = workspace / name
         if not conf.is_file():
             continue
-        deps = _static_loader_deps(conf.read_text())
-        if all((workspace / dep).is_file() for dep in deps):
-            return conf
+        text = conf.read_text()
+        deps = _static_loader_deps(text)
+        missing = [dep for dep in deps if not (workspace / dep).is_file()]
+        if missing:
+            rejected.append(f"{name} (missing {', '.join(missing)})")
+            continue
+        if expected is not None:
+            actual = _conf_task_signature(text)
+            if actual != expected:
+                rejected.append(f"{name} ({_format_signature(actual)})")
+                continue
+        return conf
+    detail = f" — rejected: {'; '.join(rejected)}" if rejected else ""
+    if expected is not None:
+        raise PredRefreshError(
+            f"no source conf in {workspace} matches the backtested run's task "
+            f"({_format_signature(expected)}){detail}"
+        )
     raise PredRefreshError(
         f"no usable source conf in {workspace}: need one of "
         f"{', '.join(_SOURCE_CONF_CANDIDATES)} with its parquet dependencies "
-        "still on disk"
+        "still on disk" + detail
     )
 
 

@@ -236,6 +236,180 @@ def test_factor_workspace_falls_back_to_baseline_when_parquet_cleaned(
     assert choose_source_conf(workspace).name == "conf_baseline.yaml"
 
 
+# --- snapshot: source conf must match the backtested run's task ---------------
+# The c9587797 incident (2026-08-15), again on 3062cb19 (2026-08-18): a factor
+# workspace's backtested run was the LGBM conf_combined_factors.yaml (raw
+# features, no infer processors), but filename precedence snapshotted
+# conf_combined_factors_sota_model.yaml (GeneralPTNN + RobustZScoreNorm) — the
+# re-predict fed z-scored features to trees split on raw scales and the scores
+# came out degenerate. When the run recorded its task, the conf must match it.
+
+# Shaped like the real factor-workspace confs: shared parquet, same learn
+# processors, differing on model class and infer processors.
+LGBM_FACTORS_CONF = """\
+data_handler_config: &data_handler_config
+    start_time: {{ train_start | default("2008-01-01", true) }}
+    end_time: {{ test_end | default("null", true) }}
+    data_loader:
+        class: NestedDataLoader
+        kwargs:
+            dataloader_l:
+                - class: qlib.contrib.data.loader.Alpha158DL
+                - class: qlib.data.dataset.loader.StaticDataLoader
+                  kwargs:
+                    config: "combined_factors_df.parquet"
+    learn_processors:
+        - class: DropnaLabel
+        - class: CSZScoreNorm
+task:
+    model:
+        class: LGBModel
+        module_path: qlib.contrib.model.gbdt
+    dataset:
+        class: DatasetH
+        kwargs:
+            handler:
+                class: DataHandlerLP
+                kwargs: *data_handler_config
+    record:
+        - class: SignalRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+            model: <MODEL>
+            dataset: <DATASET>
+        - class: PortAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs: {}
+"""
+
+SOTA_MODEL_FACTORS_CONF = LGBM_FACTORS_CONF.replace(
+    """\
+    learn_processors:
+        - class: DropnaLabel
+""",
+    """\
+    infer_processors:
+        - class: RobustZScoreNorm
+        - class: Fillna
+    learn_processors:
+        - class: DropnaLabel
+""",
+).replace(
+    """\
+    model:
+        class: LGBModel
+        module_path: qlib.contrib.model.gbdt
+""",
+    """\
+    model:
+        class: GeneralPTNN
+        module_path: qlib.contrib.model.pytorch_general_nn
+        kwargs:
+            n_epochs: {{ n_epochs }}
+""",
+)
+
+LGBM_TASK = {
+    "model": {"class": "LGBModel", "module_path": "qlib.contrib.model.gbdt", "kwargs": {}},
+    "dataset": {
+        "class": "DatasetH",
+        "kwargs": {
+            "handler": {
+                "class": "DataHandlerLP",
+                "kwargs": {
+                    "data_loader": {
+                        "class": "NestedDataLoader",
+                        "kwargs": {
+                            "dataloader_l": [
+                                {"class": "qlib.contrib.data.loader.Alpha158DL"},
+                                {
+                                    "class": "qlib.data.dataset.loader.StaticDataLoader",
+                                    "kwargs": {"config": "combined_factors_df.parquet"},
+                                },
+                            ]
+                        },
+                    },
+                    "learn_processors": [
+                        {"class": "DropnaLabel"},
+                        {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+                    ],
+                },
+            }
+        },
+    },
+}
+
+SOTA_MODEL_TASK = {
+    **LGBM_TASK,
+    "model": {"class": "GeneralPTNN", "module_path": "qlib.contrib.model.pytorch_general_nn"},
+    "dataset": {
+        "class": "DatasetH",
+        "kwargs": {
+            "handler": {
+                "class": "DataHandlerLP",
+                "kwargs": {
+                    **LGBM_TASK["dataset"]["kwargs"]["handler"]["kwargs"],
+                    "infer_processors": [
+                        {"class": "RobustZScoreNorm"},
+                        {"class": "Fillna"},
+                    ],
+                },
+            }
+        },
+    },
+}
+
+
+def make_task_recorded_workspace(tmp_path: Path, task: dict) -> Path:
+    """A factor workspace whose backtested run recorded its executed task."""
+    import pickle
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "conf_combined_factors.yaml").write_text(LGBM_FACTORS_CONF)
+    (workspace / "conf_combined_factors_sota_model.yaml").write_text(SOTA_MODEL_FACTORS_CONF)
+    (workspace / "combined_factors_df.parquet").write_bytes(b"parquet")
+    logs = workspace / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / "docker_execution_20260714_151810.log").write_text(
+        f"boilerplate\n{CONTEXT_LINE}\nmore lines\n{TRAIN_LINE}\n"
+    )
+    params = backtested_run(workspace)
+    (params.parent / "task").write_bytes(pickle.dumps(task))
+    return workspace
+
+
+def test_snapshot_matches_conf_to_backtested_lgbm_task(tmp_path: Path) -> None:
+    """The incident shape: the sota-model conf outranks the LGBM conf by
+    filename, but the backtested run's task says LGBM without infer
+    processors — the LGBM conf must win."""
+    workspace = make_task_recorded_workspace(tmp_path, LGBM_TASK)
+    assert choose_source_conf(workspace).name == "conf_combined_factors.yaml"
+
+
+def test_snapshot_keeps_precedence_when_task_matches_sota_conf(tmp_path: Path) -> None:
+    workspace = make_task_recorded_workspace(tmp_path, SOTA_MODEL_TASK)
+    assert choose_source_conf(workspace).name == "conf_combined_factors_sota_model.yaml"
+
+
+def test_snapshot_raises_when_no_conf_matches_the_task(tmp_path: Path) -> None:
+    """A conf that would re-predict through the wrong processing must never be
+    snapshotted silently — that is exactly the degenerate-refresh incident."""
+    workspace = make_task_recorded_workspace(tmp_path, LGBM_TASK)
+    (workspace / "conf_combined_factors.yaml").unlink()
+    with pytest.raises(PredRefreshError, match="matches the backtested run's task"):
+        choose_source_conf(workspace)
+
+
+def test_snapshot_without_task_artifact_keeps_precedence(tmp_path: Path) -> None:
+    """No recorded task (pre-qrun-artifact workspaces) — the old
+    precedence-plus-deps rule stands unchanged."""
+    workspace = make_task_recorded_workspace(tmp_path, LGBM_TASK)
+    params = locate_promoted_params(workspace)
+    (params.parent / "task").unlink()
+    assert choose_source_conf(workspace).name == "conf_combined_factors_sota_model.yaml"
+
+
 # --- snapshot: context recovery -----------------------------------------------
 
 

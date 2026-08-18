@@ -1182,3 +1182,47 @@ never-raises envelope — a snapshot failure finalizes the run unpromoted with
 the error posted). Consequence: a failing gate now leaves snapshot files in
 the candidate workspace; deliberate — they are the identical files promotion
 writes on a pass.
+
+## 2026-08-18 — parquet-conf degenerate refresh root-caused: snapshot conf must match the backtested run's recorded task
+
+**Context:** the c9587797 incident (2026-08-15: exact-weights refresh
+collapsed 581 names to ~37 unique scores, reproduction 0.127) was rolled back
+but never root-caused; on 2026-08-18 candidate 3062cb19's gate confirmation
+leg failed the same way (re-predict mean spearman −0.075 vs the original over
+the sampled overlap days; full-overlap recompute ≈ −0.04, median 44 unique
+scores/day vs the original's 111).
+
+**Root cause:** `execution/pred_refresh.py choose_source_conf` picked the
+snapshot source conf by filename precedence + parquet-deps-exist. On factor
+workspaces the backtested (promoted) run is `conf_combined_factors.yaml` —
+LGBModel on RAW features (no `infer_processors`) — but
+`conf_combined_factors_sota_model.yaml` (GeneralPTNN + RobustZScoreNorm +
+Fillna) outranks it and needs the SAME parquet, so it always won. The
+re-predict then loaded the correct LGBM weights but built the dataset with
+z-scored features; tree splits calibrated on raw scales route nearly every
+row down the same leaves → degenerate, heavily-tied scores. Both incidents
+(c9587797, 3062cb19) verified as exactly this shape; e05ad9b4 was never
+affected because its model-experiment conf family matches its task (which is
+why its refresh reproduces at spearman ~1.0).
+
+**Fix:** when the backtested run recorded its executed task (the mlflow
+`task` artifact — every qrun writes one), each candidate conf must MATCH it
+on (model class, StaticDataLoader parquet set, infer/learn processor
+classes), extracted identically from the run's pickled task and from the
+conf's jinja-tolerant-rendered `task:` section. No matching conf → loud
+`PredRefreshError` (the gate maps it to confirmation_unavailable; promotion
+paths surface it) instead of silently snapshotting a conf that re-predicts a
+different strategy. Workspaces without a recorded task keep the old
+precedence rule. Dates and model hyperparameters are deliberately NOT
+compared — the refresh overrides test_end and never re-fits.
+
+**Verified:** unit tests reproduce the incident shape; on a scratch copy of
+3062cb19 the fixed snapshot chose conf_combined_factors.yaml (LGBModel, no
+infer processors) and the full docker re-predict + US-010 reproduction check
+was re-run end-to-end (result recorded in the commit).
+
+**Consequence:** a factor workspace whose parquet was cleaned but whose
+backtested task NEEDED it now raises instead of silently falling back to the
+baseline conf (which would also re-predict the wrong strategy). c9587797's
+on-disk snapshot remains wrong (forensics only, not promoted, never
+refreshed); it would be regenerated correctly on any future promotion.

@@ -233,8 +233,16 @@
   daily-refresh pred — it must mean-spearman >= `min_reproduction` (0.98)
   against the original on sampled overlap days, else ConfirmWindowError. A
   degenerate refresh (the incident: ~0.13) can therefore never feed the
-  gate; the live promoted c9587797 currently FAILS this check by design
-  until its parquet-conf snapshot is fixed or rolled back.
+  gate. Root cause found 2026-08-18 (it also failed candidate 3062cb19's
+  confirmation leg): `choose_source_conf` picked the snapshot conf by
+  filename precedence, and on factor workspaces whose backtested run was
+  the LGBM conf_combined_factors.yaml it snapshotted the GeneralPTNN
+  conf_combined_factors_sota_model.yaml instead — wrong model class AND
+  wrong infer processors (z-scoring features the trees were split on raw).
+  Fixed in execution/pred_refresh.py: candidates must now match the
+  backtested run's recorded mlflow `task` artifact (model class, static
+  parquet deps, learn/infer processors); no match raises instead of
+  snapshotting the wrong conf silently.
 - `ops/promotion_decision.py` (US-012) is how ops-side code writes Notion
   Decision Log rows: the bearer only injects under `onecli run --agent
   rdq-orchestrator`, so promote_fetched and the pipeline's auto-promotion
