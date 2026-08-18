@@ -115,7 +115,12 @@
   pre-promotion world) and NEVER raises — gate fail, gate error, and
   snapshot failure all finalize the run unpromoted with the verdict/error
   posted; on pass it promotes via promote_workspace with source='auto_gate'
-  and the verdict JSON in promotion_history. Kill-switch:
+  and the verdict JSON in promotion_history. Before evaluating the
+  confirmation leg it snapshots the candidate when its pred-refresh files
+  are missing (US-033 — a fresh fetched workspace has none and the
+  candidate's re-predict needs them; identical files promotion would write,
+  same move as promote_fetched's --yes path), so a failing gate still
+  leaves snapshot files in the candidate dir — deliberate, not a leak. Kill-switch:
   `promotion_gate.auto_promote: false` in config.yaml = report-only (verdict
   still posted). Parity hashes: candidate's from launch
   (pipeline_status.json), incumbent's from its promotion record's
@@ -211,6 +216,14 @@
   close-to-close on ADJUSTED store closes, equal-weight, open/close_cost on
   traded fractions, min_cost ignored — only cross-strategy comparability
   matters, so both sides of a gate comparison MUST come from this module.
+  Terminal exits (US-033, the BITF 2026-08-13 shape): a name whose store
+  series ENDS before day d is dropped from d's cross-section (not
+  buyable/retainable) and, if held, force-liquidated at its last available
+  close (= the signal day's close by construction) with close_cost charged
+  like any sell — exits ride `WindowReturns.terminal_exits` into
+  `ConfirmationSide` and the verdict's Slack/JSON. Only a true series end
+  is terminal: a missing close with LATER data (gap) or a scored name with
+  no closes at all still raises.
   Every gap raises `ConfirmWindowError` (US-010 maps it to
   confirmation_unavailable); `annualized_ir` here is the confirmation
   criterion's metric (benchmark-free mean/std·√252, compute_sharpe

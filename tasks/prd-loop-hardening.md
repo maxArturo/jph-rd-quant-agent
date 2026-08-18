@@ -385,6 +385,32 @@ discovering that at the verdict.
   still produce knowledge and run-memory when unpromotable).
 - [ ] `make check` passes; tests cover each blocker and the clean case.
 
+### US-033: Confirmation-window terminal handling (added 2026-08-18)
+**Description:** As an operator, I want the confirmation-window simulator to
+force-liquidate a held name whose store series ends mid-window (delisted/
+acquired — BITF's series ends 2026-08-13), so a single delisting inside the
+reserved window cannot make every promotion structurally impossible via
+`confirmation_unavailable`.
+
+**Acceptance Criteria:**
+- [x] `ops/confirm_window.py`: a symbol whose close series has ended before
+  evaluated day d (has closes, none on/after d) is dropped from d's
+  cross-section and, when held, force-liquidated at its last available
+  close (= the signal day's close by construction), charged close_cost like
+  any sell; the freed slot is buyable the same day.
+- [x] A missing close with LATER data (gap) and a scored name with no store
+  closes at all still raise `ConfirmWindowError` — only a true series end
+  is terminal.
+- [x] Exits are visible: `WindowReturns.terminal_exits` flows into
+  `ConfirmationSide` and the gate verdict's JSON + Slack block.
+- [x] `gate_and_promote` snapshots the candidate (when pred-refresh files
+  are missing) before evaluating confirmation — the latent second blocker:
+  a fresh fetched workspace has no snapshot, so the candidate leg could
+  never evaluate (masked until now by incumbent-first failures).
+- [x] `make check` passes; tests cover the held-name exit (returns +
+  recorded exit), ended-name-not-buyable, both gap shapes still raising,
+  the Slack rendering, the gate-time snapshot, and its failure path.
+
 ## Open Questions
 
 None outstanding. All four were resolved with the operator on 2026-08-14:

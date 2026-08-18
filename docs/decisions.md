@@ -1128,3 +1128,57 @@ Three fixes, each sufficient alone:
 The gpu_worker.sh change rotates the worker-inputs hash, so the polluted
 image `rdq-gpu-base-0eefb763d650-*` is orphaned by construction (prune will
 drop it after two newer bakes; deleting it manually is fine too).
+
+## 2026-08-18 — US-033: confirmation-window terminal handling (a held name's series end no longer blocks the gate)
+
+**Context:** BITF's `us_liquid` series ends 2026-08-13 — mid-way through the
+current confirmation window. The window simulator (`ops/confirm_window.py`)
+priced every held name on every day and raised `ConfirmWindowError` when a
+held book crossed that end, which US-010 correctly maps to
+`confirmation_unavailable` — so NO candidate could pass the gate while any
+held name delisted inside the window. The US-025 delisted-names gap, showing
+up operationally exactly where that entry predicted ("the simulator must be
+forced OUT of a position at span end").
+
+**Decision:** the confirmation simulator learns terminal exits. For each
+evaluated day d, a symbol whose store close series has ENDED before d
+(has closes, none on/after d):
+
+- leaves d's prediction cross-section — it cannot be bought or retained
+  into a day it does not trade;
+- if HELD, is force-liquidated at its last available close. By construction
+  that close IS the signal day's close (window days are consecutive trading
+  days, and the name must have priced on the signal day to be held through
+  it), so the simulator's ordinary sold-at-signal-day accounting values the
+  exit exactly; close_cost is charged like any sell and the freed slot is
+  buyable the same day.
+
+Exits are surfaced, not hidden: `WindowReturns.terminal_exits` →
+`ConfirmationSide.terminal_exits` → the gate verdict's JSON and Slack block
+("terminal exits: BITF@2026-08-13").
+
+**What stays a hard error (deliberately):** a missing close WITH later data
+is a data gap, not a delisting — still raises; a scored name with no store
+closes at all is a store/pred mismatch — still raises. Only a true series
+end is terminal.
+
+**What this does NOT change:** the backtest itself still holds no delisted
+names at all (survivorship — the standing US-025 caveat is unchanged), and
+exit ECONOMICS are still not modeled (no acquisition premium, no
+bankruptcy −100%; the exit price is simply the last traded close). Both
+sides of a gate comparison run the same code, so comparability — the only
+thing the confirmation leg needs — holds.
+
+**Second blocker flushed out by verifying the fix:** with the incumbent side
+unblocked, the CANDIDATE side of the auto-gate's confirmation leg would have
+failed next — `gate_and_promote` never snapshotted the candidate, and a
+freshly fetched workspace has no pred-refresh files (confirm_window requires
+them and never snapshots by contract). This was invisible in every prior run
+because the incumbent evaluates first and something incumbent-side always
+failed before the candidate ran. Fixed the same way `promote_fetched`'s
+`--yes` path already does: `gate_and_promote` snapshots the candidate when
+the files are missing, before `load_confirmation_evidence` (inside its
+never-raises envelope — a snapshot failure finalizes the run unpromoted with
+the error posted). Consequence: a failing gate now leaves snapshot files in
+the candidate workspace; deliberate — they are the identical files promotion
+writes on a pass.

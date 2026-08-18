@@ -552,12 +552,40 @@ class TestGateAndPromote:
         row = StateStore(db).get_promoted_strategy()
         assert row is not None and row.workspace_path == str(incumbent)
         assert len(StateStore(db).list_promotion_history()) == 1  # only the original
-        assert not (candidate / "conf_pred_refresh.yaml").exists()
+        # The gate snapshots the candidate BEFORE confirmation (US-033 — the
+        # candidate's re-predict needs it); files on disk, no DB side-effects.
+        assert (candidate / "conf_pred_refresh.yaml").is_file()
         text = "\n".join(slack.posts)
         assert "FAIL" in text
         assert "failing criteria: IR" in text
         assert json.loads(status_path.read_text())["auto_promoted"] is False
         assert self.decisions == []  # no promotion, no Decision Log row
+
+    def test_gate_time_snapshot_failure_is_a_gate_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-confirmation snapshot failing must land in the never-raises
+        handler: run finalizes unpromoted with the error posted."""
+        candidate, incumbent, store, db = self.setup_box(tmp_path)
+        install_gate_fakes(monkeypatch, candidate, incumbent)
+
+        def broken_snapshot(workspace):
+            raise RuntimeError("no params.pkl anywhere")
+
+        monkeypatch.setattr(
+            "execution.pred_refresh.snapshot_pred_refresh", broken_snapshot
+        )
+        promoted, slack, status_path = self.run_gate(
+            tmp_path, candidate, store, db, gate_config_yaml(tmp_path)
+        )
+        assert promoted is False
+        row = StateStore(db).get_promoted_strategy()
+        assert row is not None and row.workspace_path == str(incumbent)
+        text = "\n".join(slack.posts)
+        assert "promotion gate errored" in text and "no params.pkl anywhere" in text
+        assert json.loads(status_path.read_text())["gate"] == {
+            "error": "no params.pkl anywhere"
+        }
 
     def test_no_promote_on_parity_mismatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -636,7 +664,9 @@ class TestGateAndPromote:
         assert promoted is False
         row = StateStore(db).get_promoted_strategy()
         assert row is not None and row.workspace_path == str(incumbent)
-        assert not (candidate / "conf_pred_refresh.yaml").exists()
+        # Snapshot files exist (written for the confirmation evaluation) but
+        # the promotion pointer never moved.
+        assert (candidate / "conf_pred_refresh.yaml").is_file()
         text = "\n".join(slack.posts)
         # The verdict block still posts in full — only the promotion is withheld.
         assert "*Promotion gate:*" in text and "PASS" in text

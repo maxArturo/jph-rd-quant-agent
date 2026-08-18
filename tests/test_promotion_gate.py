@@ -487,7 +487,30 @@ def test_slack_text_shows_both_windows_and_both_strategies() -> None:
     assert "incumbent `incumben` IR 1.0000 (42d, cached pred)" in text
 
 
-def fake_window_returns(workspace: str, returns: tuple[float, ...], repredicted: bool):  # noqa: ANN201
+def test_slack_text_shows_terminal_exits() -> None:
+    """A US-033 forced liquidation must be visible in the verdict block."""
+    from dataclasses import replace
+
+    ev = evidence()
+    assert ev.incumbent is not None
+    ev = replace(
+        ev, incumbent=replace(ev.incumbent, terminal_exits=(("BITF", "2026-08-13"),))
+    )
+    verdict = evaluate_gate(bundle(), incumbent_bundle(), GateConfig(), ev, overlap())
+    text = verdict.slack_text()
+    assert (
+        "incumbent `incumben` IR 1.0000 (42d, cached pred) "
+        "— terminal exits: BITF@2026-08-13"
+    ) in text
+    assert "candidate `candidat` IR 1.5000 (42d, re-predicted)," in text  # no exits suffix
+
+
+def fake_window_returns(
+    workspace: str,
+    returns: tuple[float, ...],
+    repredicted: bool,
+    terminal_exits: tuple[tuple[str, str], ...] = (),
+):  # noqa: ANN201
     from ops.confirm_window import WindowReturns
 
     return WindowReturns(
@@ -497,6 +520,7 @@ def fake_window_returns(workspace: str, returns: tuple[float, ...], repredicted:
         gross_returns=returns,
         repredicted=repredicted,
         reproduction=1.0 if repredicted else None,
+        terminal_exits=terminal_exits,
     )
 
 
@@ -515,7 +539,9 @@ def test_load_confirmation_evidence_evaluates_both_sides(
         assert (start, end) == (dt.date(2026, 6, 15), dt.date(2026, 8, 13))
         if ws.name == "cand":
             return fake_window_returns(str(ws), cand_returns, repredicted=True)
-        return fake_window_returns(str(ws), inc_returns, repredicted=False)
+        return fake_window_returns(
+            str(ws), inc_returns, repredicted=False, terminal_exits=(("BITF", "2026-08-13"),)
+        )
 
     monkeypatch.setattr(confirm_window, "confirmation_returns", fake)
     result = load_confirmation_evidence(
@@ -528,6 +554,9 @@ def test_load_confirmation_evidence_evaluates_both_sides(
     assert result.candidate.ir == pytest.approx(annualized_ir(cand_returns))
     assert result.incumbent.ir == pytest.approx(annualized_ir(inc_returns))
     assert result.candidate.days == 3 and result.candidate.repredicted is True
+    # US-033 forced liquidations ride through into the evidence (and its JSON).
+    assert result.incumbent.terminal_exits == (("BITF", "2026-08-13"),)
+    assert result.candidate.terminal_exits == ()
     verdict = evaluate_gate(bundle(), incumbent_bundle(), GateConfig(), result, overlap())
     assert verdict.passed
 

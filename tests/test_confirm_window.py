@@ -299,15 +299,89 @@ def test_window_starting_at_calendar_start_raises(tmp_path: Path) -> None:
         confirmation_returns(ws, D[0], D[2], store_path=store, runner=refuse_runner)
 
 
-def test_missing_price_raises(tmp_path: Path) -> None:
+def test_mid_series_price_gap_raises(tmp_path: Path) -> None:
+    """A missing close WITH later data is a data gap, not a delisting — hard error."""
     store = tmp_path / "us_data"
     write_calendar(store / "calendars" / "day.txt", CAL)
     write_bins(store, "AAPL", [100.0, 100.0, 102.0, 104.0, 104.0], [1.0] * 5)
     write_bins(store, "MSFT", [50.0, 50.0, 51.0, 51.0, 51.0], [1.0] * 5)
-    write_bins(store, "NVDA", [10.0, 10.0, 10.0, 10.0], [1.0] * 4)  # no close on D[4]
+    # NVDA has no close on D[3] (0 is dropped) but trades again on D[4], so it
+    # is NOT terminal; it gets bought for D[4] and pricing its D[3] entry fails.
+    write_bins(store, "NVDA", [10.0, 10.0, 10.0, 0.0, 11.0], [1.0] * 5)
     ws = make_workspace(tmp_path)
-    with pytest.raises(ConfirmWindowError, match="no store close for NVDA on 2026-07-08"):
+    with pytest.raises(ConfirmWindowError, match="no store close for NVDA on 2026-07-07"):
         confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+
+
+def test_held_name_price_gap_raises(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    write_calendar(store / "calendars" / "day.txt", CAL)
+    write_bins(store, "AAPL", [100.0, 100.0, 102.0, 104.0, 104.0], [1.0] * 5)
+    # MSFT is held through D[3] but has no close there — data later means gap.
+    write_bins(store, "MSFT", [50.0, 50.0, 51.0, 0.0, 51.0], [1.0] * 5)
+    write_bins(store, "NVDA", [10.0, 10.0, 10.0, 10.0, 11.0], [1.0] * 5)
+    ws = make_workspace(tmp_path)
+    with pytest.raises(ConfirmWindowError, match="no store close for MSFT on 2026-07-07"):
+        confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+
+
+# --- terminal exits (US-033: a held name's series ends mid-window) -----------------
+
+# MSFT stays a holding until its series ends after D[3]; NVDA is the mid-score
+# replacement candidate (below AAPL, above nothing else) on the exit day.
+PRED_TERMINAL = {
+    "2026-07-02": {"AAPL": 0.9, "MSFT": 0.8, "NVDA": 0.1},
+    "2026-07-06": {"AAPL": 0.9, "MSFT": 0.8, "NVDA": 0.1},
+    "2026-07-07": {"AAPL": 0.9, "MSFT": 0.8, "NVDA": 0.5},
+}
+
+
+def test_held_name_series_end_liquidates_at_last_close(tmp_path: Path) -> None:
+    """The BITF shape (2026-08-13): a held name delists mid-window. It exits at
+    its last available close (= the signal day's close), pays close_cost like a
+    normal sell, frees its slot for a replacement buy, and the evaluation
+    completes instead of blocking the gate."""
+    store = tmp_path / "us_data"
+    write_calendar(store / "calendars" / "day.txt", CAL)
+    write_bins(store, "AAPL", [100.0, 100.0, 102.0, 104.0, 104.0], [1.0] * 5)
+    write_bins(store, "MSFT", [50.0, 50.0, 51.0, 51.0], [1.0] * 4)  # series ends D[3]
+    write_bins(store, "NVDA", [10.0, 10.0, 10.0, 10.0, 11.0], [1.0] * 5)
+    ws = make_workspace(tmp_path, pred=PRED_TERMINAL)
+    result = confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+    # D[2]: book [AAPL, MSFT]; D[3]: unchanged; D[4]: MSFT terminal -> out at
+    # its D[3] close (zero return contribution), NVDA bought as replacement.
+    expected_gross = (
+        0.02,  # mean(AAPL 100->102, MSFT 50->51)
+        (104.0 / 102.0 - 1.0) / 2,  # mean(AAPL 102->104, MSFT flat)
+        0.05,  # mean(AAPL flat, NVDA 10->11); MSFT already liquidated at 51
+    )
+    expected_net = (
+        expected_gross[0] - 0.001,  # open_cost on the whole starting book
+        expected_gross[1],  # no trades
+        # buy NVDA (half of the new book), forced sell of MSFT (half of the old)
+        expected_gross[2] - (0.001 * 0.5 + 0.002 * 0.5),
+    )
+    assert result.gross_returns == pytest.approx(expected_gross)
+    assert result.daily_returns == pytest.approx(expected_net)
+    assert result.terminal_exits == (("MSFT", "2026-07-07"),)
+
+
+def test_ended_name_is_not_buyable(tmp_path: Path) -> None:
+    """A name whose series has ended leaves the cross-section: the default PRED
+    ranks NVDA top on D[3], but with no D[4] close it must not be bought (the
+    book shrinks instead — no replacement candidates remain)."""
+    store = tmp_path / "us_data"
+    write_calendar(store / "calendars" / "day.txt", CAL)
+    write_bins(store, "AAPL", [100.0, 100.0, 102.0, 104.0, 104.0], [1.0] * 5)
+    write_bins(store, "MSFT", [50.0, 50.0, 51.0, 51.0, 51.0], [1.0] * 5)
+    write_bins(store, "NVDA", [10.0, 10.0, 10.0, 10.0], [1.0] * 4)  # series ends D[3]
+    ws = make_workspace(tmp_path)
+    result = confirmation_returns(ws, D[2], D[4], store_path=store, runner=refuse_runner)
+    # D[4]: cross drops NVDA -> [AAPL .9, MSFT .1]; n_drop=1 sells MSFT with
+    # nothing left to buy, so the book shrinks to [AAPL] (flat on D[4]).
+    assert result.gross_returns == pytest.approx((GROSS[0], GROSS[1], 0.0))
+    assert result.daily_returns == pytest.approx((NET[0], NET[1], -0.002 * 0.5))
+    assert result.terminal_exits == ()  # NVDA was never held — no forced exit
 
 
 # --- annualized_ir ---------------------------------------------------------------

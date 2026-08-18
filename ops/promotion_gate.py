@@ -262,7 +262,9 @@ class ConfirmationSide:
     returns — None when the window is degenerate (<2 days, zero variance),
     which the gate treats as confirmation_unavailable. ``reproduction`` is
     the re-predict fidelity score (spearman vs the original backtested pred;
-    None when the used pred IS the original)."""
+    None when the used pred IS the original). ``terminal_exits`` lists held
+    names force-liquidated at their last available close because their store
+    series ended mid-window (US-033 — delisted/acquired names)."""
 
     workspace: str
     ir: float | None
@@ -270,6 +272,7 @@ class ConfirmationSide:
     days: int
     repredicted: bool
     reproduction: float | None = None
+    terminal_exits: tuple[tuple[str, str], ...] = ()  # (symbol, last close ISO)
 
 
 @dataclass(frozen=True)
@@ -408,7 +411,11 @@ def gate_summary_line(
 def _confirmation_side_text(role: str, side: ConfirmationSide) -> str:
     ir = f"{side.ir:.4f}" if side.ir is not None else "n/a"
     source = "re-predicted" if side.repredicted else "cached pred"
-    return f"{role} `{_workspace_tag(side.workspace)}` IR {ir} ({side.days}d, {source})"
+    text = f"{role} `{_workspace_tag(side.workspace)}` IR {ir} ({side.days}d, {source})"
+    if side.terminal_exits:
+        exited = ", ".join(f"{symbol}@{last}" for symbol, last in side.terminal_exits)
+        text += f" — terminal exits: {exited}"
+    return text
 
 
 # (bundle attribute, human label) — the configuration inputs that must never
@@ -761,6 +768,7 @@ def load_confirmation_evidence(
             days=len(returns.daily_returns),
             repredicted=returns.repredicted,
             reproduction=returns.reproduction,
+            terminal_exits=returns.terminal_exits,
         )
     return ConfirmationEvidence(
         window=window, candidate=sides["candidate"], incumbent=sides["incumbent"]

@@ -833,6 +833,7 @@ def gate_and_promote(
     """
     import datetime as dt
 
+    from execution import pred_refresh
     from orchestrator.state import DEFAULT_DB_PATH
 
     db = db_path if db_path is not None else Path(DEFAULT_DB_PATH)
@@ -858,6 +859,15 @@ def gate_and_promote(
                 instrument_hash=_recorded_instrument_hash(incumbent_row.config),
             )
             overlap = align_overlap(candidate, incumbent, gate_config.min_overlap_days)
+            # The candidate's confirmation re-predict needs its pred-refresh
+            # snapshot, and a freshly fetched workspace has none. These are
+            # the identical files promotion writes on a pass (promote_fetched's
+            # --yes path snapshots at this same point); a failure here lands in
+            # the never-raises handler below, matching the snapshot-failure
+            # policy (finalize unpromoted, error posted).
+            ws = Path(candidate_workspace).expanduser()
+            if not (ws / pred_refresh.SNAPSHOT_CONF_NAME).is_file():
+                pred_refresh.snapshot_pred_refresh(ws)
             evidence = load_confirmation_evidence(
                 candidate_workspace,
                 incumbent_row.workspace_path,

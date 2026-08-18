@@ -39,6 +39,18 @@ which is what the confirmation criterion needs):
   the new book and close_cost on the sold fraction of the old book.
   min_cost is an absolute-dollar knob and is ignored (there is no notional
   here); it is identical on both sides, so the comparison is unaffected.
+* Terminal exits (US-033, the US-025 delisted-names gap's operational edge —
+  BITF's series ends 2026-08-13 mid-window): a name whose store series ENDS
+  before day d cannot be held through d. It is dropped from d's
+  cross-section (cannot be bought or retained), and if HELD it is
+  force-liquidated at its last available close — which is exactly the
+  signal day's close (window days are consecutive, and it must have priced
+  on the signal day to be held through it), so the ordinary
+  sold-at-signal-day accounting values the exit, and close_cost is charged
+  like any sell. Exits are reported in ``WindowReturns.terminal_exits``.
+  Only a true series END is terminal: a missing close with LATER data is a
+  data gap, and a scored name with no store closes at all is a store/pred
+  mismatch — both still raise ``ConfirmWindowError``.
 
 Reproduction check (US-010, forced by the 2026-08-15 c9587797 incident): a
 "technically successful" evaluation is worthless if the pred it used does not
@@ -106,6 +118,9 @@ class WindowReturns:
     # overlap days; None when the used pred IS the original (trivially
     # reproduces, nothing to check).
     reproduction: float | None = None
+    # Held names force-liquidated because their store series ended mid-window
+    # (delisted/acquired — US-033): (symbol, last available close day ISO).
+    terminal_exits: tuple[tuple[str, str], ...] = ()
 
 
 def annualized_ir(returns: Sequence[float]) -> float | None:
@@ -215,11 +230,17 @@ def confirmation_returns(
     open_cost = float(cost_params.get("open_cost", 0.0))
     close_cost = float(cost_params.get("close_cost", 0.0))
     closes: dict[str, dict[dt.date, float]] = {}
+    last_close: dict[str, dt.date | None] = {}
+
+    def series_for(symbol: str) -> dict[dt.date, float]:
+        if symbol not in closes:
+            series = _close_series(store_path, symbol, calendar)
+            closes[symbol] = series
+            last_close[symbol] = max(series) if series else None
+        return closes[symbol]
 
     def close_for(symbol: str, day: dt.date) -> float:
-        if symbol not in closes:
-            closes[symbol] = _close_series(store_path, symbol, calendar)
-        price = closes[symbol].get(day)
+        price = series_for(symbol).get(day)
         if price is None:
             raise ConfirmWindowError(
                 f"no store close for {symbol} on {day} "
@@ -228,17 +249,43 @@ def confirmation_returns(
             )
         return price
 
+    def series_ended(symbol: str, day: dt.date) -> bool:
+        """True when the symbol HAS store closes but none on/after ``day``.
+
+        The delisted shape (US-033). A symbol with no closes at all is NOT
+        terminal (store/pred mismatch — stays a hard error at pricing time),
+        and a missing close with later data is a gap (also stays hard)."""
+        series_for(symbol)
+        last = last_close[symbol]
+        return last is not None and last < day
+
     book: list[str] = []
     gross: list[float] = []
     net: list[float] = []
+    exits: list[tuple[str, str]] = []
     for day, sig_day in zip(window_days, signal_days, strict=True):
         cross = _cross_section(pred.series, pred.level, sig_day)
         if cross is None:
             raise ConfirmWindowError(
                 f"pred.pkl has no usable cross-section for signal day {sig_day}"
             )
+        # Terminal handling (US-033): names whose series ended before `day`
+        # leave the cross-section (cannot be bought or retained); a HELD one
+        # is force-liquidated — removing it from the current book prices the
+        # exit at sig_day's close (its last available close) via the ordinary
+        # sold-at-signal-day accounting, frees its slot for a replacement,
+        # and charges close_cost below like any sell.
+        ended_scored = [s for s in cross.index if series_ended(s, day)]
+        if ended_scored:
+            cross = cross.drop(ended_scored)
+        held: list[str] = []
+        for symbol in book:
+            if series_ended(symbol, day) and (last := last_close[symbol]) is not None:
+                exits.append((symbol, last.isoformat()))
+            else:
+                held.append(symbol)
         try:
-            new_book = signal.topk_dropout_holdings(cross, book, params)
+            new_book = signal.topk_dropout_holdings(cross, held, params)
         except signal.SignalError as exc:
             raise ConfirmWindowError(
                 f"selection failed for {day} (signals {sig_day}): {exc}"
@@ -264,6 +311,7 @@ def confirmation_returns(
         gross_returns=tuple(gross),
         repredicted=repredicted,
         reproduction=reproduction,
+        terminal_exits=tuple(exits),
     )
 
 
