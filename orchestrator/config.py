@@ -14,6 +14,9 @@ Optional:
 - ``RDQ_TRUSTED_BOT_IDS`` — comma-separated Slack bot ids (B...) whose
   messages count as operator input when they @mention the bot (e.g. Claude
   in Slack). Empty by default.
+- ``RDQ_TRUSTED_ONLY`` — "1"/"true"/"yes" to make trusted-bot @mentions the
+  ONLY messages the bot acts on (plain human channel messages are ignored).
+  Off by default; requires a non-empty RDQ_TRUSTED_BOT_IDS.
 """
 
 from __future__ import annotations
@@ -139,3 +142,19 @@ def load_trusted_bot_ids(
     file_values = parse_env_file(env_file)
     raw = env.get("RDQ_TRUSTED_BOT_IDS") or file_values.get("RDQ_TRUSTED_BOT_IDS") or ""
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def load_trusted_only(
+    env_file: Path = DEFAULT_ENV_FILE,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """RDQ_TRUSTED_ONLY: act ONLY on trusted-bot @mentions, ignore human posts.
+
+    The channel carries operator<->advisor conversation the bot must not act
+    on; with this set, the sole input path is a trusted bot (RDQ_TRUSTED_BOT_IDS)
+    @mentioning the bot user. Truthy values: 1/true/yes (case-insensitive).
+    """
+    env = os.environ if environ is None else environ
+    file_values = parse_env_file(env_file)
+    raw = env.get("RDQ_TRUSTED_ONLY") or file_values.get("RDQ_TRUSTED_ONLY") or ""
+    return raw.strip().lower() in ("1", "true", "yes")

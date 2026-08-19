@@ -166,6 +166,10 @@
   are directives. Trusted-bot posts come in two shapes (app user + bot_id,
   or subtype `bot_message` + username override); both pass, other subtypes
   never. In-thread reply target: `event.get("thread_ts") or event["ts"]`.
+  `RDQ_TRUSTED_ONLY=1` (2026-08-19, set in prod .env) additionally drops the
+  plain-human path: trusted-bot @mentions become the ONLY input — the
+  channel carries operator<->Claude conversation the bot must not act on.
+  main() raises ConfigError when it's set with an empty allowlist.
 
 - Custom universes live in `orchestrator/universe.py` (`UniverseService`):
   `propose()` is validation-only (refusals: built-in/reserved names, all-US

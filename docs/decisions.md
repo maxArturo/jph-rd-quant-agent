@@ -1226,3 +1226,31 @@ backtested task NEEDED it now raises instead of silently falling back to the
 baseline conf (which would also re-predict the wrong strategy). c9587797's
 on-disk snapshot remains wrong (forensics only, not promoted, never
 refreshed); it would be regenerated correctly on any future promotion.
+
+## 2026-08-19 — trusted-only listening + plain-language directives (division of labor with Claude)
+
+**Problem:** the Trading Agent acted on every human message in
+#quant-research. The channel now carries a three-way conversation (Max,
+Claude-in-Slack as the daily research advisor, the bot), so operator<->advisor
+chatter kept reaching the bot as if it were directives — two agents answering
+the same message, runs started off messages meant for Claude. Separately,
+Claude's directives had drifted hyper-technical (exact factor formulas,
+lookback grids), doing the Trading Agent's job for it and leaving the operator
+unable to follow what was being tested.
+
+**Decision:**
+1. `RDQ_TRUSTED_ONLY=1` (set in `.env`): the bot acts ONLY on trusted-bot
+   (RDQ_TRUSTED_BOT_IDS) messages that @mention it. Plain human channel/thread
+   messages are ignored entirely. The trusted-bot @mention gate (loop brake)
+   is unchanged. Startup raises ConfigError if trusted-only is set with an
+   empty allowlist (a deaf bot is a misconfiguration, not a mode). Max drives
+   the desk THROUGH Claude now; flipping the env var restores direct human
+   input without a code change.
+2. Division of labor codified in SYSTEM_PROMPT: suggestions arrive as
+   plain-language themes; the Trading Agent crafts the low-level testable
+   hypothesis itself (signal construction, windows, constraints, judging
+   criterion), saves it, and confirms with a plain-language restatement of
+   the choices it made so the suggester can correct course. Technical detail
+   in an incoming message is honored but never required. Claude was asked
+   (channel message, 2026-08-19) to update its channel memory to send
+   human-readable suggestions and leave the technical crafting to the bot.

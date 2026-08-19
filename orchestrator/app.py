@@ -47,6 +47,7 @@ def _is_actionable_user_message(
     channel_id: str,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    trusted_only: bool = False,
 ) -> bool:
     """True for plain user messages in the target channel (top-level or in-thread).
 
@@ -58,6 +59,10 @@ def _is_actionable_user_message(
     Trusted-bot posts arrive in two shapes — as their app user with bot_id
     set, or as subtype "bot_message" with a username override — so only those
     two subtypes pass.
+
+    ``trusted_only`` (RDQ_TRUSTED_ONLY) drops the plain-human path entirely:
+    the channel carries operator<->advisor conversation the bot must not act
+    on, so the trusted-bot @mention becomes the single input path.
     """
     if event.get("channel") != channel_id:
         return False
@@ -70,6 +75,8 @@ def _is_actionable_user_message(
         if bot_user_id is None or event.get("user") == bot_user_id:
             return False  # never answer ourselves, whatever the allowlist says
         return _mentions(event["text"], bot_user_id)
+    if trusted_only:
+        return False
     if event.get("subtype"):  # message_changed, bot_message, channel_join, ...
         return False
     if bot_id:  # never reply to ourselves or other bots
@@ -84,6 +91,7 @@ def handle_message(
     conversation: MessageResponder,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    trusted_only: bool = False,
 ) -> bool:
     """Route one message event to the conversational core. Returns True if handled.
 
@@ -91,7 +99,9 @@ def handle_message(
     starts a thread on it (thread_ts = its ts); for a threaded message the
     reply stays in that thread (thread_ts = the event's thread_ts).
     """
-    if not _is_actionable_user_message(event, channel_id, trusted_bot_ids, bot_user_id):
+    if not _is_actionable_user_message(
+        event, channel_id, trusted_bot_ids, bot_user_id, trusted_only
+    ):
         return False
     thread_ts = event.get("thread_ts") or event["ts"]
     conversation.handle_message(thread_ts, event["text"], say)
@@ -107,6 +117,7 @@ def create_app(
     process_before_response: bool = False,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    trusted_only: bool = False,
 ) -> App:
     """Build the Bolt app with the message handler registered.
 
@@ -134,6 +145,7 @@ def create_app(
             conversation,
             trusted_bot_ids=trusted_bot_ids,
             bot_user_id=bot_user_id,
+            trusted_only=trusted_only,
         )
 
     if approvals is not None:
@@ -156,7 +168,12 @@ def create_app(
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
     from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
-    from orchestrator.config import load_onecli_url, load_trusted_bot_ids
+    from orchestrator.config import (
+        ConfigError,
+        load_onecli_url,
+        load_trusted_bot_ids,
+        load_trusted_only,
+    )
     from orchestrator.conversation import ConversationCore
     from orchestrator.llm import ModelRouter
     from orchestrator.notion_client import NotionClient
@@ -183,11 +200,21 @@ def main() -> None:
     # message only counts as a directive when it @mentions this user).
     bot_user_id = web_client.auth_test().get("user_id")
     trusted_bot_ids = load_trusted_bot_ids()
+    trusted_only = load_trusted_only()
+    if trusted_only and not trusted_bot_ids:
+        raise ConfigError(
+            "RDQ_TRUSTED_ONLY is set but RDQ_TRUSTED_BOT_IDS is empty — the bot"
+            " would ignore every message. Set RDQ_TRUSTED_BOT_IDS or unset"
+            " RDQ_TRUSTED_ONLY."
+        )
     if trusted_bot_ids:
         logger.info(
-            "trusted bot ids %s may address the bot (user id %s)",
+            "trusted bot ids %s may address the bot (user id %s)%s",
             sorted(trusted_bot_ids),
             bot_user_id,
+            " — trusted-only mode: plain human messages are ignored"
+            if trusted_only
+            else "",
         )
 
     recorder = None
@@ -247,6 +274,7 @@ def main() -> None:
         client=web_client,
         trusted_bot_ids=trusted_bot_ids,
         bot_user_id=bot_user_id,
+        trusted_only=trusted_only,
     )
     approvals.start()
     reaper.start()

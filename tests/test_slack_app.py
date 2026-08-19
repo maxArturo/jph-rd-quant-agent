@@ -24,6 +24,7 @@ from orchestrator.config import (
     SlackConfig,
     load_slack_config,
     load_trusted_bot_ids,
+    load_trusted_only,
     parse_env_file,
 )
 
@@ -112,6 +113,7 @@ def make_app(
     monkeypatch: pytest.MonkeyPatch,
     trusted_bot_ids: frozenset[str] = frozenset(),
     bot_user_id: str | None = None,
+    trusted_only: bool = False,
 ) -> tuple[App, MagicMock, FakeConversation]:
     client = MagicMock(spec=WebClient)
     client.token = CONFIG.bot_token
@@ -135,6 +137,7 @@ def make_app(
         process_before_response=True,
         trusted_bot_ids=trusted_bot_ids,
         bot_user_id=bot_user_id,
+        trusted_only=trusted_only,
     )
     # Bolt >=1.15 constructs a NEW WebClient per request in _init_context, so
     # say()/context.client would bypass an injected mock and hit the network.
@@ -311,6 +314,76 @@ def test_own_messages_ignored_even_if_own_bot_id_trusted(
     event.update({"bot_id": "B0SELF", "user": BOT_USER})
     dispatch_message(app, event)
     assert conversation.calls == []
+
+
+# --- trusted-only mode (RDQ_TRUSTED_ONLY): Claude is the single input path --
+
+
+def trusted_only_app(monkeypatch: pytest.MonkeyPatch) -> tuple[App, MagicMock, FakeConversation]:
+    return make_app(
+        monkeypatch,
+        trusted_bot_ids=frozenset({TRUSTED_BOT}),
+        bot_user_id=BOT_USER,
+        trusted_only=True,
+    )
+
+
+def test_trusted_only_ignores_plain_human_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Operator<->advisor chatter in the channel must not reach the core.
+    app, client, conversation = trusted_only_app(monkeypatch)
+    dispatch_message(app, user_message("just talking to Claude here", ts="1751900100.001100"))
+    assert conversation.calls == []
+    client.chat_postMessage.assert_not_called()
+
+
+def test_trusted_only_ignores_human_thread_replies(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, client, conversation = trusted_only_app(monkeypatch)
+    dispatch_message(
+        app,
+        user_message("in-thread aside", ts="1751900110.001200", thread_ts="1751900100.001100"),
+    )
+    assert conversation.calls == []
+
+
+def test_trusted_only_still_handles_trusted_bot_mention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, conversation = trusted_only_app(monkeypatch)
+    event = user_message(f"<@{BOT_USER}> today's directive", ts="1751900120.001300")
+    event.pop("user")
+    event.update({"bot_id": TRUSTED_BOT, "subtype": "bot_message", "username": "Claude"})
+    dispatch_message(app, event)
+    assert conversation.calls == [("1751900120.001300", f"<@{BOT_USER}> today's directive")]
+
+
+def test_trusted_only_keeps_the_mention_loop_brake(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, client, conversation = trusted_only_app(monkeypatch)
+    event = user_message("status digest, not addressed to us", ts="1751900130.001400")
+    event.pop("user")
+    event.update({"bot_id": TRUSTED_BOT, "subtype": "bot_message"})
+    dispatch_message(app, event)
+    assert conversation.calls == []
+
+
+def test_load_trusted_only_default_false(tmp_path: Path) -> None:
+    assert load_trusted_only(tmp_path / "nope.env", environ={}) is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes"])
+def test_load_trusted_only_truthy_values(tmp_path: Path, raw: str) -> None:
+    env_file = write_env(tmp_path, f"RDQ_TRUSTED_ONLY={raw}\n")
+    assert load_trusted_only(env_file, environ={}) is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", ""])
+def test_load_trusted_only_falsy_values(tmp_path: Path, raw: str) -> None:
+    env_file = write_env(tmp_path, f"RDQ_TRUSTED_ONLY={raw}\n")
+    assert load_trusted_only(env_file, environ={}) is False
+
+
+def test_load_trusted_only_environ_overrides_file(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, "RDQ_TRUSTED_ONLY=1\n")
+    assert load_trusted_only(env_file, environ={"RDQ_TRUSTED_ONLY": "0"}) is False
 
 
 def test_load_trusted_bot_ids_default_empty(tmp_path: Path) -> None:
