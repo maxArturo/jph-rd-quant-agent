@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -395,6 +395,108 @@ class TestTreasuryRates:
         assert sleeps == [2.0]
 
 
+def news_row(published: str, symbol: str = "AAPL", url: str | None = None) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "publishedDate": published,
+        "publisher": "Reuters",
+        "site": "reuters.com",
+        "title": f"headline {published}",
+        "text": "body",
+        "url": url or f"https://news.example/{symbol}/{published.replace(' ', 'T')}",
+        "image": None,
+    }
+
+
+class TestGetStockNews:
+    def test_short_page_is_jitter_not_end_of_history(self) -> None:
+        # Page 1 comes back short of limit=3 (page-size jitter) but page 2
+        # still has rows — only the EMPTY page 3 may end the walk.
+        client, session, _ = make_client(
+            [
+                FakeResponse(
+                    200,
+                    [
+                        news_row("2026-05-06 15:00:00"),
+                        news_row("2026-05-05 12:00:00"),
+                        news_row("2026-05-04 09:00:00"),
+                    ],
+                ),
+                FakeResponse(200, [news_row("2026-05-03 18:00:00")]),
+                FakeResponse(
+                    200,
+                    [news_row("2026-05-02 11:00:00"), news_row("2026-05-01 10:00:00")],
+                ),
+                FakeResponse(200, []),
+            ]
+        )
+        articles = client.get_stock_news("AAPL", "2026-05-01", "2026-05-31", limit=3)
+        assert len(articles) == 6
+        assert len(session.calls) == 4  # 3 non-empty pages + the terminal empty page
+        assert [call["params"]["page"] for call in session.calls] == ["0", "1", "2", "3"]
+        first = session.calls[0]["params"]
+        assert first == {
+            "symbols": "AAPL",
+            "from": "2026-05-01",
+            "to": "2026-05-31",
+            "limit": "3",
+            "page": "0",
+        }
+
+    def test_returns_ascending_by_published(self) -> None:
+        client, _, _ = make_client(
+            [
+                FakeResponse(
+                    200,
+                    [news_row("2026-05-06 15:00:00"), news_row("2026-05-04 09:30:00")],
+                ),
+                FakeResponse(200, []),
+            ]
+        )
+        articles = client.get_stock_news("AAPL", "2026-05-01", "2026-05-31")
+        assert [a.published for a in articles] == sorted(a.published for a in articles)
+        assert articles[0].title == "headline 2026-05-04 09:30:00"
+        assert articles[0].publisher == "Reuters"
+        assert articles[0].url.startswith("https://news.example/AAPL/")
+
+    def test_dedups_page_boundary_duplicates(self) -> None:
+        dup = news_row("2026-05-04 09:30:00", url="https://news.example/dup")
+        client, _, _ = make_client(
+            [
+                FakeResponse(200, [news_row("2026-05-06 15:00:00"), dup]),
+                FakeResponse(200, [dup, news_row("2026-05-02 08:00:00")]),
+                FakeResponse(200, []),
+            ]
+        )
+        articles = client.get_stock_news("AAPL", "2026-05-01", "2026-05-31")
+        assert len(articles) == 3
+        assert sum(1 for a in articles if a.url == "https://news.example/dup") == 1
+
+    def test_second_resolution_timestamps_parse(self) -> None:
+        client, _, _ = make_client(
+            [FakeResponse(200, [news_row("2026-05-04 09:30:17")]), FakeResponse(200, [])]
+        )
+        (article,) = client.get_stock_news("AAPL", "2026-05-01", "2026-05-31")
+        assert article.published == datetime(2026, 5, 4, 9, 30, 17)
+
+    def test_bad_published_date_raises(self) -> None:
+        client, _, _ = make_client([FakeResponse(200, [news_row("2026-05-04")])])
+        with pytest.raises(FmpError, match="unparseable publishedDate"):
+            client.get_stock_news("AAPL", "2026-05-01", "2026-05-31")
+
+    def test_max_pages_exhausted_raises_loud(self) -> None:
+        pages = [FakeResponse(200, [news_row("2026-05-04 09:30:00")]) for _ in range(3)]
+        client, _, _ = make_client(pages)
+        with pytest.raises(FmpError, match="still returning articles after 2 pages"):
+            client.get_stock_news("AAPL", "2026-05-01", "2026-05-31", max_pages=2)
+
+    def test_start_after_end_raises(self) -> None:
+        client, session, _ = make_client([])
+        with pytest.raises(ValueError, match="after end"):
+            client.get_stock_news("AAPL", "2026-05-31", "2026-05-01")
+        assert session.calls == []
+
+
 @pytest.mark.live
 @pytest.mark.skipif(
     os.environ.get("RDQ_LIVE_TESTS") != "1",
@@ -428,3 +530,11 @@ class TestLiveSmoke:
         assert all(curve.year10 is not None and curve.year10 > 0 for curve in curves)
         dates = [curve.date for curve in curves]
         assert dates == sorted(set(dates))  # ascending, boundary dates deduped
+
+    def test_aapl_one_week_news_paginates(self) -> None:
+        client = FmpClient()
+        articles = client.get_stock_news("AAPL", "2026-05-04", "2026-05-08", limit=25)
+        assert len(articles) > 25  # forces at least one page boundary at limit=25
+        assert all(date(2026, 5, 4) <= a.published.date() <= date(2026, 5, 8) for a in articles)
+        assert any(a.published.second != 0 for a in articles)  # second resolution
+        assert all(a.url for a in articles)

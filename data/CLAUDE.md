@@ -42,6 +42,23 @@
   MARKET_FIELDS the store lacks and forces a rebuild even with no new equity bars.
   GOTCHA: this only covers `mkt_*`-prefixed broadcast bins — any future per-ticker raw
   field (e.g. US-014's news_ct_1d) needs its own carry-through or a refresh drops it.
+- Stock news (US-071/072): `FmpClient.iter_stock_news_pages`/`get_stock_news` walk
+  /stable/news/stock (newest-first). TERMINATION RULE: the endpoint has page-size
+  jitter — mid-stream pages come back short of `limit` with more history behind;
+  ONLY an empty page ends the walk, never a short page. `publishedDate` is
+  US/Eastern wall-clock at second resolution — keep it naive, never tz-convert.
+- News counts (`data/build_news.py`): PIT cutoff is strictly-after 16:00:00 ET ->
+  next trading day (16:00:00 exactly = same day); bucketing is pure date/time
+  arithmetic on the store calendar, DST-safe because timestamps are already ET.
+  Layout under the news root (default ~/rdq-data/news): `archive/<SYM>/<date>.json`
+  (raw ts/headline/url/publisher keyed by PUBLISHED date — sentiment scoring later
+  reads this, never refetches; date files rewritten wholesale per fetch) and
+  `checkpoints/<SYM>.json` keyed by (start, end) window. Counts ALWAYS derive from
+  the archive (`daily_counts`: gapless, 0 on no-news trading days); an article
+  published after the window's last close stays archived and counts once a later
+  window covers the next trading day. GOTCHA (same trap as mkt_*): US-014's
+  news_ct_1d bins will be DROPPED by refresh rebuilds unless US-015 adds a
+  read-back+carry.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's
