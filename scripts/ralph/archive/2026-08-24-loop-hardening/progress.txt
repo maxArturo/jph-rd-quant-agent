@@ -1,0 +1,13 @@
+# Ralph Progress Log
+Started: Mon Aug 24 2026 (data-substrate-expansion)
+---
+## Codebase Patterns
+- `make check` = ruff + pyright + pytest (~2 min). Run it before every commit; the tree can carry PRE-EXISTING failures from prior commits — fix them minimally (they block your commit too).
+- StateStore._connect sets WAL + timeout=30; keep any new sqlite connection on the same settings.
+- Schema changes to an EXISTING table need `CREATE ... IF NOT EXISTS` in _SCHEMA plus a guarded ALTER in migrate() (see runs.universe_tickers).
+- pyright venv is .venv; torch is not installed (docker-only) — suppress with `# pyright: ignore[reportMissingImports]` for container-side scripts.
+- The unit files in ops/ are SYMLINKED into ~/.config/systemd/user — editing the repo file + daemon-reload is enough, no reinstall.
+- systemctl --user from agent shells needs XDG_RUNTIME_DIR=/run/user/$(id -u) exported first.
+- Live FMP calls go through `onecli run --agent rdq-research -- curl ...` (proxy injects the key; see ops/check_onecli.sh). Never in pytest — fixtures only.
+- PRD context: tasks/prd-data-substrate-expansion.md. Probe findings already verified 2026-08-24 (see PRD US-064/US-071 "Pre-verified" blocks): all 8 market symbols available; /stable/treasury-rates silently truncates windows >~90 days (must chunk); news publishedDate is US/Eastern, history reaches 2025-01-02, pagination limit=250 works.
+- Refresh-parity is the load-bearing invariant (c9587797 postmortem, docs/decisions.md 2026-08-18): a new field exists only when it's in the bin store + factor-source folder + daily refresh + snapshot manifest, and passes exact-weights re-predict Spearman >= 0.98.

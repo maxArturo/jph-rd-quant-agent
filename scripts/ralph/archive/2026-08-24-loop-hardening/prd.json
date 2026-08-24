@@ -15,8 +15,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "data/menu.py + tests/test_menu.py + docs/reference/data-menu.md. Doc is schema-only (no volatile store facts) so the drift test is hermetic AND the checked-in doc survives daily refreshes."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",

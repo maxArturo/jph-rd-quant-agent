@@ -61,6 +61,11 @@
   Reading the store bins directly with numpy reproduces `D.features(...).swaplevel()
   .sort_index()` exactly and avoids the multi-second qlib import — but note
   `pd.DataFrame.to_hdf` APPENDS to an existing file; unlink first when regenerating.
+- `data/menu.py` is the single source of truth for "what data exists" (US-061):
+  store introspection + `CURATED_FIELDS`. Adding a store field requires a curated
+  entry AND regenerating the doc (`python -m data.menu --write-doc`) or the drift
+  test in tests/test_menu.py fails. The doc is deliberately schema-only — never
+  embed calendar dates/universe counts in it (they change with each daily refresh).
 - `data/adjust.py` is the ONLY place adjustment math lives: backward adjustment, factor
   1.0 on the window's last bar, events strictly-before-ex-date get the multiplier
   (split: 1/ratio; dividend: (prev_close - D)/prev_close using the last bar close before
