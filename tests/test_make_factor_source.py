@@ -8,16 +8,27 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from data.build_store import MARKET_FIELDS
 from data.make_factor_source import (
     COLUMNS,
+    MARKET_H5,
     FactorSourceError,
     debug_subset,
+    load_market_frame,
     load_universe_frame,
     main,
     make_factor_source,
 )
 from data.make_universe import make_universe
-from tests.test_build_store import DAYS, build_from_fmp, five_ticker_client
+from tests.test_build_store import (
+    DAYS,
+    MarketFakeFmp,
+    build_from_fmp,
+    commodity_price,
+    five_ticker_client,
+    make_bars,
+    market_five_ticker_client,
+)
 
 FIVE = ["AAPL", "AMZN", "GOOG", "MSFT", "NVDA"]
 
@@ -29,6 +40,23 @@ def store(tmp_path: Path) -> Path:
     build_from_fmp(FIVE, DAYS[0], DAYS[-1], store, tmp_path / "ckpt", five_ticker_client())
     make_universe("fixture_univ", store, tickers=",".join(FIVE))
     make_universe("pair", store, tickers="AAPL,NVDA")
+    return store
+
+
+@pytest.fixture
+def market_store(tmp_path: Path) -> Path:
+    """Five-ticker fixture store that also carries all 8 $mkt_* broadcast fields."""
+    store = tmp_path / "us_data_mkt"
+    build_from_fmp(
+        FIVE,
+        DAYS[0],
+        DAYS[-1],
+        store,
+        tmp_path / "ckpt_mkt",
+        market_five_ticker_client(),
+        market_start=DAYS[0],
+    )
+    make_universe("fixture_univ", store, tickers=",".join(FIVE))
     return store
 
 
@@ -105,6 +133,94 @@ def test_regeneration_overwrites_stale_output(store: Path, tmp_path: Path) -> No
     assert isinstance(frame, pd.DataFrame)
     assert set(frame.index.get_level_values("instrument")) == {"AAPL", "NVDA"}
     assert (output / "daily_pv_all.h5").stat().st_size <= before
+
+
+# ---------------------------------------------------------------------------
+# market_series.h5 companion (US-068)
+
+
+def test_market_h5_written_to_both_folders_with_identical_schema(
+    market_store: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "src"
+    make_factor_source("fixture_univ", market_store, output, debug_days=3)
+    frames: dict[str, pd.DataFrame] = {}
+    for folder in ("data_folder", "data_folder_debug"):
+        path = output / folder / MARKET_H5
+        assert path.exists()
+        frame = pd.read_hdf(path, key="data")
+        assert isinstance(frame, pd.DataFrame)
+        assert isinstance(frame.index, pd.DatetimeIndex)
+        assert not isinstance(frame.index, pd.MultiIndex)
+        assert list(frame.columns) == sorted(f"${f}" for f in MARKET_FIELDS)
+        frames[folder] = frame
+
+    full = frames["data_folder"]
+    assert list(full.index) == [pd.Timestamp(d) for d in DAYS]
+    np.testing.assert_allclose(
+        full["$mkt_brent"].to_numpy(),
+        [commodity_price("BZUSD", i) for i in range(len(DAYS))],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        full["$mkt_y10"].to_numpy(), [4.0 + 0.1 * i for i in range(len(DAYS))], rtol=1e-6
+    )
+
+
+def test_debug_market_h5_windowed_like_daily_pv_debug(
+    market_store: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "src"
+    make_factor_source("fixture_univ", market_store, output, debug_days=3)
+    debug_pv = pd.read_hdf(output / "data_folder_debug" / "daily_pv.h5", key="data")
+    debug_market = pd.read_hdf(output / "data_folder_debug" / MARKET_H5, key="data")
+    assert isinstance(debug_pv, pd.DataFrame) and isinstance(debug_market, pd.DataFrame)
+    pv_dates = debug_pv.index.get_level_values("datetime").unique()
+    assert list(debug_market.index) == list(pv_dates)
+    full_market = pd.read_hdf(output / "data_folder" / MARKET_H5, key="data")
+    assert isinstance(full_market, pd.DataFrame)
+    pd.testing.assert_frame_equal(debug_market, full_market.loc[pv_dates])
+
+
+def test_market_readme_lines_in_both_folders(market_store: Path, tmp_path: Path) -> None:
+    output = tmp_path / "src"
+    make_factor_source("fixture_univ", market_store, output)
+    for folder in ("data_folder", "data_folder_debug"):
+        readme = (output / folder / "README.md").read_text()
+        assert 'pd.read_hdf("market_series.h5", key="data")' in readme
+        assert "ONE value per date shared by ALL instruments" in readme
+        assert "betas, spreads" in readme
+        assert "NEVER use a market series as a cross-sectional signal on its own" in readme
+
+
+def test_market_nan_before_first_observation(tmp_path: Path) -> None:
+    store = tmp_path / "us_data_late_mkt"
+    client = MarketFakeFmp(
+        bars={sym: make_bars(sym) for sym in ("AAPL", "NVDA")}, market_days=DAYS[1:]
+    )
+    build_from_fmp(
+        ["AAPL", "NVDA"], DAYS[0], DAYS[-1], store, tmp_path / "ckpt", client,
+        market_start=DAYS[0],
+    )
+    frame = load_market_frame(store, ["AAPL", "NVDA"])
+    assert frame is not None
+    assert np.isnan(frame["$mkt_gold"].iloc[0])
+    assert not frame["$mkt_gold"].iloc[1:].isna().any()
+
+
+def test_store_without_market_bins_writes_no_market_h5(
+    store: Path, market_store: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "src"
+    # First generate from the market-carrying store, then regenerate from the
+    # plain store into the SAME output: stale market files must disappear.
+    make_factor_source("fixture_univ", market_store, output)
+    make_factor_source("fixture_univ", store, output)
+    for folder in ("data_folder", "data_folder_debug"):
+        assert not (output / folder / MARKET_H5).exists()
+        readme = (output / folder / "README.md").read_text()
+        assert "market_series.h5" not in readme
+    assert load_market_frame(store, FIVE) is None
 
 
 # ---------------------------------------------------------------------------

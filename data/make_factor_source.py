@@ -8,10 +8,16 @@ Output layout under --output (the future FACTOR_CoSTEER_DATA_FOLDER root):
 - daily_pv_all.h5    full universe frame (mirrors upstream generate.py naming)
 - daily_pv_debug.h5  debug subset: last --debug-days trading days x first
                      --debug-instruments symbols (upstream uses ~2y x 100)
-- data_folder/       daily_pv.h5 (= all) + README.md - point
+- data_folder/       daily_pv.h5 (= all) + market_series.h5 + README.md - point
                      FACTOR_CoSTEER_DATA_FOLDER here (US-017)
-- data_folder_debug/ daily_pv.h5 (= debug) + README.md - point
+- data_folder_debug/ daily_pv.h5 (= debug) + market_series.h5 (windowed to the
+                     debug trading-day span) + README.md - point
                      FACTOR_CoSTEER_DATA_FOLDER_DEBUG here
+
+market_series.h5 (US-068) carries the store's $mkt_* broadcast series as a
+plain DatetimeIndex x columns frame (key="data"); it is only written when the
+store actually holds mkt_* bins, and both folders always agree on the file set
+(RD-Agent linking contract: same filenames, README describes them).
 
 RD-Agent links every file in the data folder into each factor workspace and
 prompts the LLM with descriptions of the DEBUG folder's files, so both folders
@@ -41,6 +47,7 @@ from data.build_store import DEFAULT_STORE_PATH, FREQ
 ALL_H5 = "daily_pv_all.h5"
 DEBUG_H5 = "daily_pv_debug.h5"
 CONSUMABLE_H5 = "daily_pv.h5"
+MARKET_H5 = "market_series.h5"
 HDF_KEY = "data"
 # Column order matches upstream rdagent factor_data_template/generate.py.
 COLUMNS = ("$open", "$close", "$high", "$low", "$volume", "$factor")
@@ -72,6 +79,28 @@ $high: adjusted high price of the stock on that day.
 $low: adjusted low price of the stock on that day.
 $volume: adjusted volume of the stock on that day (raw volume / factor).
 $factor: price adjustment factor of the stock on that day.
+"""
+
+MARKET_README_TEXT = """\
+
+## Market-level daily series
+
+| Filename            | Description                                                          |
+| ------------------- | ---------------------------------------------------------------------|
+| "market_series.h5"  | Market-level daily series (energy, gold, dollar index, 10y yield).   |
+
+```Python
+import pandas as pd
+market = pd.read_hdf("market_series.h5", key="data")
+```
+Index: DatetimeIndex, one row per trading day (NOT a MultiIndex).
+Columns: $mkt_* series, e.g. $mkt_brent (Brent crude), $mkt_y10 (10-year treasury yield).
+Each column holds ONE value per date shared by ALL instruments (market-level data,
+broadcast to every stock). Values are NaN before a series' first observation.
+Use these for betas, spreads, or to condition/interact a per-ticker signal.
+NEVER use a market series as a cross-sectional signal on its own: it is identical
+across all instruments on a given date, so alone it carries zero cross-sectional
+information.
 """
 
 
@@ -146,6 +175,39 @@ def load_universe_frame(store: Path, universe: str) -> pd.DataFrame:
     return pd.concat(parts).sort_index()
 
 
+def load_market_frame(store: Path, symbols: Sequence[str]) -> pd.DataFrame | None:
+    """The store's $mkt_* broadcast series as a DatetimeIndex x columns frame.
+
+    Returns None when the store carries no mkt_* bins (pre-introduction store).
+    Values are identical across instruments, so every symbol's bin is overlaid
+    to reconstruct the full calendar span even when no single ticker spans the
+    whole store (same recovery approach as data/refresh.py). Days before a
+    series' first observation stay NaN.
+    """
+    calendar = _read_calendar(store)
+    suffix = f".{FREQ}.bin"
+    fields: set[str] = set()
+    for symbol in symbols:
+        feature_dir = store / "features" / symbol.lower()
+        fields.update(p.name[: -len(suffix)] for p in feature_dir.glob(f"mkt_*{suffix}"))
+    if not fields:
+        return None
+    columns: dict[str, np.ndarray] = {}
+    for field in sorted(fields):
+        values = np.full(len(calendar), np.nan, dtype=np.float32)
+        for symbol in symbols:
+            start, points = _read_feature(store, symbol, field)
+            if start + len(points) > len(calendar):
+                raise FactorSourceError(
+                    f"{symbol} market bin {field} exceeds calendar length in {store}"
+                )
+            segment = values[start : start + len(points)]
+            mask = np.isnan(segment)
+            segment[mask] = points[mask]
+        columns[f"${field}"] = values
+    return pd.DataFrame(columns, index=calendar)
+
+
 def debug_subset(
     frame: pd.DataFrame,
     debug_days: int = DEFAULT_DEBUG_DAYS,
@@ -183,20 +245,36 @@ def make_factor_source(
     store = store.expanduser()
     output = output.expanduser()
     frame = load_universe_frame(store, universe)
+    market = load_market_frame(store, read_universe_symbols(store, universe))
     output.mkdir(parents=True, exist_ok=True)
 
     all_path = output / ALL_H5
     debug_path = output / DEBUG_H5
+    debug_frame = debug_subset(frame, debug_days, debug_instruments)
+    debug_dates = debug_frame.index.get_level_values("datetime").unique()
     _write_h5(frame, all_path)
-    _write_h5(debug_subset(frame, debug_days, debug_instruments), debug_path)
+    _write_h5(debug_frame, debug_path)
 
-    for folder, source in (("data_folder", all_path), ("data_folder_debug", debug_path)):
+    for folder, source, windowed in (
+        ("data_folder", all_path, market),
+        (
+            "data_folder_debug",
+            debug_path,
+            None if market is None else market.loc[market.index.isin(debug_dates)],
+        ),
+    ):
         target_dir = output / folder
         target_dir.mkdir(exist_ok=True)
         target = target_dir / CONSUMABLE_H5
         target.unlink(missing_ok=True)
         shutil.copy(source, target)
-        (target_dir / "README.md").write_text(README_TEXT)
+        market_target = target_dir / MARKET_H5
+        market_target.unlink(missing_ok=True)  # drop stale copies when the store has none
+        readme = README_TEXT
+        if windowed is not None:
+            _write_h5(windowed, market_target)
+            readme += MARKET_README_TEXT
+        (target_dir / "README.md").write_text(readme)
     return all_path, debug_path
 
 

@@ -81,6 +81,12 @@
   `pd.read_hdf(..., key="data")`. Our generator writes `daily_pv_all.h5`/`daily_pv_debug.h5`
   at the output root (upstream generate.py naming) plus ready-to-point `data_folder/` and
   `data_folder_debug/` subfolders — US-017 sets the env vars to those subfolders.
+  Both folders also get `market_series.h5` (US-068: plain DatetimeIndex x `$mkt_*`
+  columns, key="data"; debug variant windowed to the debug frame's trading days) plus a
+  README section on market-level semantics — but ONLY when the store carries mkt_* bins;
+  a pre-introduction store yields no market file, no README section, and stale copies
+  are removed on regeneration. Adding a new companion file means BOTH folders get the
+  same filename and the README describes it, or the coder LLM misuses/misses it.
 - The daily_pv frame contract (upstream parity, tested against qlib `D.features`):
   MultiIndex `(datetime, instrument)`, float32 columns
   `$open/$close/$high/$low/$volume/$factor`, rows only inside each instrument's own span.

@@ -121,8 +121,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "load_market_frame (bin overlay, NaN heads) + MARKET_H5 into both folders (debug windowed to debug_frame dates) + MARKET_README_TEXT appended conditionally. Store without mkt bins -> no file, base README, stale copies removed. 5 new tests."
     },
     {
       "id": "US-009",
