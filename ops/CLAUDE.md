@@ -258,7 +258,29 @@
   backtested run's recorded mlflow `task` artifact (model class, static
   parquet deps, learn/infer processors); no match raises instead of
   snapshotting the wrong conf silently.
-- `ops/promotion_decision.py` (US-012) is how ops-side code writes Notion
+- `ops/parity_check.py` (US-069) is the refresh-parity harness for NEW store
+  fields: `python -m ops.parity_check --field '$mkt_brent'` / `--all-mkt`
+  trains a throwaway LGBM factor referencing the field (workspace under
+  `~/rdq-runs/parity_check/<field>/`, recreated per run), snapshots it with
+  the REAL `snapshot_pred_refresh`, re-predicts via `confirm_window
+  ._run_repredict` with test_end at the store calendar end, and requires
+  mean per-day spearman >= 0.98 between the re-predicted and backtested
+  preds. Run it whenever a new series family lands (US-073 news: extend with
+  `--field '$news_ct_1d'`). Market-level fields enter the features relative
+  to $close (a raw broadcast series is cross-sectionally constant —
+  degenerate scores); keep that property when adding expressions. The conf
+  it writes MUST keep a `choose_source_conf`-recognized filename and jinja
+  date placeholders WITH `| default(..., true)` filters (an Undefined render
+  must stay parseable or the snapshot's task-signature match breaks). Tests
+  fake both containers through the shared `Runner` seam — the fake train
+  runner must write qrun's "Render the template with the context: {...}"
+  line into the log (recover_context reads it) plus a task pickle that
+  signature-matches the conf. Docker containers write ROOT-owned files —
+  including a nested `workspace/qlib_workspace/mlruns/filelock` OUTSIDE
+  mlruns/ — so the in-container exit chmod must cover the whole workspace,
+  and stale-workspace deletion goes through `_remove_workspace` (docker
+  chmod fallback on PermissionError); reuse it for any new throwaway-
+  workspace flow.
   Decision Log rows: the bearer only injects under `onecli run --agent
   rdq-orchestrator`, so promote_fetched and the pipeline's auto-promotion
   build a JSON payload (`build_payload`) and hop identities with
