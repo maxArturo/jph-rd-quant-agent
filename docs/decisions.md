@@ -1254,3 +1254,45 @@ unable to follow what was being tested.
    in an incoming message is honored but never required. Claude was asked
    (channel message, 2026-08-19) to update its channel memory to send
    human-readable suggestions and leave the technical crafting to the bot.
+
+## 2026-08-24 — US-064: FMP market-series probe — symbols, endpoints, and the treasury window cap pinned
+
+**Problem:** the data-substrate expansion (US-066..069) ingests energy/macro
+market series from FMP, but commodity/index symbol availability varies by
+plan, and an ad-hoc 2026-08-24 probe had found the treasury endpoint silently
+truncates wide windows. Those findings needed to be a repeatable check, not a
+one-off terminal session.
+
+**Decision:** `ops/probe_market_series.sh` formalizes the probe. It fetches
+each series over the store window through the OneCLI proxy (`onecli run
+--agent rdq-research -- curl ...`), reports rows/first/last/coverage vs NYSE
+trading days from the store calendar, treats any non-200 or empty response as
+a printed FAILURE with nonzero exit, and asserts the treasury cap by
+demonstrating a single full-window request returns fewer rows than the
+chunked fetch.
+
+**Probe outcome (live run 2026-08-24, window 2025-01-02 → 2026-08-23, 410
+NYSE trading days):** all eight targets are available on the current plan —
+no substitutes or drops needed.
+
+| Series | Symbol / endpoint | Rows | Coverage |
+|---|---|---|---|
+| Brent | `BZUSD` `/stable/historical-price-eod/light` | 462 | 112.7% |
+| WTI | `CLUSD` (same endpoint) | 462 | 112.7% |
+| Heating oil (diesel proxy) | `HOUSD` | 461 | 112.4% |
+| Natural gas | `NGUSD` | 460 | 112.2% |
+| Gasoline | `RBUSD` | 461 | 112.4% |
+| Gold | `GCUSD` | 461 | 112.4% |
+| US dollar index | `DXUSD` | 468 | 114.1% |
+| Treasury curve (incl. `year10`) | `/stable/treasury-rates`, chunked ≤90 days | 410 | 100.0% |
+
+Commodity coverage exceeds 100% because commodities trade on some NYSE
+holidays — the store integration (US-066) broadcasts onto equity trading days
+and forward-fills, so extra observations are harmless.
+
+**The treasury cap, demonstrated:** a single request for the full 599-day
+window returned 62 rows (the trailing ~3 months) with HTTP 200 — no error,
+just silent truncation at ~90 calendar days. The chunked fetch (7 requests,
+≤90 calendar days each) returned the full 410 rows. `get_treasury_rates`
+(US-065) must therefore chunk to ≤90 calendar days per request and merge;
+the probe fails loud if the cap ever stops being handled.

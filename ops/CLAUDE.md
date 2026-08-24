@@ -19,6 +19,13 @@
 - Scripts must pass shellcheck; use `set -euo pipefail` for setup-style
   scripts, `set -uo pipefail` (no `-e`) for check-style scripts that collect
   failures.
+- Scripts that wrap `onecli run -- curl` are offline-testable by putting a
+  stub `onecli` (python shebang) first on PATH (tests/test_probe_market_series.py
+  pattern, mirroring test_health.py's stub binaries) — give such scripts env
+  overrides for window/calendar so tests can pin them.
+- FMP `/stable/treasury-rates` silently truncates windows wider than ~90
+  calendar days (HTTP 200, trailing ~3 months only) — always chunk; the cap is
+  asserted by ops/probe_market_series.sh (docs/decisions.md 2026-08-24).
 
 ## GPU burst worker (ops/gpu_worker/)
 

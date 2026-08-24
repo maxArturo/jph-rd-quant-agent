@@ -41,3 +41,16 @@ Started: Mon Aug 24 11:24:42 AM UTC 2026
   - Multi-turn FakeClient tests: grab the latest tool_result via stream_calls[-1]["messages"][-1]["content"][0] — absolute indices break once history accumulates.
   - StateStore migration pattern for directives now mirrors runs: add column to _SCHEMA AND a guarded ALTER keyed on PRAGMA table_info(directives).
 ---
+## 2026-08-24 ~15:00 UTC - US-004
+- Formalized the FMP market-series probe: ops/probe_market_series.sh fetches BZUSD/CLUSD/HOUSD/NGUSD/RBUSD/GCUSD/DXUSD via /stable/historical-price-eod/light and the treasury curve via /stable/treasury-rates chunked <=90 calendar days, every request through `onecli run --agent rdq-research -- curl`. Non-200/empty/non-array => printed FAILURE + exit 1 (check-style `set -uo pipefail`, failures collected). Coverage reported vs NYSE trading days from the store calendar. Treasury cap asserted: single full-window request must return FEWER rows than the chunked fetch. Verifies `year10` present (needed for $mkt_y10). Env overrides RDQ_PROBE_{AGENT,START,END,CALENDAR} for tests.
+- Files: ops/probe_market_series.sh (new), tests/test_probe_market_series.py (new, 7 tests incl. shellcheck), docs/decisions.md (2026-08-24 US-064 entry), ops/CLAUDE.md (stub-onecli test pattern + treasury cap note).
+- Verified: make check green (1389 passed, 3 skipped). LIVE run on-box through OneCLI, all clean:
+  - Window 2025-01-02 -> 2026-08-23, 410 NYSE trading days. BZUSD 462 rows (112.7%), CLUSD 462, HOUSD 461, NGUSD 460, RBUSD 461, GCUSD 461, DXUSD 468 (114.1%, has weekend rows through 2026-08-23); all first=2025-01-02.
+  - treasury-rates: 410 rows, 100.0% coverage, 7 chunked requests. Cap PROVEN: single full-window (599-day) request returned 62 rows (HTTP 200, silent truncation) < 410 chunked.
+- **Learnings for future iterations:**
+  - Commodity EOD /light rows are {symbol, date, price, volume} — no OHLC; treasury rows are {date, month1..year30}. Commodities trade some NYSE holidays (coverage >100% vs equity calendar) and DXUSD even has weekend rows — US-006's broadcast must select/ffill onto the equity calendar, not assume 1:1 dates.
+  - Treasury cap for US-005 get_treasury_rates: chunk <=90 CALENDAR days; truncation is silent (200 + trailing ~3 months) so a merged-result row-count sanity check is worthwhile.
+  - Stub-onecli PATH-shim testing works cleanly for `onecli run -- curl` wrappers (stub parses -o <file> and last-arg URL, prints http code); driven by PROBE_STUB_MODE/PROBE_STUB_BAD_SYMBOL env.
+  - onecli lives at ~/.local/bin (not on default non-login PATH — export before running ops scripts by hand).
+  - dict.update(kw=..., **extra) collides when extra carries the same key — use a merged dict literal in test helpers with overridable defaults.
+---

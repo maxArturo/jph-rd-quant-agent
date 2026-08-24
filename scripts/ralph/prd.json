@@ -61,8 +61,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/probe_market_series.sh + tests/test_probe_market_series.py (stub-onecli, no live HTTP) + docs/decisions.md 2026-08-24 US-064 entry. Live run clean: all 7 symbols + treasury 100% coverage; cap proven (62 rows single vs 410 chunked). RDQ_PROBE_* env overrides for tests."
     },
     {
       "id": "US-005",
