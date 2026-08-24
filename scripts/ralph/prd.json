@@ -151,8 +151,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/parity_check.py: train (throwaway LGBM, conf_baseline.yaml, ~/rdq-runs/parity_check/<field>/) -> snapshot_pred_refresh -> confirm_window._run_repredict(test_end=calendar end) -> mean per-day spearman. Live: $close guard 1.0000; --all-mkt 8/8 PASS, spearman 1.0000 over 102 overlap days each. Prod-store mkt introduction (--market-start) was already done before this iteration."
     },
     {
       "id": "US-011",
