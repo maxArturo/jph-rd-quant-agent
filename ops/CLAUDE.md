@@ -142,8 +142,16 @@
 - Base snapshots (US-022, `ops/gpu_snapshot.py`): worker boots are keyed on a
   short worker-inputs hash (research/PINNED_COMMIT + gpu_worker.sh + the
   Makefile venv targets + a STRUCTURAL store marker — field/calendar names
-  only; store CONTENT rolls daily and must never churn the hash) embedded in
-  the image name `rdq-gpu-base-<hash>-<ts>`. Selection is hash+REGION matched
+  only; store CONTENT rolls daily and must never churn the hash — + the
+  market-series manifest: ordered series names + schema version, US-068)
+  embedded in the image name `rdq-gpu-base-<hash>-<ts>`. When the data
+  substrate grows a new series family (US-014 news), extend
+  `market_series_manifest` (or bump MARKET_MANIFEST_SCHEMA_VERSION on a
+  contract change) so pre-expansion snapshots stop matching. The factor-source
+  sync ships FOLDER CONTENTS verbatim (companion files like market_series.h5
+  flow automatically); `gpu_worker.sh sync-list` prints that exact rsync file
+  list — keep the bootstrap rsync sourced from FACTOR_SOURCE_DIR and
+  filter-free, tests assert both. Selection is hash+REGION matched
   (snapshots are regional — the size-plan fallback must never boot an image
   that isn't in its region); no match = full bootstrap + auto-rebake at
   teardown (before destroy), pruning to the newest 2 images. All

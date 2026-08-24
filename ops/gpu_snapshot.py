@@ -10,6 +10,9 @@ baked into a DO image named ``rdq-gpu-base-<hash>-<YYYYmmdd-HHMM>``, where
 - a STRUCTURAL store marker (feature field names + calendar files — the
   store's data content changes daily and rsyncs on every bootstrap anyway,
   so it must never force a rebake; only layout changes matter)
+- the market-series manifest (ordered $mkt_* series names + a schema version
+  string, US-068) — snapshots baked before a substrate expansion must never
+  be selected for runs that expect the new fields
 
 At launch ops/gpu_pipeline.py selects the newest image whose hash AND region
 both match (snapshots are regional — a size-plan fallback into another region
@@ -34,9 +37,11 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from data.build_store import MARKET_FIELDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,6 +58,23 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 def qlib_store_path() -> Path:
     return Path(os.environ.get("RDQ_QLIB_STORE", "~/.qlib/qlib_data/us_data")).expanduser()
+
+
+# Bump when the market-series companion contract changes shape (not just when
+# a series is added — the series list is hashed on its own); pre-bump
+# snapshots stop matching and rebake on their next run.
+MARKET_MANIFEST_SCHEMA_VERSION = "market-series-v1"
+
+
+def market_series_manifest(
+    series: Sequence[str] = MARKET_FIELDS,
+    schema_version: str = MARKET_MANIFEST_SCHEMA_VERSION,
+) -> str:
+    """The market-series manifest hashed into the worker-inputs digest: the
+    ordered series names the substrate carries plus a schema version string.
+    Any change (new series, contract bump) invalidates existing snapshots, so
+    a run expecting $mkt_* fields can never select a pre-expansion image."""
+    return json.dumps({"schema_version": schema_version, "series": list(series)})
 
 
 def _makefile_venv_targets(text: str) -> str:
@@ -96,18 +118,24 @@ def store_schema_marker(store: Path) -> str:
     return json.dumps({"fields": fields, "calendars": calendars}, sort_keys=True)
 
 
-def worker_inputs_hash(repo_root: Path = REPO_ROOT, store: Path | None = None) -> str:
+def worker_inputs_hash(
+    repo_root: Path = REPO_ROOT,
+    store: Path | None = None,
+    market_manifest: str | None = None,
+) -> str:
     """Short digest over every worker-affecting input; embedded in the
     snapshot name so drift is detectable by name alone. Raises on a missing
     input file — an unhashable tree must fail loud, not bake a mislabeled
     image."""
     store = store if store is not None else qlib_store_path()
+    manifest = market_manifest if market_manifest is not None else market_series_manifest()
     parts = [
         ("pinned_commit", (repo_root / "research" / "PINNED_COMMIT").read_text().strip()),
         ("install_sh", (repo_root / "research" / "install.sh").read_text()),
         ("gpu_worker_sh", (repo_root / "ops" / "gpu_worker" / "gpu_worker.sh").read_text()),
         ("makefile_venv", _makefile_venv_targets((repo_root / "Makefile").read_text())),
         ("store_schema", store_schema_marker(store)),
+        ("market_manifest", manifest),
     ]
     digest = hashlib.sha256()
     for label, payload in parts:

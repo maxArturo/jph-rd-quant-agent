@@ -17,6 +17,7 @@
 #   gpu_worker.sh snapshot              # bake worker into rdq-gpu-base-<hash>-* image
 #   gpu_worker.sh ssh <cmd...>          # arbitrary remote command (worker SSH opts)
 #   gpu_worker.sh status                # droplet / tunnel / run / GPU utilization
+#   gpu_worker.sh sync-list             # print the factor-source file list bootstrap ships
 #   gpu_worker.sh fetch                 # rsync results back under the state dir
 #   gpu_worker.sh destroy [--force]     # delete the droplet (BILLING STOPS HERE)
 #
@@ -50,6 +51,11 @@ STATE_DIR="${RDQ_GPU_STATE_DIR:-${HOME}/rdq-runs/gpu_worker}"
 SSH_KEY="${RDQ_GPU_SSH_KEY:-${HOME}/.ssh/rdq_gpu_worker}"
 
 STATE_FILE="${STATE_DIR}/worker.env"
+# Everything under here ships to the worker VERBATIM (no rsync filters) — the
+# per-universe data_folder(_debug) contents, incl. companion files like
+# market_series.h5, are part of the sync manifest (US-068). cmd_sync_list
+# prints the exact file list; keep bootstrap's rsync sourced from this var.
+FACTOR_SOURCE_DIR="${HOME}/rdq-data/factor_source"
 TUNNEL_UNIT="rdq-gpu-tunnel"
 REMOTE_REPO="/root/rd-agent-q"
 PROXY_ENV_FILE="/root/rdq-proxy.env"
@@ -60,7 +66,7 @@ RUN_LOG="/root/rdq-runs/gpu-run.log"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 usage() {
-  sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -270,7 +276,7 @@ cmd_bootstrap() {
   rsync_remote "${HOME}/.qlib/qlib_data/us_data/" "root@${DROPLET_IP}:/root/.qlib/qlib_data/us_data/"
   # ALL universes ship (factor sources + rendered per-universe templates), so
   # runs against operator-created universes need no extra sync step.
-  rsync_remote "${HOME}/rdq-data/factor_source/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/"
+  rsync_remote "${FACTOR_SOURCE_DIR}/" "root@${DROPLET_IP}:/root/rdq-data/factor_source/"
   if [[ -d "${HOME}/rdq-data/templates" ]]; then
     rsync_remote "${HOME}/rdq-data/templates/" "root@${DROPLET_IP}:/root/rdq-data/templates/"
   fi
@@ -288,7 +294,7 @@ require_local_layout() {
   [[ -f "${REPO_ROOT}/research/.env" ]] \
     || fail "missing ${REPO_ROOT}/research/.env (copy research/.env.example) — the worker run sources it"
   [[ -d "${HOME}/.qlib/qlib_data/us_data" ]] || fail "missing ~/.qlib/qlib_data/us_data on the control box"
-  [[ -d "${HOME}/rdq-data/factor_source/us_liquid" ]] || fail "missing ~/rdq-data/factor_source/us_liquid"
+  [[ -d "${FACTOR_SOURCE_DIR}/us_liquid" ]] || fail "missing ${FACTOR_SOURCE_DIR}/us_liquid"
   [[ -f "${HOME}/.onecli/ca-bundle.pem" ]] || fail "missing ~/.onecli/ca-bundle.pem (OneCLI proxy CA)"
   docker image inspect local_qlib:latest >/dev/null 2>&1 \
     || fail "local_qlib:latest not present locally — build it first (see rdq-research.service comments)"
@@ -523,6 +529,18 @@ cmd_status() {
   remote "tail -n 8 ${RUN_LOG} 2>/dev/null" || echo "(no run log yet)"
 }
 
+cmd_sync_list() {
+  # The factor-source half of the bootstrap sync manifest: exactly the files
+  # rsync would ship to /root/rdq-data/factor_source (same flags, no filters),
+  # one per line. Companion files (market_series.h5, README.md) must appear
+  # here or GPU workspaces silently lack them (US-068).
+  [[ -d "${FACTOR_SOURCE_DIR}" ]] || fail "missing ${FACTOR_SOURCE_DIR}"
+  local dest
+  dest="$(mktemp -d)"
+  rsync -az --dry-run --out-format='%n' "${FACTOR_SOURCE_DIR}/" "${dest}/"
+  rmdir "${dest}"
+}
+
 cmd_fetch() {
   load_state
   local dest="${STATE_DIR}/results"
@@ -567,6 +585,7 @@ case "${SUBCOMMAND}" in
   snapshot)  cmd_snapshot ;;
   ssh)       cmd_ssh "$@" ;;
   status)    cmd_status ;;
+  sync-list) cmd_sync_list ;;
   fetch)     cmd_fetch ;;
   destroy)   cmd_destroy "$@" ;;
   -h|--help|help) usage ;;

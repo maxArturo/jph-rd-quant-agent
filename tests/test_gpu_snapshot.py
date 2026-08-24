@@ -8,13 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from data.build_store import MARKET_FIELDS
 from ops.gpu_snapshot import (
     HASH_LEN,
     KEEP_SNAPSHOTS,
+    MARKET_MANIFEST_SCHEMA_VERSION,
     BaseImage,
     _makefile_venv_targets,
     list_base_images,
     main,
+    market_series_manifest,
     newest_in_region,
     prune_snapshots,
     select_snapshot,
@@ -140,6 +143,48 @@ class TestWorkerInputsHash:
         assert main(["hash"]) == 0
         out = capsys.readouterr().out.strip()
         assert len(out) == HASH_LEN
+
+
+class TestMarketSeriesManifest:
+    """US-068: the market-series manifest is a hashed worker input, so
+    snapshots baked before the substrate expansion never match a run that
+    expects $mkt_* fields."""
+
+    def test_manifest_carries_ordered_series_and_schema_version(self) -> None:
+        data = json.loads(market_series_manifest())
+        assert data["schema_version"] == MARKET_MANIFEST_SCHEMA_VERSION
+        assert data["series"] == list(MARKET_FIELDS)
+
+    def test_hash_stable_across_runs_with_identical_inputs(self, tmp_path: Path) -> None:
+        repo, store = make_repo(tmp_path), make_store(tmp_path)
+        assert worker_inputs_hash(repo, store) == worker_inputs_hash(repo, store)
+        # The default manifest IS the real one — passing it explicitly must
+        # not change the digest.
+        explicit = worker_inputs_hash(repo, store, market_manifest=market_series_manifest())
+        assert explicit == worker_inputs_hash(repo, store)
+
+    def test_pre_expansion_manifest_hashes_differently(self, tmp_path: Path) -> None:
+        """An old (pre-market-series) manifest must produce a different hash
+        than the current one — that mismatch is what makes stale snapshots
+        unselectable."""
+        repo, store = make_repo(tmp_path), make_store(tmp_path)
+        old = worker_inputs_hash(repo, store, market_manifest=market_series_manifest(series=()))
+        assert old != worker_inputs_hash(repo, store)
+
+    def test_added_series_changes_hash(self, tmp_path: Path) -> None:
+        """The US-014 move: adding a series to the manifest must rebake."""
+        repo, store = make_repo(tmp_path), make_store(tmp_path)
+        extended = market_series_manifest(series=(*MARKET_FIELDS, "news_ct_1d"))
+        assert worker_inputs_hash(repo, store, market_manifest=extended) != worker_inputs_hash(
+            repo, store
+        )
+
+    def test_schema_version_bump_changes_hash(self, tmp_path: Path) -> None:
+        repo, store = make_repo(tmp_path), make_store(tmp_path)
+        bumped = market_series_manifest(schema_version="market-series-v2")
+        assert worker_inputs_hash(repo, store, market_manifest=bumped) != worker_inputs_hash(
+            repo, store
+        )
 
 
 class TestMakefileVenvSlice:

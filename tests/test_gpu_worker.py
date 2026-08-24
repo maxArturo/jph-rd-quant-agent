@@ -111,6 +111,38 @@ class TestScriptContract:
         assert '${SNAPSHOT_PREFIX}-${inputs_hash:+${inputs_hash}-}' in text
         assert "ops.gpu_snapshot prune" in text
 
+    def test_sync_list_delivers_factor_source_contents(self, tmp_path: Path) -> None:
+        """US-068: the bootstrap sync must deliver companion files
+        (market_series.h5) to the worker — asserted against the actual rsync
+        file list (sync-list = same source dir, same flags, dry-run), no live
+        worker needed."""
+        home = tmp_path / "home"
+        for folder in ("data_folder", "data_folder_debug"):
+            target = home / "rdq-data" / "factor_source" / "us_liquid" / folder
+            target.mkdir(parents=True)
+            (target / "daily_pv.h5").write_bytes(b"h5")
+            (target / "market_series.h5").write_bytes(b"h5")
+            (target / "README.md").write_text("readme\n")
+        result = run_script("sync-list", env={"HOME": str(home)})
+        assert result.returncode == 0, result.stderr
+        lines = set(result.stdout.splitlines())
+        for folder in ("data_folder", "data_folder_debug"):
+            assert f"us_liquid/{folder}/market_series.h5" in lines
+            assert f"us_liquid/{folder}/daily_pv.h5" in lines
+
+    def test_bootstrap_factor_source_sync_is_unfiltered(self) -> None:
+        """The bootstrap rsync and sync-list must share FACTOR_SOURCE_DIR and
+        carry NO exclude filters — otherwise sync-list could pass while the
+        real sync silently drops companion files."""
+        text = SCRIPT.read_text()
+        assert (
+            'rsync_remote "${FACTOR_SOURCE_DIR}/" '
+            '"root@${DROPLET_IP}:/root/rdq-data/factor_source/"' in text
+        )
+        sync_list = text.split("cmd_sync_list()")[1].split("\n}")[0]
+        assert '"${FACTOR_SOURCE_DIR}/"' in sync_list
+        assert "--exclude" not in sync_list
+
     def test_run_log_is_truncated_not_appended(self) -> None:
         """2026-08-17 incident: a snapshot-booted worker carries the previous
         run's log; 'tee -a' left its exit trailer for the pipeline's
