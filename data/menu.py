@@ -57,6 +57,12 @@ class CuratedField:
     pit_note: str
 
 
+_MARKET_PIT_NOTE = (
+    "Raw broadcast series, never touched by $factor. Values are settled daily "
+    "observations; equity days with no market print forward-fill from the last "
+    "observation, and days before the series' first observation are NaN."
+)
+
 # Curated semantics, in canonical display order. Every field the store is
 # EXPECTED to carry needs an entry here; new series (e.g. $mkt_*) must be added
 # when they land or the menu flags them undocumented and the doc drift test
@@ -96,6 +102,46 @@ CURATED_FIELDS: dict[str, CuratedField] = {
         "bar. raw price = stored / $factor, raw volume = stored * $factor.",
         "NOT point-in-time: computed from the full split/dividend history known at "
         "store-build time. Never use $factor itself as a signal.",
+    ),
+    "$mkt_brent": CuratedField(
+        KIND_MARKET,
+        "Brent crude oil EOD price (FMP symbol BZUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_wti": CuratedField(
+        KIND_MARKET,
+        "WTI crude oil EOD price (FMP symbol CLUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_heatoil": CuratedField(
+        KIND_MARKET,
+        "Heating oil EOD price (FMP symbol HOUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_natgas": CuratedField(
+        KIND_MARKET,
+        "Natural gas EOD price (FMP symbol NGUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_gasoline": CuratedField(
+        KIND_MARKET,
+        "RBOB gasoline EOD price (FMP symbol RBUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_gold": CuratedField(
+        KIND_MARKET,
+        "Gold EOD price (FMP symbol GCUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_dxy": CuratedField(
+        KIND_MARKET,
+        "US dollar index EOD level (FMP symbol DXUSD).",
+        _MARKET_PIT_NOTE,
+    ),
+    "$mkt_y10": CuratedField(
+        KIND_MARKET,
+        "US 10-year treasury yield in percent (FMP treasury-rates year10 tenor).",
+        _MARKET_PIT_NOTE,
     ),
 }
 

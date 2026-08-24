@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 
 from data.build_store import (
+    COMMODITY_SYMBOLS,
+    MARKET_FIELDS,
     BuildError,
     StoreValidationError,
     TickerBundle,
@@ -16,11 +18,21 @@ from data.build_store import (
     build_from_fmp,
     build_store,
     fetch_bundle,
+    fetch_market_series,
     main,
     resolve_tickers,
     validate_store,
 )
-from data.fmp import Dividend, EodBar, FmpClient, FmpError, Split
+from data.fmp import (
+    _TREASURY_TENORS,
+    CommodityEod,
+    Dividend,
+    EodBar,
+    FmpClient,
+    FmpError,
+    Split,
+    TreasuryCurve,
+)
 
 # Five consecutive US weekdays (Tue 2024-01-02 .. Mon 2024-01-08).
 DAYS = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5), date(2024, 1, 8)]
@@ -85,6 +97,62 @@ def five_ticker_client(fail_on: str | None = None) -> FakeFmp:
 def read_bin(path: Path) -> tuple[int, np.ndarray]:
     data = np.fromfile(path, dtype="<f")
     return int(data[0]), data[1:]
+
+
+def weekdays(start: date, count: int) -> list[date]:
+    days: list[date] = []
+    day = start
+    while len(days) < count:
+        if day.weekday() < 5:
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def commodity_price(symbol: str, i: int) -> float:
+    """Deterministic, per-symbol-distinct canned commodity price."""
+    return 10.0 * (1 + list(COMMODITY_SYMBOLS.values()).index(symbol)) + i
+
+
+def make_curve(day: date, year10: float | None) -> TreasuryCurve:
+    values: dict[str, float | None] = {tenor: 1.0 for tenor in _TREASURY_TENORS}
+    values["year10"] = year10
+    return TreasuryCurve(date=day, **values)
+
+
+class MarketFakeFmp(FakeFmp):
+    """FakeFmp that also serves canned commodity EOD prices and treasury curves."""
+
+    def __init__(
+        self,
+        bars: dict[str, tuple[EodBar, ...]],
+        market_days: list[date] | None = None,
+        y10_none: set[date] | None = None,
+    ) -> None:
+        super().__init__(bars)
+        self.market_days = market_days if market_days is not None else DAYS
+        self.y10_none = y10_none or set()
+        self.commodity_calls: list[str] = []
+
+    def get_commodity_eod(self, symbol: str, start: object, end: object) -> list[CommodityEod]:
+        self.commodity_calls.append(symbol)
+        return [
+            CommodityEod(symbol, day, commodity_price(symbol, i), 100.0)
+            for i, day in enumerate(self.market_days)
+        ]
+
+    def get_treasury_rates(self, start: object, end: object) -> list[TreasuryCurve]:
+        return [
+            make_curve(day, None if day in self.y10_none else 4.0 + 0.1 * i)
+            for i, day in enumerate(self.market_days)
+        ]
+
+
+def market_five_ticker_client() -> MarketFakeFmp:
+    symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"]
+    return MarketFakeFmp(
+        bars={sym: make_bars(sym, close=100.0 + 50 * i) for i, sym in enumerate(symbols)}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +319,135 @@ def test_validate_store_catches_missing_feature_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Market broadcast fields ($mkt_*, US-066)
+
+
+def test_market_fields_broadcast_identical_and_never_adjusted(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    split = Split("AAPL", DAYS[3], 2.0, 1.0)  # 2:1 split effective on day 4
+    gold = [(day, 2000.0 + i) for i, day in enumerate(DAYS)]
+    y10 = [(day, 4.0 + 0.1 * i) for i, day in enumerate(DAYS)]
+    bundles = [
+        TickerBundle("AAPL", make_bars("AAPL"), (split,), ()),
+        TickerBundle("LATE", make_bars("LATE", days=DAYS[2:], close=50.0), (), ()),
+    ]
+    build_store(bundles, store, market_series={"mkt_gold": gold, "mkt_y10": y10})
+
+    # RAW despite AAPL's split: the market series is never factor-adjusted...
+    start_index, aapl_gold = read_bin(store / "features" / "aapl" / "mkt_gold.day.bin")
+    assert start_index == 0
+    np.testing.assert_allclose(aapl_gold, [2000.0, 2001.0, 2002.0, 2003.0, 2004.0], rtol=1e-6)
+    _, aapl_y10 = read_bin(store / "features" / "aapl" / "mkt_y10.day.bin")
+    np.testing.assert_allclose(aapl_y10, [4.0, 4.1, 4.2, 4.3, 4.4], rtol=1e-6)
+    # ...and identical across instruments per date (LATE starts two days in).
+    start_index, late_gold = read_bin(store / "features" / "late" / "mkt_gold.day.bin")
+    assert start_index == 2
+    np.testing.assert_allclose(late_gold, [2002.0, 2003.0, 2004.0], rtol=1e-6)
+    # The equity adjustment math is untouched: the split still adjusts $close.
+    _, closes = read_bin(store / "features" / "aapl" / "close.day.bin")
+    np.testing.assert_allclose(closes, [50.0, 50.5, 51.0, 103.0, 104.0], rtol=1e-6)
+
+
+def test_market_forward_fill_and_nan_before_first_observation(tmp_path: Path) -> None:
+    days = weekdays(date(2024, 1, 1), 120)
+    store = tmp_path / "us_data"
+    monday = next(i for i, day in enumerate(days) if i > 12 and day.weekday() == 0)
+    saturday = days[monday] - timedelta(days=2)
+    assert saturday.weekday() == 5
+    # mkt_wti starts 10 trading days in, skips the Monday, but printed Saturday.
+    wti = [(day, 70.0 + i) for i, day in enumerate(days[10:]) if day != days[monday]]
+    wti.append((saturday, 555.0))
+    # mkt_gold spans the whole calendar and skips the Monday (commodity holiday).
+    gold = [(day, 2000.0 + i) for i, day in enumerate(days) if day != days[monday]]
+    build_store(
+        [TickerBundle("AAPL", make_bars("AAPL", days=days), (), ())],
+        store,
+        market_series={"mkt_wti": wti, "mkt_gold": gold},
+    )
+
+    _, wti_values = read_bin(store / "features" / "aapl" / "mkt_wti.day.bin")
+    assert np.isnan(wti_values[:10]).all()  # before the series' first observation
+    assert not np.isnan(wti_values[10:]).any()  # forward-fill leaves no holes after it
+    assert wti_values[monday] == pytest.approx(555.0)  # last observation was Saturday's
+    _, gold_values = read_bin(store / "features" / "aapl" / "mkt_gold.day.bin")
+    assert gold_values[monday] == gold_values[monday - 1]  # holiday: previous trading day
+
+
+def test_market_low_coverage_fails_loud_with_series_named(tmp_path: Path) -> None:
+    days = weekdays(date(2024, 1, 1), 120)
+    store = tmp_path / "us_data"
+    dxy = [(day, 100.0) for day in days[:60]]  # feed died halfway: 50% coverage
+    with pytest.raises(StoreValidationError, match="mkt_dxy"):
+        build_store(
+            [TickerBundle("AAPL", make_bars("AAPL", days=days), (), ())],
+            store,
+            market_series={"mkt_dxy": dxy},
+        )
+    assert not store.exists()
+    assert leftover_dirs(tmp_path, "us_data") == []
+
+
+def test_market_series_bad_names_rejected(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    bundle = TickerBundle("AAPL", make_bars("AAPL"), (), ())
+    series = [(day, 1.0) for day in DAYS]
+    for bad in ("close", "$mkt_gold", "MKT_GOLD"):
+        with pytest.raises(BuildError, match="invalid market series name"):
+            build_store([bundle], store, market_series={bad: series})
+    assert not store.exists()
+
+
+def test_validate_store_catches_missing_market_bin(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    build_store(
+        [TickerBundle("AAPL", make_bars("AAPL"), (), ())],
+        store,
+        market_series={"mkt_gold": [(day, 2000.0 + i) for i, day in enumerate(DAYS)]},
+    )
+    validate_store(store, ["AAPL"], market_fields=("mkt_gold",))  # intact store passes
+    (store / "features" / "aapl" / "mkt_gold.day.bin").unlink()
+    with pytest.raises(StoreValidationError, match="missing feature file"):
+        validate_store(store, ["AAPL"], market_fields=("mkt_gold",))
+
+
+def test_fetch_market_series_covers_every_field_and_skips_none_y10() -> None:
+    client = MarketFakeFmp(bars={}, y10_none={DAYS[1]})
+    series = fetch_market_series(client, DAYS[0], DAYS[-1])
+    assert set(series) == set(MARKET_FIELDS)
+    assert client.commodity_calls == list(COMMODITY_SYMBOLS.values())
+    assert series["mkt_brent"][0] == (DAYS[0], commodity_price("BZUSD", 0))
+    for field in COMMODITY_SYMBOLS:
+        assert len(series[field]) == len(DAYS)
+    # the day FMP reported no 10y value for is skipped, not emitted as None/NaN
+    assert len(series["mkt_y10"]) == len(DAYS) - 1
+    assert DAYS[1] not in {day for day, _ in series["mkt_y10"]}
+
+
+def test_main_with_market_start_writes_all_mkt_bins(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    code = main(
+        [
+            "--tickers",
+            "AAPL,MSFT,GOOG,AMZN,NVDA",
+            "--start",
+            DAYS[0].isoformat(),
+            "--end",
+            DAYS[-1].isoformat(),
+            "--output",
+            str(store),
+            "--market-start",
+            DAYS[0].isoformat(),
+        ],
+        client=market_five_ticker_client(),
+    )
+    assert code == 0
+    for name in MARKET_FIELDS:
+        _, aapl = read_bin(store / "features" / "aapl" / f"{name}.day.bin")
+        _, nvda = read_bin(store / "features" / "nvda" / f"{name}.day.bin")
+        np.testing.assert_allclose(aapl, nvda, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 
 
@@ -284,7 +481,7 @@ def test_main_reports_errors_and_exits_nonzero(capsys: pytest.CaptureFixture) ->
 # Acceptance smoke: qlib reads the store back
 
 
-def test_qlib_reads_aapl_ohlcv_with_no_nan_closes(tmp_path: Path) -> None:
+def test_qlib_reads_aapl_ohlcv_and_market_fields(tmp_path: Path) -> None:
     store = tmp_path / "us_data"
     build_from_fmp(
         ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"],
@@ -292,7 +489,8 @@ def test_qlib_reads_aapl_ohlcv_with_no_nan_closes(tmp_path: Path) -> None:
         DAYS[-1],
         store,
         tmp_path / "ckpt",
-        five_ticker_client(),
+        market_five_ticker_client(),
+        market_start=DAYS[0],
     )
 
     import qlib
@@ -306,3 +504,16 @@ def test_qlib_reads_aapl_ohlcv_with_no_nan_closes(tmp_path: Path) -> None:
     np.testing.assert_allclose(
         df["$close"].to_numpy(), [100.0, 101.0, 102.0, 103.0, 104.0], rtol=1e-5
     )
+
+    # Market broadcast fields read back per instrument/date, identical across tickers.
+    mkt = D.features(["AAPL", "NVDA"], ["$mkt_gold", "$mkt_y10"], freq="day")
+    assert not mkt.isna().any().any()
+    gold = mkt["$mkt_gold"].unstack(level=0)
+    assert (gold["AAPL"] == gold["NVDA"]).all()
+    np.testing.assert_allclose(
+        gold["AAPL"].to_numpy(),
+        [commodity_price("GCUSD", i) for i in range(len(DAYS))],
+        rtol=1e-5,
+    )
+    y10 = mkt["$mkt_y10"].unstack(level=0)
+    np.testing.assert_allclose(y10["AAPL"].to_numpy(), [4.0, 4.1, 4.2, 4.3, 4.4], rtol=1e-5)

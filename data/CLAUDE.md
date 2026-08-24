@@ -21,6 +21,19 @@
   `get_treasury_rates` (chunks <=`TREASURY_CHUNK_DAYS`=90 calendar days per request and
   dedups boundary dates — the endpoint silently truncates wider windows with HTTP 200).
   Ingestion (US-066/067) must use these, never re-implement the chunking.
+- Market broadcast fields (US-066): `build_store(..., market_series={"mkt_x": [(date, value), ...]})`
+  writes each series RAW into EVERY instrument's feature dir (identical value per date,
+  implicit factor 1 — the adjustment math never touches them). Names carry no `$` at this
+  layer (bins never do). Per-series rules in `_market_matrix`: forward-fill equity days
+  with no observation (off-calendar weekend prints count as observations), NaN before the
+  series' first observation, and direct coverage >= `MARKET_COVERAGE_MIN` (99%) of trading
+  days since first observation or the build fails naming the series. The canonical set is
+  `MARKET_FIELDS` (= `COMMODITY_SYMBOLS` keys + `TREASURY_FIELD`); `fetch_market_series`
+  fetches them all (skipping None year10 rows). CLI: `--market-start` (canonical
+  `MARKET_SERIES_START` 2025-01-02).
+- GOTCHA until US-067 lands: `data/refresh.py` rebuilds through `build_store` WITHOUT
+  `market_series`, so a refresh of a store that carries $mkt_* bins silently drops them.
+  Don't ingest market series into the production store before the refresh carries them.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's

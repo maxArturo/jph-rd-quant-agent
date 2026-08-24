@@ -15,6 +15,11 @@ Field conventions (Qlib backward adjustment, see data/adjust.py):
 - factor(day) per data/adjust.py; open/high/low/close stored ADJUSTED
   (raw * factor); volume stored raw / factor; the raw close is recoverable
   as close / factor.
+- Market broadcast series ($mkt_*, US-066) are stored RAW on every
+  instrument's row — identical value across instruments per date, implicit
+  factor 1, never touched by the ticker's adjustment math. Equity days with
+  no market observation forward-fill from the last observation; days before
+  a series' first observation are NaN.
 - Bin format matches qlib FileFeatureStorage: little-endian float32 array
   whose first element is the calendar index of the ticker's first bar.
 """
@@ -22,6 +27,7 @@ Field conventions (Qlib backward adjustment, see data/adjust.py):
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -42,6 +48,31 @@ FREQ = "day"
 FIELDS = ("open", "high", "low", "close", "volume", "factor")
 MARKET_ALL = "all"
 DEFAULT_STORE_PATH = "~/.qlib/qlib_data/us_data"
+
+# Market-level broadcast series (US-066): one value per date, written RAW onto
+# every instrument's row ($mkt_* fields) and never touched by the ticker's
+# $factor adjustment. Commodity fields map to FMP /historical-price-eod/light
+# symbols; mkt_y10 is the year10 tenor of /stable/treasury-rates.
+COMMODITY_SYMBOLS: dict[str, str] = {
+    "mkt_brent": "BZUSD",
+    "mkt_wti": "CLUSD",
+    "mkt_heatoil": "HOUSD",
+    "mkt_natgas": "NGUSD",
+    "mkt_gasoline": "RBUSD",
+    "mkt_gold": "GCUSD",
+    "mkt_dxy": "DXUSD",
+}
+TREASURY_FIELD = "mkt_y10"
+MARKET_FIELDS = (*COMMODITY_SYMBOLS, TREASURY_FIELD)
+# Canonical backfill start for the market series (probe-verified 2026-08-24,
+# docs/decisions.md US-064) — FMP coverage before this date is unverified.
+MARKET_SERIES_START = date(2025, 1, 2)
+# Each series must directly observe at least this share of the trading days
+# since its own first observation, or the build fails loud (forward-fill is
+# for the odd commodity holiday, not for masking a broken feed).
+MARKET_COVERAGE_MIN = 0.99
+
+MarketSeriesMap = Mapping[str, Sequence[tuple[date, float]]]
 
 
 class BuildError(RuntimeError):
@@ -73,6 +104,26 @@ def fetch_bundle(client: FmpClient, symbol: str, start: DateLike, end: DateLike)
         splits=tuple(client.get_splits(symbol)),
         dividends=tuple(client.get_dividends(symbol)),
     )
+
+
+def fetch_market_series(
+    client: FmpClient, start: DateLike, end: DateLike
+) -> dict[str, tuple[tuple[date, float], ...]]:
+    """Fetch every $mkt_* series as (date, value) observations through FMP.
+
+    Commodity prices come from get_commodity_eod per COMMODITY_SYMBOLS; mkt_y10
+    is the year10 tenor of get_treasury_rates (days FMP reports no 10y value for
+    are skipped — the store build forward-fills over them).
+    """
+    series: dict[str, tuple[tuple[date, float], ...]] = {}
+    for field, symbol in COMMODITY_SYMBOLS.items():
+        rows = client.get_commodity_eod(symbol, start, end)
+        series[field] = tuple((row.date, row.price) for row in rows)
+    curves = client.get_treasury_rates(start, end)
+    series[TREASURY_FIELD] = tuple(
+        (curve.date, curve.year10) for curve in curves if curve.year10 is not None
+    )
+    return series
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +226,54 @@ def _feature_series(bundle: TickerBundle) -> dict[str, list[tuple[date, float]]]
     return series
 
 
+def _market_matrix(
+    calendar: Sequence[date], name: str, observations: Sequence[tuple[date, float]]
+) -> np.ndarray:
+    """Full-calendar values for one market series, ready to broadcast.
+
+    Trading days with no observation of their own (commodity holiday) take the
+    last observation — including off-calendar ones (some series print on
+    weekends). Days before the series' first observation stay NaN. Direct
+    coverage below MARKET_COVERAGE_MIN of the trading days since the first
+    observation fails the build loudly with the series named.
+    """
+    if name in FIELDS or not name.isidentifier() or name != name.lower():
+        raise BuildError(
+            f"invalid market series name {name!r}: must be a lowercase identifier "
+            f"(no '$' prefix) and must not collide with the per-ticker fields {FIELDS}"
+        )
+    if not observations:
+        raise BuildError(f"market series {name} has no observations")
+    by_date: dict[date, float] = {}
+    for day, value in observations:
+        if not math.isfinite(value):
+            raise BuildError(
+                f"market series {name} has a non-finite value on {day.isoformat()}"
+            )
+        by_date[day] = value
+    obs_days = sorted(by_date)
+    span_days = [d for d in calendar if d >= obs_days[0]]
+    if not span_days:
+        raise BuildError(
+            f"market series {name} starts {obs_days[0].isoformat()}, "
+            "after the store calendar ends"
+        )
+    covered = sum(1 for d in span_days if d in by_date)
+    coverage = covered / len(span_days)
+    if coverage < MARKET_COVERAGE_MIN:
+        raise StoreValidationError(
+            f"market series {name} directly covers {covered}/{len(span_days)} trading days "
+            f"({coverage:.1%}) since {obs_days[0].isoformat()}; "
+            f"minimum is {MARKET_COVERAGE_MIN:.0%}"
+        )
+    values = np.full(len(calendar), np.nan)
+    for i, day in enumerate(calendar):
+        pos = bisect.bisect_right(obs_days, day) - 1
+        if pos >= 0:
+            values[i] = by_date[obs_days[pos]]
+    return values
+
+
 def _write_bin(path: Path, start_index: int, values: Sequence[float] | np.ndarray) -> None:
     np.hstack([np.array([start_index], dtype="<f"), np.asarray(values, dtype="<f")]).astype(
         "<f"
@@ -185,6 +284,7 @@ def build_store(
     bundles: Sequence[TickerBundle],
     target: Path,
     extra_instruments: Mapping[str, Sequence[tuple[str, str, str]]] | None = None,
+    market_series: MarketSeriesMap | None = None,
 ) -> None:
     """Write a Qlib bin store for the bundles: temp dir -> validate -> swap.
 
@@ -194,6 +294,12 @@ def build_store(
     caller owns span semantics: refresh.refresh_universe_spans advances only
     ends that tracked their ticker's end), so multi-span point-in-time
     universes survive a rebuild intact.
+
+    market_series maps broadcast field names (e.g. "mkt_brent", no '$') to
+    their (date, value) observations. Each series is forward-filled onto the
+    equity calendar (see _market_matrix) and written RAW into every
+    instrument's feature dir — identical value across instruments per date,
+    never touched by the ticker's $factor adjustment.
     """
     if not bundles:
         raise BuildError("no tickers to build a store from")
@@ -208,6 +314,10 @@ def build_store(
 
     calendar = sorted({bar.date for bundle in bundles for bar in bundle.bars})
     positions = {day: idx for idx, day in enumerate(calendar)}
+    market_matrix = {
+        name: _market_matrix(calendar, name, observations)
+        for name, observations in (market_series or {}).items()
+    }
 
     target = target.expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +346,12 @@ def build_store(
                 for day, value in points:
                     values[positions[day] - start_index] = value
                 _write_bin(feature_dir / f"{field}.{FREQ}.bin", start_index, values)
+            for name, matrix in market_matrix.items():
+                _write_bin(
+                    feature_dir / f"{name}.{FREQ}.bin",
+                    start_index,
+                    matrix[start_index : start_index + span],
+                )
         (tmp / "instruments" / f"{MARKET_ALL}.txt").write_text("".join(instrument_lines))
         for name, universe_rows in (extra_instruments or {}).items():
             if name == MARKET_ALL:
@@ -248,7 +364,9 @@ def build_store(
             (tmp / "instruments" / f"{name}.txt").write_text(
                 "".join(f"{s}\t{start}\t{end}\n" for s, start, end in universe_rows)
             )
-        validate_store(tmp, [bundle.symbol for bundle in bundles])
+        validate_store(
+            tmp, [bundle.symbol for bundle in bundles], market_fields=tuple(market_matrix)
+        )
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -270,13 +388,17 @@ def _swap_into_place(tmp: Path, target: Path) -> None:
 # Validation
 
 
-def validate_store(store_dir: Path, symbols: Sequence[str]) -> None:
+def validate_store(
+    store_dir: Path, symbols: Sequence[str], market_fields: Sequence[str] = ()
+) -> None:
     """Assert the store at store_dir is complete and readable for symbols.
 
     Checks calendar ordering, instruments coverage, per-field bin presence,
     index bounds, and that no ticker has a NaN close/factor inside its own
     [first, last] span (a mid-series gap means bad source data - fail loudly
     rather than ship a store Qlib will silently propagate NaNs from).
+    market_fields lists broadcast series every instrument must also carry a
+    bin for (their NaN heads before the series' first observation are legal).
     """
     calendar_path = store_dir / "calendars" / f"{FREQ}.txt"
     if not calendar_path.exists():
@@ -302,7 +424,7 @@ def validate_store(store_dir: Path, symbols: Sequence[str]) -> None:
 
     for symbol in symbols:
         feature_dir = store_dir / "features" / symbol.lower()
-        for field in FIELDS:
+        for field in (*FIELDS, *market_fields):
             bin_path = feature_dir / f"{field}.{FREQ}.bin"
             if not bin_path.exists():
                 raise StoreValidationError(f"missing feature file {bin_path}")
@@ -351,8 +473,13 @@ def build_from_fmp(
     output: Path,
     checkpoint_dir: Path | None = None,
     client: FmpClient | None = None,
+    market_start: DateLike | None = None,
 ) -> None:
-    """Backfill symbols from FMP (checkpointed) and build the store at output."""
+    """Backfill symbols from FMP (checkpointed) and build the store at output.
+
+    When market_start is given, every $mkt_* series is also fetched over
+    [market_start, end] and broadcast into the store.
+    """
     output = output.expanduser()
     if checkpoint_dir is None:
         checkpoint_dir = output.parent / f"{output.name}.checkpoint"
@@ -360,7 +487,8 @@ def build_from_fmp(
     bundles = backfill(
         symbols, lambda s: fetch_bundle(fmp, s, start, end), checkpoint_dir, start, end
     )
-    build_store(bundles, output)
+    market = fetch_market_series(fmp, market_start, end) if market_start is not None else None
+    build_store(bundles, output, market_series=market)
 
 
 def main(argv: Sequence[str] | None = None, client: FmpClient | None = None) -> int:
@@ -387,6 +515,14 @@ def main(argv: Sequence[str] | None = None, client: FmpClient | None = None) -> 
         action="store_true",
         help="discard existing checkpoints and refetch everything",
     )
+    parser.add_argument(
+        "--market-start",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="also fetch the $mkt_* market series from this date and broadcast them "
+        f"into the store (canonical start {MARKET_SERIES_START.isoformat()}; "
+        "default: no market series)",
+    )
     args = parser.parse_args(argv)
 
     output = Path(args.output).expanduser()
@@ -399,7 +535,15 @@ def main(argv: Sequence[str] | None = None, client: FmpClient | None = None) -> 
         symbols = resolve_tickers(args.tickers, args.tickers_file)
         if args.fresh and checkpoint_dir.exists():
             shutil.rmtree(checkpoint_dir)
-        build_from_fmp(symbols, args.start, args.end, output, checkpoint_dir, client)
+        build_from_fmp(
+            symbols,
+            args.start,
+            args.end,
+            output,
+            checkpoint_dir,
+            client,
+            market_start=args.market_start,
+        )
     except (BuildError, FmpError, AdjustmentError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

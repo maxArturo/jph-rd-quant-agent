@@ -1033,8 +1033,9 @@ def test_data_required_all_present_renders_line_and_stays_startable(
 
 
 def test_missing_data_parks_directive_and_blocks_start(tmp_path: Path) -> None:
+    # $news_ct_1d is absent from the fixture store until US-014 lands.
     client = FakeClient(
-        judgment_messages=save_with_data_script(["$close", "$mkt_brent"], "Parked.")
+        judgment_messages=save_with_data_script(["$close", "$news_ct_1d"], "Parked.")
         + start_research_script("Can't start — parked.")
     )
     gpu = StubGpu()
@@ -1043,16 +1044,16 @@ def test_missing_data_parks_directive_and_blocks_start(tmp_path: Path) -> None:
     )
     say = RecordingSay()
 
-    core.handle_message(THREAD, "momentum conditioned on brent?", say)
+    core.handle_message(THREAD, "momentum conditioned on news attention?", say)
 
     # saved (objective persisted) ...
     directive = store.get_directive(THREAD)
     assert directive is not None
-    assert directive.data_required == ("$close", "$mkt_brent")
+    assert directive.data_required == ("$close", "$news_ct_1d")
     # ... but parked, and the thread reply names each missing series
-    assert directive.missing_data == ("$mkt_brent",)
+    assert directive.missing_data == ("$news_ct_1d",)
     assert directive.parked is True
-    assert "parked — needs ingestion: $mkt_brent" in say.calls[0]["text"]
+    assert "parked — needs ingestion: $news_ct_1d" in say.calls[0]["text"]
     # the model's tool result states the parked outcome too
     assert "PARKED" in last_tool_result(client)["content"]
 
@@ -1061,7 +1062,7 @@ def test_missing_data_parks_directive_and_blocks_start(tmp_path: Path) -> None:
     tool_result = last_tool_result(client)
     assert tool_result["type"] == "tool_result"
     assert tool_result.get("is_error") is True
-    assert "parked — needs ingestion: $mkt_brent" in tool_result["content"]
+    assert "parked — needs ingestion: $news_ct_1d" in tool_result["content"]
     assert gpu.launched == []
     assert store.get_run(THREAD) is None
 
