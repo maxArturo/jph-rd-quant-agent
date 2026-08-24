@@ -510,6 +510,7 @@ class ConversationCore:
         promotions: PromotionManager | None = None,
         gpu: GpuRunner | None = None,
         digest_builder: Callable[[], Digest] | None = None,
+        menu_builder: Callable[[], str] | None = None,
     ) -> None:
         if universes is None:
             from orchestrator.universe import UniverseService
@@ -541,6 +542,11 @@ class ConversationCore:
         # run_memory.build_digest_details, which never raises and never
         # stalls a launch (15s Notion budget, local fallback).
         self._digest_builder = digest_builder
+        # Data-menu context for the directive-crafting prompt (US-061). None
+        # (tests, partial wiring) skips injection; app.py wires
+        # prompts.data_menu_context, which never raises (store unreadable
+        # degrades to an explicit 'menu unavailable' line).
+        self._menu_builder = menu_builder
         self._universes: UniverseManager = universes
         self._breaker: TradingBreaker = breaker
         self._broker: BrokerReader = broker
@@ -597,11 +603,23 @@ class ConversationCore:
         return reply
 
     def _system_prompt(self, thread_ts: str) -> str:
-        """SYSTEM_PROMPT plus the thread's saved directive reloaded from SQLite."""
+        """SYSTEM_PROMPT + data menu (US-061) + the thread's saved directive.
+
+        The directive reloads from SQLite; the menu rebuilds from the store on
+        every call so it tracks daily refreshes. Menu failures degrade to the
+        fallback line — this path must never raise into the Bolt handler.
+        """
+        parts = [prompts.SYSTEM_PROMPT]
+        if self._menu_builder is not None:
+            try:
+                parts.append(self._menu_builder())
+            except Exception:
+                logger.exception("menu builder raised; degrading to the fallback line")
+                parts.append(prompts.MENU_UNAVAILABLE_LINE)
         directive = self._store.get_directive(thread_ts)
-        if directive is None:
-            return prompts.SYSTEM_PROMPT
-        return prompts.SYSTEM_PROMPT + "\n\n" + prompts.directive_context(directive)
+        if directive is not None:
+            parts.append(prompts.directive_context(directive))
+        return "\n\n".join(parts)
 
     def _save_directive_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:

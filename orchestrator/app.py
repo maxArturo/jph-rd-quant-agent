@@ -167,6 +167,7 @@ def create_app(
 
 def main() -> None:
     # Heavy imports stay here so tests importing this module don't pay for them.
+    from orchestrator import prompts
     from orchestrator.approvals import ApprovalsBridge, OneCliApprovalsClient
     from orchestrator.config import (
         ConfigError,
@@ -251,6 +252,9 @@ def main() -> None:
         # US-015: run-history digest injected into RDQ_USER_INSTRUCTION at
         # start_research (never raises, never stalls a launch).
         digest_builder=lambda: build_digest_details(store.db_path),
+        # US-061: data menu injected into the directive-crafting prompt
+        # (never raises — store unreadable degrades to a fallback line).
+        menu_builder=prompts.data_menu_context,
     )
     approvals = ApprovalsBridge(
         OneCliApprovalsClient(base_url=load_onecli_url()),

@@ -111,6 +111,15 @@
   method boundary (query_db / list_block_children) and serve blocks produced
   by the REAL US-013 writer so reader and writer can't drift.
 
+- Data-menu prompt injection (US-061/US-002): ConversationCore takes
+  `menu_builder=` (None skips injection; app.py wires
+  `prompts.data_menu_context`, which rebuilds the menu from the store on
+  every turn — it tracks daily refreshes — and NEVER raises: any store-read
+  failure degrades to `prompts.MENU_UNAVAILABLE_LINE`; `_system_prompt`
+  additionally guards a raising builder). Never hand-copy store field lists
+  into prompt text — render them from data/menu.py, the single source of
+  truth.
+
 - Lifecycle recording into Notion goes through `orchestrator/notion_recorder.py`
   (`NotionRecorder`, US-027) — the single write funnel for Research Ideas /
   Hypothesis Log / Backtest Results. It is best-effort BY DESIGN: every

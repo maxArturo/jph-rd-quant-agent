@@ -29,8 +29,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "prompts.data_menu_context (best-effort, MENU_UNAVAILABLE_LINE fallback) + ConversationCore menu_builder= param (digest_builder pattern); app.py wires it. Live menu ~1.7k chars."
     },
     {
       "id": "US-003",

@@ -19,3 +19,14 @@ Started: Mon Aug 24 11:24:42 AM UTC 2026
   - US-002 should inject render_menu(build_menu(...)) — it already contains field names, PIT notes, universes; wrap in try/except MenuError for the degraded "menu unavailable" path. US-003 should match data_required against DataMenu.field_names().
   - build_store's extra_instruments writes (sym, start, end) rows verbatim — handy for fixture universes.
 ---
+## 2026-08-24 ~13:00 UTC - US-002
+- Injected the data menu into the directive-crafting prompt. New `prompts.data_menu_context(store=None)`: MENU_HEADER + render_menu(build_menu(store)), rebuilt on every call (tracks daily refreshes); catches Exception -> returns MENU_UNAVAILABLE_LINE (logged), never raises. ConversationCore gained `menu_builder: Callable[[], str] | None` (digest_builder pattern — None skips so existing strict-equality prompt tests stay green); `_system_prompt` = SYSTEM_PROMPT + menu + directive_context, with a call-site try/except guard too. app.py wires `menu_builder=prompts.data_menu_context`.
+- Files: orchestrator/prompts.py, orchestrator/conversation.py, orchestrator/app.py, tests/test_conversation.py (5 new tests), orchestrator/CLAUDE.md.
+- Verified: make check green (1376 passed, 3 skipped). Tests assert fixture-store field names ($open/$close/$volume/$factor) land in stream_calls[...]["system"] alongside directive context, and both degraded paths (unreadable store, raising builder) produce MENU_UNAVAILABLE_LINE with the turn completing. Live run against the real store: full menu renders (~1.7k chars, 592-ticker universes listed); /tmp bogus path returns the fallback line.
+- **Learnings for future iterations:**
+  - Existing tests assert `system == prompts.SYSTEM_PROMPT` / startswith — any new system-prompt context MUST be an optional injected callable (None default), never unconditional, or test_system_prompt_has_no_directive_context_before_save breaks.
+  - tests/test_menu.py's `fixture_store` is importable (`from tests.test_menu import fixture_store`) — reuse it for any test needing a real bin store.
+  - app.py main() keeps heavy imports inside main(); ruff enforces sorted order there (`from orchestrator import prompts` sorts before `orchestrator.approvals`).
+  - Fallback prompt text must not enumerate field names (acceptance: no hand-copied field lists anywhere) — MENU_UNAVAILABLE_LINE says "standard daily price/volume data" instead.
+  - US-003 hook: data_required verification should call data.menu build_menu(...).field_names(); the menu text is already in the crafting prompt so the model can emit data_required from it.
+---

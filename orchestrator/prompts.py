@@ -7,7 +7,12 @@ desk — honest reporting, and never trades without explicit operator approval.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from orchestrator.state import Directive
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are the portfolio manager of a small quantitative research desk, talking \
@@ -87,6 +92,42 @@ trading is out of scope.
 - Keep replies short and Slack-friendly: a few sentences, plain text, no \
 headings.
 """
+
+
+MENU_HEADER = (
+    "Data available to research runs (the desk's data menu, introspected from "
+    "the store — the single source of truth for what the store can express; a "
+    "crafted hypothesis may only reference fields listed here):"
+)
+
+MENU_UNAVAILABLE_LINE = (
+    "Data menu unavailable — the store could not be read at prompt-build time. "
+    "Craft hypotheses against standard daily price/volume data only, and tell "
+    "the operator the menu could not be loaded if the idea depends on anything "
+    "beyond that."
+)
+
+
+def data_menu_context(store: Path | str | None = None) -> str:
+    """Rendered data menu as system-prompt context (US-061).
+
+    Best-effort by design: this runs on the Slack message path, so ANY failure
+    to read the store degrades to the explicit 'menu unavailable' line — it
+    must never raise into the Bolt handler. The menu is rebuilt on each call so
+    the prompt tracks the store across daily refreshes.
+    """
+    # Lazy import: data.menu pulls in the store-build stack, which prompt-only
+    # consumers (tests asserting on SYSTEM_PROMPT text) don't need.
+    from data.build_store import DEFAULT_STORE_PATH
+    from data.menu import build_menu, render_menu
+
+    try:
+        menu = build_menu(Path(store if store is not None else DEFAULT_STORE_PATH))
+        rendered = render_menu(menu).rstrip("\n")
+    except Exception:
+        logger.exception("data menu unavailable; degrading to the fallback line")
+        return MENU_UNAVAILABLE_LINE
+    return MENU_HEADER + "\n" + rendered
 
 
 def directive_context(directive: Directive) -> str:

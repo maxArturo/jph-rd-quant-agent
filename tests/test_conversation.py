@@ -29,6 +29,7 @@ from tests.test_llm import (
     text_block,
     tool_use_block,
 )
+from tests.test_menu import fixture_store as menu_fixture_store
 
 THREAD = "1751900000.000100"
 
@@ -100,6 +101,7 @@ def make_core(
     promotions: Any | None = None,
     gpu: StubGpu | None = None,
     digest_builder: Any | None = None,
+    menu_builder: Any | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
@@ -108,6 +110,7 @@ def make_core(
         promotions=promotions,
         gpu=gpu if gpu is not None else StubGpu(),
         digest_builder=digest_builder,
+        menu_builder=menu_builder,
     )
     return core, store
 
@@ -279,6 +282,70 @@ def test_system_prompt_has_no_directive_context_before_save(tmp_path: Path) -> N
     core, _ = make_core(tmp_path, client)
     core.handle_message(THREAD, "vague idea", RecordingSay())
     assert client.stream_calls[0]["system"] == prompts.SYSTEM_PROMPT
+
+
+# --- data menu in the directive-crafting prompt (US-061 / US-002) -----------------
+
+
+def test_data_menu_context_renders_fixture_store_menu(tmp_path: Path) -> None:
+    """Single source of truth: the context is data/menu.py's rendering, so it
+    carries the store's field names and PIT notes — no hand-copied list."""
+    context = prompts.data_menu_context(menu_fixture_store(tmp_path))
+    assert context.startswith(prompts.MENU_HEADER)
+    for name in ("$open", "$close", "$volume", "$factor"):
+        assert name in context
+    assert "tiny_pit" in context  # universes come through too
+    assert prompts.MENU_UNAVAILABLE_LINE not in context
+
+
+def test_data_menu_context_degrades_when_store_unreadable(tmp_path: Path) -> None:
+    assert prompts.data_menu_context(tmp_path / "no-store-here") == prompts.MENU_UNAVAILABLE_LINE
+
+
+def test_crafting_prompt_includes_menu_fields_and_directive(tmp_path: Path) -> None:
+    """The system prompt the model crafts directives against carries the menu
+    (from a fixture store) alongside persona and saved-directive context."""
+    fixture = menu_fixture_store(tmp_path)
+    client = FakeClient(
+        judgment_messages=save_directive_script()
+        + [message("end_turn", [text_block("Recap...")])]
+    )
+    core, _ = make_core(tmp_path, client, menu_builder=lambda: prompts.data_menu_context(fixture))
+
+    core.handle_message(THREAD, "momentum on big US names?", RecordingSay())
+    system = client.stream_calls[0]["system"]
+    assert system.startswith(prompts.SYSTEM_PROMPT)
+    for name in ("$open", "$close", "$volume", "$factor"):
+        assert name in system
+
+    # After the save, menu and directive context coexist.
+    core.handle_message(THREAD, "where were we?", RecordingSay())
+    system = client.stream_calls[-1]["system"]
+    assert prompts.MENU_HEADER in system
+    assert "Test whether 12-1 momentum beats SPY" in system
+
+
+def test_unreadable_store_degrades_to_fallback_line_in_prompt(tmp_path: Path) -> None:
+    client = FakeClient(judgment_messages=[message("end_turn", [text_block("Noted.")])])
+    core, _ = make_core(
+        tmp_path,
+        client,
+        menu_builder=lambda: prompts.data_menu_context(tmp_path / "no-store-here"),
+    )
+    reply = core.handle_message(THREAD, "vague idea", RecordingSay())
+    assert reply == "Noted."  # degraded, never raised into the handler
+    assert prompts.MENU_UNAVAILABLE_LINE in client.stream_calls[0]["system"]
+
+
+def test_menu_builder_exception_never_reaches_the_handler(tmp_path: Path) -> None:
+    def exploding_builder() -> str:
+        raise RuntimeError("store swap mid-read")
+
+    client = FakeClient(judgment_messages=[message("end_turn", [text_block("Noted.")])])
+    core, _ = make_core(tmp_path, client, menu_builder=exploding_builder)
+    reply = core.handle_message(THREAD, "vague idea", RecordingSay())
+    assert reply == "Noted."
+    assert prompts.MENU_UNAVAILABLE_LINE in client.stream_calls[0]["system"]
 
 
 # --- failure handling ------------------------------------------------------------
