@@ -229,8 +229,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "refresh.py read_ticker_fields/read_ticker_series carry + build_news.advance_ticker (extends ckpt END keeping START) daily ingest at 8 req/s; per-ticker outage -> explicit 0 + one aggregated Slack warning; --news-start introduction executed live (592 tickers, 3 backfilled: DGHI/SLNH/WIT). Parity $news_ct_1d spearman 1.0000/102 days. Factor sources regenerated (daily_news.h5 everywhere); worker hash now 5099da50ebf0."
     }
   ]
 }

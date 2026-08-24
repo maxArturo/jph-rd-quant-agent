@@ -33,7 +33,7 @@ import time as time_module
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +303,65 @@ def backfill_ticker(
             "end": end_iso,
             "articles": archived,
             "requests": requests,
+        },
+    )
+    return TickerNewsResult(symbol=symbol, articles=archived, requests=requests, fetched=True)
+
+
+def advance_ticker(
+    fetch_pages: FetchPagesFn,
+    symbol: str,
+    end: DateLike,
+    root: Path,
+    sleep: Callable[[float], None] = time_module.sleep,
+    throttle_rps: float = DEFAULT_THROTTLE_RPS,
+) -> TickerNewsResult:
+    """Extend the symbol's fetched window through ``end`` (daily ingest, US-073).
+
+    Fetches only the gap after the checkpoint's current end, archives those
+    published dates, and advances the checkpoint's ``end`` while keeping its
+    ``start`` — so read_news_series containment keeps holding over the whole
+    backfilled window. Already-covered ``end`` is a no-op (fetched=False).
+    A symbol with no checkpoint was never backfilled: fail loud, the caller
+    decides how to degrade.
+    """
+    end_iso = _to_iso_date(end, "end")
+    end_date = date.fromisoformat(end_iso)
+    window = checkpoint_window(root, symbol)
+    if window is None:
+        raise NewsBuildError(
+            f"{symbol} has no news checkpoint under {root}; "
+            "run python -m data.build_news for it first"
+        )
+    start0, end0 = window
+    if end0 >= end_date:
+        return TickerNewsResult(symbol=symbol, articles=0, requests=0, fetched=False)
+    fetch_start = end0 + timedelta(days=1)
+    pause = 1.0 / throttle_rps if throttle_rps > 0 else 0.0
+    articles: list[NewsArticle] = []
+    pages = fetch_pages(symbol, fetch_start.isoformat(), end_iso)
+    requests = 0
+    while True:
+        sleep(pause)
+        requests += 1  # the next() below is exactly one HTTP request
+        page = next(pages, None)
+        if page is None:
+            break
+        articles.extend(page)
+    archived = _archive_articles(root, symbol, articles, fetch_start, end_date)
+    ckpt_path = checkpoint_dir(root) / f"{symbol}.json"
+    prior = _load_checkpoint(ckpt_path, start0.isoformat(), end0.isoformat()) or {
+        "articles": 0,
+        "requests": 0,
+    }
+    _write_json(
+        ckpt_path,
+        {
+            "symbol": symbol,
+            "start": start0.isoformat(),
+            "end": end_iso,
+            "articles": prior["articles"] + archived,
+            "requests": prior["requests"] + requests,
         },
     )
     return TickerNewsResult(symbol=symbol, articles=archived, requests=requests, fetched=True)

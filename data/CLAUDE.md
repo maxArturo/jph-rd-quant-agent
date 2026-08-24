@@ -40,8 +40,10 @@
   Slack line via `execution.rebalance.slack_notifier`; `--no-slack` skips) and NEVER fails
   the run. `--market-start` is the one-time introduction path: it backfills canonical
   MARKET_FIELDS the store lacks and forces a rebuild even with no new equity bars.
-  GOTCHA: this only covers `mkt_*`-prefixed broadcast bins — any future per-ticker raw
-  field (e.g. US-014's news_ct_1d) needs its own carry-through or a refresh drops it.
+  GOTCHA: mkt carry covers only `mkt_*`-prefixed broadcast bins; per-ticker raw bins go
+  through `read_ticker_fields`/`read_ticker_series` (news_ct_1d has a full ingest path,
+  US-015 below — any OTHER per-ticker field is carried verbatim with new days left NaN
+  plus a warning until it gets its own ingest, e.g. US-074 sentiment).
 - Stock news (US-071/072): `FmpClient.iter_stock_news_pages`/`get_stock_news` walk
   /stable/news/stock (newest-first). TERMINATION RULE: the endpoint has page-size
   jitter — mid-stream pages come back short of `limit` with more history behind;
@@ -56,10 +58,7 @@
   `checkpoints/<SYM>.json` keyed by (start, end) window. Counts ALWAYS derive from
   the archive (`daily_counts`: gapless, 0 on no-news trading days); an article
   published after the window's last close stays archived and counts once a later
-  window covers the next trading day. GOTCHA (same trap as mkt_*): US-014's
-  news_ct_1d bins will be DROPPED by refresh rebuilds unless US-015 adds a
-  read-back+carry — so do NOT ingest $news_ct_1d into the prod store before
-  US-015's carry-through lands. The full us_liquid backfill (US-013) lives on-box at
+  window covers the next trading day. The full us_liquid backfill (US-013) lives on-box at
   `~/rdq-data/news/` (outside the repo tree): 589 tickers, window
   2025-01-02..2026-08-23 in every checkpoint — reruns with the same window
   resume for free; a different --end refetches per ticker.
@@ -76,6 +75,21 @@
   presence rule as market_series.h5; `ops/gpu_snapshot.SUBSTRATE_SERIES` carries
   the field in the worker-inputs manifest (adding the next series family means
   extending that tuple).
+- News in the refresh (US-015): when the store carries news_ct_1d bins, `data/refresh.py`
+  reads them back per ticker (`read_ticker_series` — NaN days are "outside coverage" and
+  round-trip as NaN), pulls each refreshed ticker's article gap via
+  `build_news.advance_ticker` (extends the checkpoint's END keeping its START, so
+  read_news_series containment survives daily ingest), and appends archive-derived
+  counts for the new days through the same atomic rebuild. A per-ticker news failure
+  degrades to explicit 0 counts for that ticker's new days + ONE aggregated warning
+  (Slack line from the CLI) — never blocks the refresh chain, and the failed ticker's
+  checkpoint stays put so the next run refetches the gap. `--news-start` is the one-time
+  introduction (builds the series from the archive for every store ticker, backfilling
+  any ticker the archive misses — needs FMP, run under onecli). Daily ingest throttle is
+  `REFRESH_NEWS_THROTTLE_RPS` (8 req/s, faster than the 3 req/s bulk backfill) so the
+  04:30 ET refresh stays clear of the 04:45 pred refresh. `extend_store` carries news
+  bins for existing tickers; a NEW ticker's news bin starts all-NaN until its archive
+  backfill exists and a later rebuild picks it up.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's

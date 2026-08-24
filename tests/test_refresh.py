@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from data.build_news import backfill_ticker, checkpoint_window, read_news_series
 from data.build_store import (
     COMMODITY_SYMBOLS,
     MARKET_FIELDS,
@@ -24,9 +25,12 @@ from data.refresh import (
     read_market_fields,
     read_market_series,
     read_raw_bars,
+    read_ticker_fields,
+    read_ticker_series,
     read_universes,
     refresh_store,
 )
+from tests.test_build_news import WindowedNewsFetcher, art
 from tests.test_build_store import (
     DAYS,
     FakeFmp,
@@ -787,3 +791,311 @@ def test_extend_store_drops_off_calendar_bars_keeping_calendar_invariant(
         if line.strip()
     ]
     assert calendar == DAYS
+
+
+# ---------------------------------------------------------------------------
+# Per-ticker news counts ($news_ct_1d, US-073/US-015)
+
+
+def _noop_sleep(_s: float) -> None:
+    pass
+
+
+NEWS_ARTICLES = {
+    "AAPL": [
+        art("2024-01-03 10:00:00"),  # historic, counts toward DAYS[1]
+        art("2024-01-09 09:00:00"),  # counts toward NEW_DAYS[0]
+        art("2024-01-09 17:00:00"),  # after the close -> rolls to NEW_DAYS[1]
+        art("2024-01-10 12:00:00"),  # counts toward NEW_DAYS[1]
+    ],
+    "MSFT": [art("2024-01-09 10:00:00", symbol="MSFT")],
+}
+
+
+def seed_news_root(tmp_path: Path, articles: dict) -> tuple[Path, WindowedNewsFetcher]:
+    """Archive + checkpoints covering [DAYS[0], LAST_OLD] for AAPL and MSFT."""
+    root = tmp_path / "news"
+    fetcher = WindowedNewsFetcher(articles)
+    for sym in ("AAPL", "MSFT"):
+        backfill_ticker(fetcher, sym, DAYS[0], LAST_OLD, root, sleep=_noop_sleep)
+    fetcher.calls.clear()
+    return root, fetcher
+
+
+def news_store(tmp_path: Path, root: Path) -> Path:
+    """Two-ticker store carrying news_ct_1d bins derived from the archive."""
+    series = read_news_series(root, ["AAPL", "MSFT"], DAYS, DAYS[0], LAST_OLD)
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL"), (), ()),
+            TickerBundle("MSFT", make_bars("MSFT", close=200.0), (), ()),
+        ],
+        store,
+        ticker_series={"news_ct_1d": series},
+    )
+    return store
+
+
+def news_equity_client(days: list[date]) -> WindowedFakeFmp:
+    return WindowedFakeFmp(
+        bars={
+            "AAPL": make_bars("AAPL", days),
+            "MSFT": make_bars("MSFT", days, close=200.0),
+        }
+    )
+
+
+def test_refresh_appends_news_counts_alongside_equity_bars(tmp_path: Path) -> None:
+    root, fetcher = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    result = refresh_store(
+        store,
+        news_equity_client(DAYS + NEW_DAYS),
+        end=NEW_DAYS[-1],
+        news_root=root,
+        news_fetch_pages=fetcher,
+        news_sleep=_noop_sleep,
+    )
+    assert result.updated is True
+    assert result.warnings == ()
+    assert result.news_introduced is False
+    # Each ticker pulled only the gap after its checkpoint, same --end as equities.
+    assert fetcher.calls == [
+        ("AAPL", "2024-01-09", "2024-01-10"),
+        ("MSFT", "2024-01-09", "2024-01-10"),
+    ]
+    start, aapl = read_bin(store / "features" / "aapl" / "news_ct_1d.day.bin")
+    assert start == 0
+    # History intact; 01-09 has the 09:00 article, 01-10 the 17:00 rollover + 12:00.
+    assert aapl == pytest.approx([0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0])
+    _, msft = read_bin(store / "features" / "msft" / "news_ct_1d.day.bin")
+    assert msft == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    # The archive checkpoint advanced its end, keeping its start.
+    assert checkpoint_window(root, "AAPL") == (DAYS[0], NEW_DAYS[-1])
+    assert checkpoint_window(root, "MSFT") == (DAYS[0], NEW_DAYS[-1])
+
+
+def test_refresh_noop_with_news_fields_store_untouched(tmp_path: Path) -> None:
+    """Idempotency holds for a store carrying news bins: no news fetch at all."""
+    root, fetcher = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    before = store_snapshot(store)
+    result = refresh_store(
+        store,
+        news_equity_client(DAYS),
+        end=LAST_OLD,
+        news_root=root,
+        news_fetch_pages=fetcher,
+        news_sleep=_noop_sleep,
+    )
+    assert result.updated is False
+    assert fetcher.calls == []
+    assert store_snapshot(store) == before
+
+
+def test_refresh_twice_with_news_second_run_noop(tmp_path: Path) -> None:
+    root, fetcher = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    first = refresh_store(
+        store,
+        news_equity_client(DAYS + NEW_DAYS),
+        end=NEW_DAYS[-1],
+        news_root=root,
+        news_fetch_pages=fetcher,
+        news_sleep=_noop_sleep,
+    )
+    assert first.updated is True
+    after_first = store_snapshot(store)
+    calls_after_first = len(fetcher.calls)
+    second = refresh_store(
+        store,
+        news_equity_client(DAYS + NEW_DAYS),
+        end=NEW_DAYS[-1],
+        news_root=root,
+        news_fetch_pages=fetcher,
+        news_sleep=_noop_sleep,
+    )
+    assert second.updated is False
+    assert len(fetcher.calls) == calls_after_first
+    assert store_snapshot(store) == after_first
+
+
+def test_refresh_news_outage_zero_fills_warns_and_continues(tmp_path: Path) -> None:
+    root, _ = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    broken = WindowedNewsFetcher(NEWS_ARTICLES, fail={"AAPL"})
+    result = refresh_store(
+        store,
+        news_equity_client(DAYS + NEW_DAYS),
+        end=NEW_DAYS[-1],
+        news_root=root,
+        news_fetch_pages=broken,
+        news_sleep=_noop_sleep,
+    )
+    assert result.updated is True
+    warning = next(w for w in result.warnings if "news ingest failed" in w)
+    assert "AAPL" in warning and "recorded as 0" in warning
+    # The failed ticker's new days are explicit zeros, history intact...
+    _, aapl = read_bin(store / "features" / "aapl" / "news_ct_1d.day.bin")
+    assert aapl == pytest.approx([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # ...while the healthy ticker still got its real counts.
+    _, msft = read_bin(store / "features" / "msft" / "news_ct_1d.day.bin")
+    assert msft == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    # The failed ticker's checkpoint did not advance: the next run refetches.
+    assert checkpoint_window(root, "AAPL") == (DAYS[0], LAST_OLD)
+    assert checkpoint_window(root, "MSFT") == (DAYS[0], NEW_DAYS[-1])
+
+
+def test_main_news_outage_exits_zero_and_posts_slack_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, _ = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    broken = WindowedNewsFetcher(NEWS_ARTICLES, fail={"AAPL", "MSFT"})
+    posted: list[str] = []
+    argv = ["--store", str(store), "--end", NEW_DAYS[-1].isoformat(), "--news-root", str(root)]
+    assert (
+        main(
+            argv,
+            client=news_equity_client(DAYS + NEW_DAYS),
+            notify=posted.append,
+            news_fetch_pages=broken,
+            news_sleep=_noop_sleep,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "store refreshed" in captured.out
+    assert "WARNING: news ingest failed for 2 ticker(s)" in captured.err
+    assert posted and "news ingest failed" in posted[0]
+
+
+def test_refresh_news_start_introduces_from_archive(tmp_path: Path) -> None:
+    # Only AAPL was ever backfilled; MSFT must be fetched during introduction.
+    root = tmp_path / "news"
+    fetcher = WindowedNewsFetcher(NEWS_ARTICLES)
+    backfill_ticker(fetcher, "AAPL", DAYS[0], LAST_OLD, root, sleep=_noop_sleep)
+    fetcher.calls.clear()
+    store = two_ticker_store(tmp_path)  # no news bins yet
+    result = refresh_store(
+        store,
+        news_equity_client(DAYS),
+        end=LAST_OLD,
+        news_start=DAYS[0],
+        news_root=root,
+        news_fetch_pages=fetcher,
+        news_sleep=_noop_sleep,
+    )
+    assert result.updated is True
+    assert result.news_introduced is True
+    assert result.new_bars == {}
+    assert result.warnings == ()
+    # AAPL resumed from its checkpoint; only MSFT hit the news endpoint.
+    assert fetcher.calls == [("MSFT", DAYS[0].isoformat(), LAST_OLD.isoformat())]
+    _, aapl = read_bin(store / "features" / "aapl" / "news_ct_1d.day.bin")
+    assert aapl == pytest.approx([0.0, 1.0, 0.0, 0.0, 0.0])
+    _, msft = read_bin(store / "features" / "msft" / "news_ct_1d.day.bin")
+    assert msft == pytest.approx([0.0] * 5)  # its article is past the store end
+    assert checkpoint_window(root, "MSFT") == (DAYS[0], LAST_OLD)
+    # Equity bins are value-identical through the news-only rebuild.
+    _, closes = read_bin(store / "features" / "aapl" / "close.day.bin")
+    assert closes == pytest.approx([100.0, 101.0, 102.0, 103.0, 104.0])
+
+
+def test_refresh_news_start_outage_leaves_store_untouched(tmp_path: Path) -> None:
+    root = tmp_path / "news"  # nothing backfilled at all
+    store = two_ticker_store(tmp_path)
+    before = store_snapshot(store)
+    broken = WindowedNewsFetcher(NEWS_ARTICLES, fail={"AAPL"})
+    result = refresh_store(
+        store,
+        news_equity_client(DAYS),
+        end=LAST_OLD,
+        news_start=DAYS[0],
+        news_root=root,
+        news_fetch_pages=broken,
+        news_sleep=_noop_sleep,
+    )
+    assert result.updated is False
+    assert result.news_introduced is False
+    assert any("news series not introduced" in w for w in result.warnings)
+    assert store_snapshot(store) == before
+
+
+def test_main_news_start_flag_introduces_and_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, fetcher = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = two_ticker_store(tmp_path)
+    argv = [
+        "--store",
+        str(store),
+        "--end",
+        LAST_OLD.isoformat(),
+        "--news-start",
+        DAYS[0].isoformat(),
+        "--news-root",
+        str(root),
+    ]
+    assert (
+        main(
+            argv,
+            client=news_equity_client(DAYS),
+            news_fetch_pages=fetcher,
+            news_sleep=_noop_sleep,
+        )
+        == 0
+    )
+    assert "news series introduced: news_ct_1d" in capsys.readouterr().out
+
+
+def test_extend_store_carries_news_fields_new_ticker_all_nan(tmp_path: Path) -> None:
+    root, _ = seed_news_root(tmp_path, NEWS_ARTICLES)
+    store = news_store(tmp_path, root)
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG", close=50.0)})
+    assert extend_store(store, fmp, ["GOOG"]).added == {"GOOG": 5}
+    _, aapl = read_bin(store / "features" / "aapl" / "news_ct_1d.day.bin")
+    assert aapl == pytest.approx([0.0, 1.0, 0.0, 0.0, 0.0])
+    # The new ticker has the bin (validation requires it) but no coverage yet.
+    _, goog = read_bin(store / "features" / "goog" / "news_ct_1d.day.bin")
+    assert np.isnan(goog).all()
+
+
+def test_refresh_unknown_ticker_series_carried_with_warning(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL"), (), ()),
+            TickerBundle("MSFT", make_bars("MSFT", close=200.0), (), ()),
+        ],
+        store,
+        ticker_series={"news_sent": {"AAPL": [(d, 0.5) for d in DAYS]}},
+    )
+    result = refresh_store(store, news_equity_client(DAYS + NEW_DAYS), end=NEW_DAYS[-1])
+    assert result.updated is True
+    warning = next(w for w in result.warnings if "news_sent" in w)
+    assert "unknown ticker series" in warning
+    _, aapl = read_bin(store / "features" / "aapl" / "news_sent.day.bin")
+    assert aapl[:5] == pytest.approx([0.5] * 5)
+    assert np.isnan(aapl[5:]).all()  # no ingest path: new days stay empty
+
+
+def test_read_ticker_series_roundtrip_and_missing_bin(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL"), (), ()),
+            TickerBundle("MSFT", make_bars("MSFT", close=200.0), (), ()),
+        ],
+        store,
+        ticker_series={"news_ct_1d": {"AAPL": [(DAYS[1], 2.0), (DAYS[2], 0.0)]}},
+    )
+    fields = read_ticker_fields(store, ["AAPL", "MSFT"])
+    assert fields == ("news_ct_1d",)
+    series = read_ticker_series(store, ["AAPL", "MSFT"], DAYS, fields)
+    # Explicit 0.0 survives the round-trip; NaN days and all-NaN MSFT are omitted.
+    assert series == {"news_ct_1d": {"AAPL": [(DAYS[1], 2.0), (DAYS[2], 0.0)]}}
+    (store / "features" / "msft" / "news_ct_1d.day.bin").unlink()
+    with pytest.raises(RefreshError, match="missing ticker-series bin"):
+        read_ticker_series(store, ["AAPL", "MSFT"], DAYS, fields)

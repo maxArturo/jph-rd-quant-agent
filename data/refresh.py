@@ -29,6 +29,17 @@ must never block the pre-open refresh -> predict -> rebalance chain.
 not carry yet (one-time introduction; from then on the nightly refresh
 advances them incrementally).
 
+News counts ($news_ct_1d, US-073): when the store carries news_ct_1d bins,
+each refreshed trading day pulls yesterday's articles per ticker (same --end
+rule), appends them to the news archive (data/build_news.py layout — the
+checkpoint's end advances, its start is kept), and carries the per-ticker
+count bins through the same rebuild (raw, implicit factor 1). A ticker whose
+news fetch fails gets an explicit 0 count for the new day(s) plus a warning
+(Slack line from the CLI) — a news outage must never block the pre-open
+refresh -> predict -> rebalance chain. --news-start is the one-time
+introduction: it builds the series from the archive for every store ticker
+(backfilling any ticker the archive has never seen) and forces a rebuild.
+
 Idempotency: when no ticker has anything new to pull (window empty, or FMP
 returns no bars — weekend, holiday), the store is left byte-for-byte
 untouched and the CLI exits 0 with an "already current" notice.
@@ -47,7 +58,8 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -65,14 +77,25 @@ from data.build_store import (
     MARKET_ALL,
     MARKET_FIELDS,
     MARKET_SERIES_START,
+    NEWS_FIELD,
     TREASURY_FIELD,
     BuildError,
     TickerBundle,
     build_store,
 )
-from data.fmp import DateLike, EodBar, FmpClient, FmpError, _to_iso_date
+from data.fmp import DateLike, EodBar, FmpClient, FmpError, NewsArticle, _to_iso_date
 
 MARKET_TZ = ZoneInfo("America/New_York")
+
+# Daily news ingest pace. Faster than the bulk-backfill's 3 req/s (recorded
+# US-071) because the 04:30 ET refresh must finish before the 04:45 pred
+# refresh: ~590 tickers x ~2 requests at 8 req/s is ~2.5 min, still well
+# under FMP's 750 req/min plan limit.
+REFRESH_NEWS_THROTTLE_RPS = 8.0
+
+# fetch_pages(symbol, start_iso, end_iso) -> pages of articles
+# (FmpClient.iter_stock_news_pages contract; see data/build_news.py).
+NewsFetchPages = Callable[[str, str, str], Iterator[list[NewsArticle]]]
 
 
 class RefreshError(RuntimeError):
@@ -87,8 +110,9 @@ class RefreshResult:
     last_date_before: date
     last_date_after: date
     new_bars: dict[str, int]  # symbol -> number of appended bars
-    warnings: tuple[str, ...] = ()  # degraded-but-not-fatal notices (market outages)
+    warnings: tuple[str, ...] = ()  # degraded-but-not-fatal notices (market/news outages)
     market_introduced: tuple[str, ...] = ()  # $mkt_* fields backfilled this run
+    news_introduced: bool = False  # $news_ct_1d built from the archive this run
 
 
 def default_end() -> date:
@@ -354,6 +378,165 @@ def _pull_market_series(
 
 
 # ---------------------------------------------------------------------------
+# Per-ticker raw series ($news_ct_1d, US-073): read-back and daily ingest
+
+
+def read_ticker_fields(store: Path, symbols: Sequence[str]) -> tuple[str, ...]:
+    """Sorted union of per-ticker raw series bins (news_ct_1d, ...) in the store."""
+    known = set(FIELDS)
+    suffix = f".{FREQ}.bin"
+    fields: set[str] = set()
+    for symbol in symbols:
+        for path in (store / "features" / symbol.lower()).glob(f"*{suffix}"):
+            name = path.name[: -len(suffix)]
+            if name not in known and not name.startswith("mkt_"):
+                fields.add(name)
+    return tuple(sorted(fields))
+
+
+def read_ticker_series(
+    store: Path, symbols: Sequence[str], calendar: list[date], fields: Sequence[str]
+) -> dict[str, dict[str, list[tuple[date, float]]]]:
+    """Recover each per-ticker raw series as per-symbol (date, value) observations.
+
+    NaN days carry no observation (they mean "outside the series' coverage" —
+    the rebuild writes them back as NaN); a symbol whose bin is all NaN gets
+    no entry, so its rebuilt bin comes back all-NaN too. A missing bin on any
+    symbol is corruption: build_store writes one per instrument.
+    """
+    series: dict[str, dict[str, list[tuple[date, float]]]] = {}
+    for name in fields:
+        per_symbol: dict[str, list[tuple[date, float]]] = {}
+        for symbol in symbols:
+            path = store / "features" / symbol.lower() / f"{name}.{FREQ}.bin"
+            if not path.exists():
+                raise RefreshError(
+                    f"{symbol} is missing ticker-series bin {path}; store is corrupt"
+                )
+            data = np.fromfile(path, dtype="<f")
+            if len(data) < 2:
+                raise RefreshError(f"{path} has no values")
+            start_index = int(data[0])
+            points = data[1:]
+            if start_index < 0 or start_index + len(points) > len(calendar):
+                raise RefreshError(
+                    f"{symbol} ticker bin {name} exceeds the store calendar; store is corrupt"
+                )
+            observations = [
+                (calendar[start_index + i], float(value))
+                for i, value in enumerate(points)
+                if not math.isnan(float(value))
+            ]
+            if observations:
+                per_symbol[symbol] = observations
+        series[name] = per_symbol
+    return series
+
+
+def _pull_news_series(
+    fetch_pages: NewsFetchPages,
+    news_root: Path | str | None,
+    stored_ticker: dict[str, dict[str, list[tuple[date, float]]]],
+    symbols: Sequence[str],
+    existing_ends: dict[str, date],
+    new_bars: dict[str, list[EodBar]],
+    calendar: list[date],
+    last_before: date,
+    end_date: date,
+    news_start: date | None,
+    sleep: Callable[[float], None],
+    throttle_rps: float,
+) -> tuple[dict[str, dict[str, list[tuple[date, float]]]], list[str], bool]:
+    """Advance the news archive and merge $news_ct_1d observations; degrade per ticker.
+
+    Returns (merged ticker-series map, warnings, news-introduced flag). A
+    ticker whose news fetch fails gets explicit 0 counts for its new days —
+    a news outage must never block the refresh chain. When ``news_start`` is
+    set and the store has no news bins, the series is built from the archive
+    for every store ticker (introduction), backfilling tickers the archive
+    has never seen; an introduction failure degrades to a warning.
+    """
+    from data import build_news
+
+    series = {name: {s: list(obs) for s, obs in per.items()} for name, per in stored_ticker.items()}
+    warnings: list[str] = []
+    news_present = NEWS_FIELD in series
+    introduce = news_start is not None and not news_present
+    if new_bars:
+        for name in series:
+            if name != NEWS_FIELD:
+                warnings.append(
+                    f"unknown ticker series {name} in the store (no ingest path); "
+                    "new days left empty"
+                )
+    if not news_present and not introduce:
+        return series, warnings, False
+
+    root = Path(news_root if news_root is not None else build_news.DEFAULT_NEWS_ROOT).expanduser()
+    new_days = sorted({b.date for bars in new_bars.values() for b in bars if b.date > last_before})
+    final_days = calendar + new_days
+
+    if news_present and new_bars:
+        per_symbol = series[NEWS_FIELD]
+        failed: list[str] = []
+        for symbol in symbols:
+            fresh = new_bars.get(symbol)
+            if not fresh:
+                continue  # span does not advance; nothing to append
+            old_end = existing_ends[symbol]
+            sym_end = fresh[-1].date
+            try:
+                build_news.advance_ticker(
+                    fetch_pages, symbol, end_date, root, sleep=sleep, throttle_rps=throttle_rps
+                )
+                counts = [
+                    (day, float(count))
+                    for day, count in build_news.daily_counts(
+                        root, symbol, final_days, old_end, sym_end
+                    )
+                    if day > old_end
+                ]
+            except Exception:  # noqa: BLE001 — news must never block the refresh chain
+                failed.append(symbol)
+                counts = [(day, 0.0) for day in final_days if old_end < day <= sym_end]
+            per_symbol[symbol] = per_symbol.get(symbol, []) + counts
+        if failed:
+            shown = ", ".join(failed[:5]) + (", ..." if len(failed) > 5 else "")
+            warnings.append(
+                f"news ingest failed for {len(failed)} ticker(s) ({shown}); "
+                "$news_ct_1d recorded as 0 for the new day(s)"
+            )
+
+    introduced = False
+    if introduce and news_start is not None:
+        final_end = final_days[-1]
+        try:
+            for symbol in symbols:
+                window = build_news.checkpoint_window(root, symbol)
+                if window is None or window[0] > news_start:
+                    build_news.backfill_ticker(
+                        fetch_pages,
+                        symbol,
+                        news_start,
+                        end_date,
+                        root,
+                        sleep=sleep,
+                        throttle_rps=throttle_rps,
+                    )
+                else:
+                    build_news.advance_ticker(
+                        fetch_pages, symbol, end_date, root, sleep=sleep, throttle_rps=throttle_rps
+                    )
+            series[NEWS_FIELD] = dict(
+                build_news.read_news_series(root, symbols, final_days, news_start, final_end)
+            )
+            introduced = True
+        except (FmpError, build_news.NewsBuildError, OSError) as exc:
+            warnings.append(f"news series not introduced: {exc}")
+    return series, warnings, introduced
+
+
+# ---------------------------------------------------------------------------
 # Refresh
 
 
@@ -362,6 +545,11 @@ def refresh_store(
     client: FmpClient,
     end: DateLike | None = None,
     market_start: DateLike | None = None,
+    news_start: DateLike | None = None,
+    news_root: Path | str | None = None,
+    news_fetch_pages: NewsFetchPages | None = None,
+    news_sleep: Callable[[float], None] = time.sleep,
+    news_throttle: float = REFRESH_NEWS_THROTTLE_RPS,
 ) -> RefreshResult:
     """Pull bars since each ticker's last stored date and rebuild if anything landed.
 
@@ -371,6 +559,12 @@ def refresh_store(
     the canonical MARKET_FIELDS the store lacks, from that date — the
     one-time introduction path; it forces a rebuild even when no equity bar
     is new.
+
+    News counts work the same way per ticker: stored news_ct_1d bins are read
+    back, yesterday's articles are pulled into the archive under ``news_root``
+    (default data/build_news.DEFAULT_NEWS_ROOT), and each refreshed ticker's
+    new days get their archive-derived counts (0 on failure, with a warning).
+    news_start is the one-time introduction from the archive.
     """
     store = store.expanduser()
     end_date = date.fromisoformat(_to_iso_date(end if end is not None else default_end(), "end"))
@@ -381,11 +575,18 @@ def refresh_store(
     last_before = calendar[-1]
     market_fields = read_market_fields(store, symbols)
     stored_market = read_market_series(store, symbols, calendar, market_fields)
+    stored_ticker = read_ticker_series(
+        store, symbols, calendar, read_ticker_fields(store, symbols)
+    )
     introduce: tuple[str, ...] = ()
     market_start_date: date | None = None
     if market_start is not None:
         market_start_date = date.fromisoformat(_to_iso_date(market_start, "market-start"))
         introduce = tuple(name for name in MARKET_FIELDS if name not in stored_market)
+    news_start_date: date | None = None
+    if news_start is not None:
+        news_start_date = date.fromisoformat(_to_iso_date(news_start, "news-start"))
+    introduce_news = news_start_date is not None and NEWS_FIELD not in stored_ticker
 
     new_bars: dict[str, list[EodBar]] = {}
     for symbol in symbols:
@@ -400,7 +601,7 @@ def refresh_store(
         if fresh:
             new_bars[symbol] = fresh
 
-    if not new_bars and not introduce:
+    if not new_bars and not introduce and not introduce_news:
         return RefreshResult(False, last_before, last_before, {})
 
     # Stored series only advance when the equity calendar does: without new
@@ -414,7 +615,22 @@ def refresh_store(
         end_date=end_date,
         market_start=market_start_date,
     )
-    if not new_bars and not introduced:
+    ticker_series, news_warnings, news_introduced = _pull_news_series(
+        news_fetch_pages if news_fetch_pages is not None else client.iter_stock_news_pages,
+        news_root,
+        stored_ticker,
+        symbols,
+        {symbol: bars[-1].date for symbol, bars in existing.items()},
+        new_bars,
+        calendar,
+        last_before,
+        end_date,
+        news_start_date if introduce_news else None,
+        sleep=news_sleep,
+        throttle_rps=news_throttle,
+    )
+    warnings += news_warnings
+    if not new_bars and not introduced and not news_introduced:
         # Introduction was requested but nothing landed (outage/empty): the
         # rebuild would be a byte-identical rewrite, so skip it.
         return RefreshResult(False, last_before, last_before, {}, warnings=tuple(warnings))
@@ -435,6 +651,7 @@ def refresh_store(
         store,
         extra_instruments=refresh_universe_spans(universes, old_ends, new_ends),
         market_series=market_series or None,
+        ticker_series=ticker_series or None,
     )
     last_after = max(bundle.bars[-1].date for bundle in bundles)
     return RefreshResult(
@@ -444,6 +661,7 @@ def refresh_store(
         {s: len(bars) for s, bars in new_bars.items()},
         warnings=tuple(warnings),
         market_introduced=tuple(introduced),
+        news_introduced=news_introduced,
     )
 
 
@@ -474,7 +692,10 @@ def extend_store(
     dividend history is refetched for every ticker because the rebuild
     recomputes all adjustment factors — same trade-off refresh_store makes.
     Any $mkt_* fields the store carries are read back and rebuilt alongside,
-    so new tickers get the broadcast bins over their own spans too.
+    so new tickers get the broadcast bins over their own spans too. Per-ticker
+    series (news_ct_1d) are carried for existing tickers; a new ticker's bin
+    starts all-NaN (outside news coverage) until its archive backfill lands
+    and a later rebuild picks it up.
 
     The store calendar is an invariant: bars on days the store has never
     seen (foreign-venue history on US holidays — dual listings like GLXY
@@ -528,6 +749,9 @@ def extend_store(
     stored_market = read_market_series(
         store, existing_symbols, calendar, read_market_fields(store, existing_symbols)
     )
+    stored_ticker = read_ticker_series(
+        store, existing_symbols, calendar, read_ticker_fields(store, existing_symbols)
+    )
     bundles = [
         TickerBundle(
             symbol=symbol,
@@ -546,7 +770,11 @@ def extend_store(
         for symbol, bars in fetched.items()
     ]
     build_store(
-        bundles, store, extra_instruments=universes, market_series=stored_market or None
+        bundles,
+        store,
+        extra_instruments=universes,
+        market_series=stored_market or None,
+        ticker_series=stored_ticker or None,
     )
     return ExtendResult(
         added={symbol: len(bars) for symbol, bars in fetched.items()},
@@ -570,6 +798,8 @@ def main(
     argv: Any = None,
     client: FmpClient | None = None,
     notify: Callable[[str], None] | None = None,
+    news_fetch_pages: NewsFetchPages | None = None,
+    news_sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     parser = argparse.ArgumentParser(
         description="Incrementally refresh the Qlib US store from FMP "
@@ -602,9 +832,23 @@ def main(
         "already in the store always refresh incrementally without this flag",
     )
     parser.add_argument(
+        "--news-start",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="one-time $news_ct_1d introduction: build the per-ticker news-count series "
+        "from the news archive starting at this date (canonical start 2025-01-02) when "
+        "the store does not carry news bins yet; a store already carrying them always "
+        "ingests yesterday's articles without this flag",
+    )
+    parser.add_argument(
+        "--news-root",
+        default=None,
+        help="news archive + checkpoint root (default ~/rdq-data/news)",
+    )
+    parser.add_argument(
         "--no-slack",
         action="store_true",
-        help="print market-series warnings to stderr only (no Slack notice)",
+        help="print refresh warnings to stderr only (no Slack notice)",
     )
     args = parser.parse_args(argv)
     fmp = client if client is not None else FmpClient()
@@ -638,7 +882,14 @@ def main(
         return 0
     try:
         result = refresh_store(
-            Path(args.store), fmp, args.end, market_start=args.market_start
+            Path(args.store),
+            fmp,
+            args.end,
+            market_start=args.market_start,
+            news_start=args.news_start,
+            news_root=args.news_root,
+            news_fetch_pages=news_fetch_pages,
+            news_sleep=news_sleep,
         )
     except (RefreshError, BuildError, FmpError, AdjustmentError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -654,6 +905,8 @@ def main(
         print(f"store already current (last date {result.last_date_before.isoformat()})")
     if result.market_introduced:
         print(f"market series introduced: {', '.join(result.market_introduced)}")
+    if result.news_introduced:
+        print(f"news series introduced: {NEWS_FIELD}")
     for line in result.warnings:
         print(f"WARNING: {line}", file=sys.stderr)
     if result.warnings and not args.no_slack:

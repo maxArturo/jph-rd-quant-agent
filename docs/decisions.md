@@ -1346,3 +1346,21 @@ the plan limit; neither this probe's ~134-request burst nor the market probe
 drew a 429 through the proxy). Runtime estimate at 3 req/s: **≈ 88 min**
 upper bound, realistically well under an hour. Rerunning is cheap because
 US-072 checkpoints per ticker.
+
+## 2026-08-24 — US-015 (PRD US-073): daily news ingest rides the store refresh at 8 req/s
+
+**Problem:** with `$news_ct_1d` in the bin store, the 04:30 ET store refresh
+must also pull yesterday's articles per ticker (~590 tickers, ~2 requests
+each ≈ 1,200 requests/day) — at the bulk-backfill throttle of 3 req/s that
+alone is ~6.5 min, uncomfortably close to the 04:45 ET pred-refresh timer
+when added to the equity rebuild.
+
+**Decision:** the refresh's daily news ingest runs at
+`data/refresh.REFRESH_NEWS_THROTTLE_RPS = 8` req/s (~2.5 min/day), still
+well under FMP's 750 req/min plan limit. The 3 req/s figure recorded under
+US-071 remains the throttle for BULK backfills (`python -m data.build_news`),
+where the request volume is ~2.8k+ and there is no downstream timer to beat.
+Failure containment mirrors the market series: a per-ticker news failure
+degrades to explicit 0 counts for the new day plus one aggregated Slack
+warning, and the ticker's checkpoint stays put so the next refresh refetches
+the gap — the refresh -> predict -> rebalance chain never blocks on news.

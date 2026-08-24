@@ -14,6 +14,7 @@ from data.build_news import (
     NEWS_BACKFILL_START,
     NewsBuildError,
     TickerNewsResult,
+    advance_ticker,
     archive_dir,
     backfill_news,
     backfill_ticker,
@@ -25,7 +26,7 @@ from data.build_news import (
     read_news_series,
 )
 from data.build_store import TickerBundle, build_store
-from data.fmp import NewsArticle
+from data.fmp import FmpError, NewsArticle
 from tests.test_build_store import DAYS, make_bars
 
 
@@ -76,6 +77,23 @@ class FakeNewsFetcher:
         if symbol in self.fail:
             raise RuntimeError(f"simulated FMP outage for {symbol}")
         rows = self.articles.get(symbol, [])
+        for i in range(0, len(rows), 2):
+            yield rows[i : i + 2]
+
+
+class WindowedNewsFetcher(FakeNewsFetcher):
+    """FakeNewsFetcher that honors the [start, end] published-date window and
+    fails with FmpError (what a real outage surfaces as through the client)."""
+
+    def __call__(self, symbol: str, start_iso: str, end_iso: str) -> Iterator[list[NewsArticle]]:
+        self.calls.append((symbol, start_iso, end_iso))
+        if symbol in self.fail:
+            raise FmpError(f"simulated FMP outage for {symbol}")
+        rows = [
+            a
+            for a in self.articles.get(symbol, [])
+            if start_iso <= a.published.date().isoformat() <= end_iso
+        ]
         for i in range(0, len(rows), 2):
             yield rows[i : i + 2]
 
@@ -224,6 +242,62 @@ class TestBackfill:
         assert result.articles == 2
         records = json.loads((archive_dir(tmp_path) / "AAPL" / "2025-03-04.json").read_text())
         assert len(records) == 2
+
+
+class TestAdvanceTicker:
+    ARTICLES = {
+        "AAPL": [
+            art("2025-03-04 10:00:00"),
+            art("2025-03-10 09:00:00"),
+            art("2025-03-10 17:00:00"),  # after the close -> buckets to 03-11
+        ]
+    }
+
+    def test_advances_checkpoint_end_and_archives_the_gap_only(self, tmp_path: Path) -> None:
+        fetcher = WindowedNewsFetcher(self.ARTICLES)
+        backfill_ticker(
+            fetcher, "AAPL", "2025-03-03", "2025-03-07", tmp_path, sleep=lambda _s: None
+        )
+        result = advance_ticker(fetcher, "AAPL", "2025-03-14", tmp_path, sleep=lambda _s: None)
+        assert result.fetched is True and result.articles == 2
+        # Only the gap after the checkpoint's end was fetched.
+        assert fetcher.calls[-1] == ("AAPL", "2025-03-08", "2025-03-14")
+        # The checkpoint keeps its start and advances its end...
+        assert checkpoint_window(tmp_path, "AAPL") == (date(2025, 3, 3), date(2025, 3, 14))
+        # ...with totals accumulated across backfill + advance.
+        payload = json.loads((checkpoint_dir(tmp_path) / "AAPL.json").read_text())
+        assert payload["articles"] == 3 and payload["requests"] == 4
+        # read_news_series containment holds over the widened window.
+        counts = dict(daily_counts(tmp_path, "AAPL", TRADING, date(2025, 3, 3), date(2025, 3, 14)))
+        assert counts[date(2025, 3, 4)] == 1
+        assert counts[date(2025, 3, 10)] == 1
+        assert counts[date(2025, 3, 11)] == 1
+
+    def test_noop_when_end_already_covered(self, tmp_path: Path) -> None:
+        fetcher = WindowedNewsFetcher(self.ARTICLES)
+        backfill_ticker(
+            fetcher, "AAPL", "2025-03-03", "2025-03-07", tmp_path, sleep=lambda _s: None
+        )
+        result = advance_ticker(fetcher, "AAPL", "2025-03-07", tmp_path, sleep=lambda _s: None)
+        assert result == TickerNewsResult(symbol="AAPL", articles=0, requests=0, fetched=False)
+        assert len(fetcher.calls) == 1  # the backfill; the advance fetched nothing
+
+    def test_advance_twice_second_is_noop(self, tmp_path: Path) -> None:
+        fetcher = WindowedNewsFetcher(self.ARTICLES)
+        backfill_ticker(
+            fetcher, "AAPL", "2025-03-03", "2025-03-07", tmp_path, sleep=lambda _s: None
+        )
+        first = advance_ticker(fetcher, "AAPL", "2025-03-14", tmp_path, sleep=lambda _s: None)
+        assert first.fetched is True
+        calls_after_first = len(fetcher.calls)
+        second = advance_ticker(fetcher, "AAPL", "2025-03-14", tmp_path, sleep=lambda _s: None)
+        assert second.fetched is False
+        assert len(fetcher.calls) == calls_after_first
+
+    def test_without_checkpoint_fails_loud(self, tmp_path: Path) -> None:
+        fetcher = WindowedNewsFetcher(self.ARTICLES)
+        with pytest.raises(NewsBuildError, match="no news checkpoint"):
+            advance_ticker(fetcher, "NVDA", "2025-03-14", tmp_path, sleep=lambda _s: None)
 
 
 class TestDailyCounts:
