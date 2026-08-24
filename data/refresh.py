@@ -17,6 +17,18 @@ factor series is recomputed, re-scaling history exactly like a fresh build.
 Round-tripping through the float32 bins costs ~1e-7 relative noise per
 rebuild; negligible against price data.
 
+Market broadcast fields ($mkt_*, US-067): any mkt_* bins the store carries
+are read back as (date, value) observations (skipping the raw-recovery /
+adjustment math entirely — implicit factor 1), each series is pulled since
+the store's last date under the same --end rule as equity bars, and the
+merged series ride the same temp -> validate -> atomic-swap rebuild. A
+series whose FMP fetch fails is forward-filled from its last stored value
+and reported as a warning (Slack line from the CLI) — a market-data outage
+must never block the pre-open refresh -> predict -> rebalance chain.
+--market-start backfills any of the canonical MARKET_FIELDS the store does
+not carry yet (one-time introduction; from then on the nightly refresh
+advances them incrementally).
+
 Idempotency: when no ticker has anything new to pull (window empty, or FMP
 returns no bars — weekend, holiday), the store is left byte-for-byte
 untouched and the CLI exits 0 with an "already current" notice.
@@ -35,7 +47,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -46,10 +58,14 @@ import numpy as np
 
 from data.adjust import AdjustmentError
 from data.build_store import (
+    COMMODITY_SYMBOLS,
     DEFAULT_STORE_PATH,
     FIELDS,
     FREQ,
     MARKET_ALL,
+    MARKET_FIELDS,
+    MARKET_SERIES_START,
+    TREASURY_FIELD,
     BuildError,
     TickerBundle,
     build_store,
@@ -71,6 +87,8 @@ class RefreshResult:
     last_date_before: date
     last_date_after: date
     new_bars: dict[str, int]  # symbol -> number of appended bars
+    warnings: tuple[str, ...] = ()  # degraded-but-not-fatal notices (market outages)
+    market_introduced: tuple[str, ...] = ()  # $mkt_* fields backfilled this run
 
 
 def default_end() -> date:
@@ -206,13 +224,154 @@ def read_raw_bars(store: Path, symbol: str, calendar: list[date]) -> tuple[EodBa
 
 
 # ---------------------------------------------------------------------------
+# Market broadcast fields ($mkt_*): read-back and incremental pull
+
+
+def read_market_fields(store: Path, symbols: Sequence[str]) -> tuple[str, ...]:
+    """Sorted union of mkt_* broadcast fields present in the store's feature bins."""
+    fields: set[str] = set()
+    suffix = f".{FREQ}.bin"
+    for symbol in symbols:
+        feature_dir = store / "features" / symbol.lower()
+        fields.update(p.name[: -len(suffix)] for p in feature_dir.glob(f"mkt_*{suffix}"))
+    return tuple(sorted(fields))
+
+
+def read_market_series(
+    store: Path, symbols: Sequence[str], calendar: list[date], fields: Sequence[str]
+) -> dict[str, list[tuple[date, float]]]:
+    """Recover each stored $mkt_* series as (date, value) observations.
+
+    Bins hold forward-filled values, so every stored day reads back as a
+    direct observation (the original off-calendar prints are not
+    recoverable, and don't need to be); the NaN head before a series' first
+    observation is dropped. Values are identical across instruments, so
+    overlaying every symbol's bin reconstructs the full calendar span even
+    when no single ticker spans the whole store.
+    """
+    series: dict[str, list[tuple[date, float]]] = {}
+    for name in fields:
+        values = np.full(len(calendar), np.nan)
+        for symbol in symbols:
+            path = store / "features" / symbol.lower() / f"{name}.{FREQ}.bin"
+            if not path.exists():
+                raise RefreshError(
+                    f"{symbol} is missing market bin {path}; store is corrupt"
+                )
+            data = np.fromfile(path, dtype="<f")
+            if len(data) < 2:
+                raise RefreshError(f"{path} has no values")
+            start_index = int(data[0])
+            points = data[1:]
+            if start_index < 0 or start_index + len(points) > len(calendar):
+                raise RefreshError(
+                    f"{symbol} market bin {name} exceeds the store calendar; store is corrupt"
+                )
+            segment = values[start_index : start_index + len(points)]
+            mask = np.isnan(segment)
+            segment[mask] = points[mask]
+        observations = [
+            (day, float(value))
+            for day, value in zip(calendar, values, strict=True)
+            if not math.isnan(value)
+        ]
+        if not observations:
+            raise RefreshError(f"market series {name} in the store holds no values")
+        series[name] = observations
+    return series
+
+
+def _fetch_market_observations(
+    client: FmpClient, name: str, start: date, end: date
+) -> list[tuple[date, float]]:
+    """One canonical $mkt_* series as (date, value) rows over [start, end]."""
+    if name == TREASURY_FIELD:
+        return [
+            (curve.date, curve.year10)
+            for curve in client.get_treasury_rates(start, end)
+            if curve.year10 is not None
+        ]
+    rows = client.get_commodity_eod(COMMODITY_SYMBOLS[name], start, end)
+    return [(row.date, row.price) for row in rows]
+
+
+def _pull_market_series(
+    client: FmpClient,
+    stored: dict[str, list[tuple[date, float]]],
+    pull_stored: bool,
+    introduce: Sequence[str],
+    last_before: date,
+    end_date: date,
+    market_start: date | None,
+) -> tuple[dict[str, list[tuple[date, float]]], list[str], list[str]]:
+    """Advance stored series and backfill introduced ones; degrade per series.
+
+    Returns (merged series map, warnings, fields actually introduced). A
+    series whose fetch fails keeps its stored observations — the rebuild's
+    forward-fill covers the new days — and is reported as a warning instead
+    of raising: a market-data outage must never block the refresh chain.
+    """
+    merged = {name: list(observations) for name, observations in stored.items()}
+    warnings: list[str] = []
+    introduced: list[str] = []
+    windows: list[tuple[str, date]] = []
+    if pull_stored:
+        windows += [(name, last_before + timedelta(days=1)) for name in stored]
+    if market_start is not None:
+        windows += [(name, market_start) for name in introduce]
+    for name, window_start in windows:
+        if name not in MARKET_FIELDS:
+            warnings.append(
+                f"unknown market series {name} in the store (no FMP mapping); "
+                "carried forward-filled"
+            )
+            continue
+        if window_start > end_date:
+            continue
+        try:
+            fetched = _fetch_market_observations(client, name, window_start, end_date)
+        except FmpError as exc:
+            if name in stored:
+                warnings.append(
+                    f"market series {name}: FMP fetch failed ({exc}); "
+                    "forward-filled from the last stored value"
+                )
+            else:
+                warnings.append(f"market series {name}: FMP fetch failed ({exc}); not introduced")
+            continue
+        fresh = sorted((d, v) for d, v in fetched if window_start <= d <= end_date)
+        if name in stored:
+            merged[name] += fresh
+        elif fresh:
+            merged[name] = fresh
+            introduced.append(name)
+        else:
+            warnings.append(
+                f"market series {name}: FMP returned no rows over "
+                f"{window_start.isoformat()}..{end_date.isoformat()}; not introduced"
+            )
+    return merged, warnings, introduced
+
+
+# ---------------------------------------------------------------------------
 # Refresh
 
 
 def refresh_store(
-    store: Path, client: FmpClient, end: DateLike | None = None
+    store: Path,
+    client: FmpClient,
+    end: DateLike | None = None,
+    market_start: DateLike | None = None,
 ) -> RefreshResult:
-    """Pull bars since each ticker's last stored date and rebuild if anything landed."""
+    """Pull bars since each ticker's last stored date and rebuild if anything landed.
+
+    Any $mkt_* fields the store carries are pulled forward over the same
+    window and rebuilt alongside (raw broadcast, implicit factor 1 — the
+    adjustment math never sees them). market_start additionally backfills
+    the canonical MARKET_FIELDS the store lacks, from that date — the
+    one-time introduction path; it forces a rebuild even when no equity bar
+    is new.
+    """
     store = store.expanduser()
     end_date = date.fromisoformat(_to_iso_date(end if end is not None else default_end(), "end"))
     calendar = read_calendar(store)
@@ -220,6 +379,13 @@ def refresh_store(
     universes = read_universes(store)
     existing = {symbol: read_raw_bars(store, symbol, calendar) for symbol in symbols}
     last_before = calendar[-1]
+    market_fields = read_market_fields(store, symbols)
+    stored_market = read_market_series(store, symbols, calendar, market_fields)
+    introduce: tuple[str, ...] = ()
+    market_start_date: date | None = None
+    if market_start is not None:
+        market_start_date = date.fromisoformat(_to_iso_date(market_start, "market-start"))
+        introduce = tuple(name for name in MARKET_FIELDS if name not in stored_market)
 
     new_bars: dict[str, list[EodBar]] = {}
     for symbol in symbols:
@@ -234,8 +400,24 @@ def refresh_store(
         if fresh:
             new_bars[symbol] = fresh
 
-    if not new_bars:
+    if not new_bars and not introduce:
         return RefreshResult(False, last_before, last_before, {})
+
+    # Stored series only advance when the equity calendar does: without new
+    # bars there is no new trading day to place a market value on.
+    market_series, warnings, introduced = _pull_market_series(
+        client,
+        stored_market,
+        pull_stored=bool(new_bars),
+        introduce=introduce,
+        last_before=last_before,
+        end_date=end_date,
+        market_start=market_start_date,
+    )
+    if not new_bars and not introduced:
+        # Introduction was requested but nothing landed (outage/empty): the
+        # rebuild would be a byte-identical rewrite, so skip it.
+        return RefreshResult(False, last_before, last_before, {}, warnings=tuple(warnings))
 
     bundles = [
         TickerBundle(
@@ -252,10 +434,16 @@ def refresh_store(
         bundles,
         store,
         extra_instruments=refresh_universe_spans(universes, old_ends, new_ends),
+        market_series=market_series or None,
     )
     last_after = max(bundle.bars[-1].date for bundle in bundles)
     return RefreshResult(
-        True, last_before, last_after, {s: len(bars) for s, bars in new_bars.items()}
+        True,
+        last_before,
+        last_after,
+        {s: len(bars) for s, bars in new_bars.items()},
+        warnings=tuple(warnings),
+        market_introduced=tuple(introduced),
     )
 
 
@@ -285,6 +473,8 @@ def extend_store(
     temp -> validate -> swap path, custom universes preserved. Split and
     dividend history is refetched for every ticker because the rebuild
     recomputes all adjustment factors — same trade-off refresh_store makes.
+    Any $mkt_* fields the store carries are read back and rebuilt alongside,
+    so new tickers get the broadcast bins over their own spans too.
 
     The store calendar is an invariant: bars on days the store has never
     seen (foreign-venue history on US holidays — dual listings like GLXY
@@ -335,6 +525,9 @@ def extend_store(
         return ExtendResult(added={}, missing=tuple(missing), gapped=tuple(gapped))
 
     existing = {symbol: read_raw_bars(store, symbol, calendar) for symbol in existing_symbols}
+    stored_market = read_market_series(
+        store, existing_symbols, calendar, read_market_fields(store, existing_symbols)
+    )
     bundles = [
         TickerBundle(
             symbol=symbol,
@@ -352,7 +545,9 @@ def extend_store(
         )
         for symbol, bars in fetched.items()
     ]
-    build_store(bundles, store, extra_instruments=universes)
+    build_store(
+        bundles, store, extra_instruments=universes, market_series=stored_market or None
+    )
     return ExtendResult(
         added={symbol: len(bars) for symbol, bars in fetched.items()},
         missing=tuple(missing),
@@ -364,7 +559,18 @@ def extend_store(
 # CLI
 
 
-def main(argv: Any = None, client: FmpClient | None = None) -> int:
+def _slack_notify(message: str) -> None:
+    """Post to the ops channel (repo-.env slack_notifier; Slack bypasses the proxy)."""
+    from execution.rebalance import slack_notifier
+
+    slack_notifier()(message)
+
+
+def main(
+    argv: Any = None,
+    client: FmpClient | None = None,
+    notify: Callable[[str], None] | None = None,
+) -> int:
     parser = argparse.ArgumentParser(
         description="Incrementally refresh the Qlib US store from FMP "
         "(run under `onecli run --agent rdq-exec-paper` so the proxy injects the FMP key)."
@@ -386,6 +592,19 @@ def main(argv: Any = None, client: FmpClient | None = None) -> int:
         metavar="SYM,SYM,...",
         help="extend the store with these new tickers (full-history backfill aligned to the"
         " store's calendar) instead of refreshing existing ones",
+    )
+    parser.add_argument(
+        "--market-start",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="backfill any canonical $mkt_* market series the store does not carry yet, "
+        f"from this date (canonical start {MARKET_SERIES_START.isoformat()}); series "
+        "already in the store always refresh incrementally without this flag",
+    )
+    parser.add_argument(
+        "--no-slack",
+        action="store_true",
+        help="print market-series warnings to stderr only (no Slack notice)",
     )
     args = parser.parse_args(argv)
     fmp = client if client is not None else FmpClient()
@@ -418,7 +637,9 @@ def main(argv: Any = None, client: FmpClient | None = None) -> int:
             print("nothing to do: every requested ticker is already in the store")
         return 0
     try:
-        result = refresh_store(Path(args.store), fmp, args.end)
+        result = refresh_store(
+            Path(args.store), fmp, args.end, market_start=args.market_start
+        )
     except (RefreshError, BuildError, FmpError, AdjustmentError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -431,6 +652,16 @@ def main(argv: Any = None, client: FmpClient | None = None) -> int:
         )
     else:
         print(f"store already current (last date {result.last_date_before.isoformat()})")
+    if result.market_introduced:
+        print(f"market series introduced: {', '.join(result.market_introduced)}")
+    for line in result.warnings:
+        print(f"WARNING: {line}", file=sys.stderr)
+    if result.warnings and not args.no_slack:
+        message = ":warning: store refresh: " + "; ".join(result.warnings)
+        try:
+            (notify if notify is not None else _slack_notify)(message)
+        except Exception as exc:  # noqa: BLE001 — a warning notice must never fail the refresh
+            print(f"slack notice failed ({exc})", file=sys.stderr)
     return 0
 
 

@@ -146,6 +146,12 @@ class TestRefreshUnits:
         assert "Type=oneshot" in text
         assert "WorkingDirectory=%h/rd-agent-q" in text
 
+    def test_slack_bypasses_onecli_proxy(self) -> None:
+        """US-067: a market-series outage posts a Slack warning from this unit;
+        docs/decisions.md 2026-07-08 — Slack never transits the OneCLI proxy."""
+        text = REFRESH_UNIT.read_text()
+        assert 'Environment="NO_PROXY=slack.com" "no_proxy=slack.com"' in text
+
     def test_timer_weekday_preopen_new_york(self) -> None:
         """AC: explicit America/New_York handling, scheduled before market open."""
         days, hhmm = timer_schedule(REFRESH_TIMER)

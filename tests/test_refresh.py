@@ -3,23 +3,39 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from data.build_store import BuildError, TickerBundle, build_store
-from data.fmp import Dividend, EodBar, Split
+from data.build_store import (
+    COMMODITY_SYMBOLS,
+    MARKET_FIELDS,
+    BuildError,
+    TickerBundle,
+    build_store,
+)
+from data.fmp import CommodityEod, Dividend, EodBar, FmpError, Split, TreasuryCurve
 from data.refresh import (
     RefreshError,
     extend_store,
     main,
+    read_market_fields,
+    read_market_series,
     read_raw_bars,
     read_universes,
     refresh_store,
 )
-from tests.test_build_store import DAYS, FakeFmp, make_bars, read_bin
+from tests.test_build_store import (
+    DAYS,
+    FakeFmp,
+    commodity_price,
+    make_bars,
+    make_curve,
+    read_bin,
+    weekdays,
+)
 
 # Two more consecutive weekdays after DAYS (Tue 2024-01-09, Wed 2024-01-10).
 NEW_DAYS = [date(2024, 1, 9), date(2024, 1, 10)]
@@ -422,6 +438,334 @@ def test_extend_store_gapped_symbol_does_not_poison_the_batch(tmp_path: Path) ->
     result = extend_store(store, fmp, ["GLXY", "GOOG"])
     assert result.added == {"GOOG": 5}
     assert result.gapped == ("GLXY",)
+
+
+# ---------------------------------------------------------------------------
+# Market broadcast fields ($mkt_*, US-067)
+
+
+class MarketWindowedFakeFmp(WindowedFakeFmp):
+    """WindowedFakeFmp + windowed market endpoints with per-series failure."""
+
+    def __init__(
+        self,
+        bars: dict[str, tuple[EodBar, ...]],
+        commodities: dict[str, list[tuple[date, float]]] | None = None,
+        y10: list[tuple[date, float | None]] | None = None,
+        fail_commodities: set[str] | None = None,
+        fail_treasury: bool = False,
+    ) -> None:
+        super().__init__(bars=bars)
+        self.commodities = commodities or {}
+        self.y10 = y10 or []
+        self.fail_commodities = fail_commodities or set()
+        self.fail_treasury = fail_treasury
+        self.market_windows: list[tuple[str, str, str]] = []
+
+    def get_commodity_eod(self, symbol: str, start: object, end: object) -> list[CommodityEod]:
+        self.market_windows.append((symbol, str(start), str(end)))
+        if symbol in self.fail_commodities:
+            raise FmpError(f"simulated outage fetching {symbol}")
+        return [
+            CommodityEod(symbol, d, p, 0.0)
+            for d, p in self.commodities.get(symbol, [])
+            if str(start) <= d.isoformat() <= str(end)
+        ]
+
+    def get_treasury_rates(self, start: object, end: object) -> list[TreasuryCurve]:
+        self.market_windows.append(("treasury", str(start), str(end)))
+        if self.fail_treasury:
+            raise FmpError("simulated treasury outage")
+        return [
+            make_curve(d, y) for d, y in self.y10 if str(start) <= d.isoformat() <= str(end)
+        ]
+
+
+def market_store(
+    tmp_path: Path,
+    days: list[date] | None = None,
+    extra_series: dict[str, list[tuple[date, float]]] | None = None,
+) -> Path:
+    """Two-ticker store carrying mkt_gold + mkt_y10 broadcast bins."""
+    days = DAYS if days is None else days
+    series: dict[str, list[tuple[date, float]]] = {
+        "mkt_gold": [(d, 2000.0 + i) for i, d in enumerate(days)],
+        "mkt_y10": [(d, 4.0 + 0.25 * i) for i, d in enumerate(days)],
+    }
+    if extra_series:
+        series.update(extra_series)
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL", days), (), ()),
+            TickerBundle("MSFT", make_bars("MSFT", days, close=200.0), (), ()),
+        ],
+        store,
+        market_series=series,
+    )
+    return store
+
+
+def market_client(
+    all_days: list[date],
+    fail_commodities: set[str] | None = None,
+    fail_treasury: bool = False,
+) -> MarketWindowedFakeFmp:
+    """Serves equity bars, GCUSD prices, and the 10y curve over all_days."""
+    return MarketWindowedFakeFmp(
+        bars={
+            "AAPL": make_bars("AAPL", all_days),
+            "MSFT": make_bars("MSFT", all_days, close=200.0),
+        },
+        commodities={"GCUSD": [(d, 2000.0 + i) for i, d in enumerate(all_days)]},
+        y10=[(d, 4.0 + 0.25 * i) for i, d in enumerate(all_days)],
+        fail_commodities=fail_commodities,
+        fail_treasury=fail_treasury,
+    )
+
+
+def introduction_client(
+    fail_commodities: set[str] | None = None, fail_treasury: bool = False
+) -> MarketWindowedFakeFmp:
+    """Serves every canonical market series over DAYS (no new equity bars)."""
+    return MarketWindowedFakeFmp(
+        bars={"AAPL": make_bars("AAPL"), "MSFT": make_bars("MSFT", close=200.0)},
+        commodities={
+            sym: [(d, commodity_price(sym, i)) for i, d in enumerate(DAYS)]
+            for sym in COMMODITY_SYMBOLS.values()
+        },
+        y10=[(d, 4.0 + 0.25 * i) for i, d in enumerate(DAYS)],
+        fail_commodities=fail_commodities,
+        fail_treasury=fail_treasury,
+    )
+
+
+def test_refresh_appends_market_fields_alongside_equity_bars(tmp_path: Path) -> None:
+    store = market_store(tmp_path)
+    client = market_client(DAYS + NEW_DAYS)
+    result = refresh_store(store, client, end=NEW_DAYS[-1])
+    assert result.updated is True
+    assert result.warnings == ()
+    assert result.market_introduced == ()
+    # Each series is pulled since the store's last date, same --end as equities.
+    assert ("GCUSD", "2024-01-09", "2024-01-10") in client.market_windows
+    assert ("treasury", "2024-01-09", "2024-01-10") in client.market_windows
+    for sym in ("aapl", "msft"):  # identical broadcast across instruments
+        start, gold = read_bin(store / "features" / sym / "mkt_gold.day.bin")
+        assert start == 0
+        assert len(gold) == 7
+        assert gold[-2:] == pytest.approx([2005.0, 2006.0])
+    _, y10 = read_bin(store / "features" / "aapl" / "mkt_y10.day.bin")
+    assert y10[-2:] == pytest.approx([4.0 + 0.25 * 5, 4.0 + 0.25 * 6])
+
+
+def test_refresh_noop_with_market_fields_store_untouched(tmp_path: Path) -> None:
+    """Idempotency holds for a store carrying market bins: no market fetch at all."""
+    store = market_store(tmp_path)
+    before = store_snapshot(store)
+    client = market_client(DAYS)
+    result = refresh_store(store, client, end=LAST_OLD)
+    assert result.updated is False
+    assert client.market_windows == []
+    assert store_snapshot(store) == before
+    # Weekend variant: equities looked but found nothing -> still no market pull.
+    client2 = market_client(DAYS)
+    result2 = refresh_store(store, client2, end=date(2024, 1, 9))
+    assert result2.updated is False
+    assert len(client2.windows) == 2
+    assert client2.market_windows == []
+    assert store_snapshot(store) == before
+
+
+def test_refresh_twice_with_market_fields_second_run_noop(tmp_path: Path) -> None:
+    store = market_store(tmp_path)
+    first = refresh_store(store, market_client(DAYS + NEW_DAYS), end=NEW_DAYS[-1])
+    assert first.updated is True
+    after_first = store_snapshot(store)
+    second = refresh_store(store, market_client(DAYS + NEW_DAYS), end=NEW_DAYS[-1])
+    assert second.updated is False
+    assert store_snapshot(store) == after_first
+
+
+def test_refresh_market_outage_forward_fills_warns_and_continues(tmp_path: Path) -> None:
+    days = weekdays(date(2024, 1, 1), 250)
+    new_days = weekdays(days[-1] + timedelta(days=1), 2)
+    mystery = {"mkt_mystery": [(d, 7.0) for d in days]}
+    store = market_store(tmp_path, days=days, extra_series=mystery)
+    client = market_client(days + new_days, fail_commodities={"GCUSD"})
+    result = refresh_store(store, client, end=new_days[-1])
+    assert result.updated is True
+    assert len(result.warnings) == 2
+    outage = next(w for w in result.warnings if "mkt_gold" in w)
+    assert "forward-filled" in outage
+    unknown = next(w for w in result.warnings if "mkt_mystery" in w)
+    assert "unknown market series" in unknown
+    # The failed series forward-fills the new days from its last stored value...
+    _, gold = read_bin(store / "features" / "aapl" / "mkt_gold.day.bin")
+    assert len(gold) == 252
+    assert gold[-2:] == pytest.approx([2000.0 + 249] * 2)
+    _, myst = read_bin(store / "features" / "aapl" / "mkt_mystery.day.bin")
+    assert myst[-2:] == pytest.approx([7.0, 7.0])
+    # ...while the healthy series still advanced.
+    _, y10 = read_bin(store / "features" / "aapl" / "mkt_y10.day.bin")
+    assert y10[-2:] == pytest.approx([4.0 + 0.25 * 250, 4.0 + 0.25 * 251])
+
+
+def test_main_market_outage_exits_zero_and_posts_slack_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    days = weekdays(date(2024, 1, 1), 250)
+    new_days = weekdays(days[-1] + timedelta(days=1), 2)
+    store = market_store(tmp_path, days=days)
+    posted: list[str] = []
+    client = market_client(days + new_days, fail_commodities={"GCUSD"})
+    argv = ["--store", str(store), "--end", new_days[-1].isoformat()]
+    assert main(argv, client=client, notify=posted.append) == 0
+    captured = capsys.readouterr()
+    assert "store refreshed" in captured.out
+    assert "WARNING: market series mkt_gold" in captured.err
+    assert posted and posted[0].startswith(":warning: store refresh: ")
+    assert "mkt_gold" in posted[0]
+
+
+def test_main_market_outage_slack_failure_still_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    days = weekdays(date(2024, 1, 1), 250)
+    new_days = weekdays(days[-1] + timedelta(days=1), 2)
+    store = market_store(tmp_path, days=days)
+
+    def broken_notify(message: str) -> None:
+        raise RuntimeError("slack down")
+
+    client = market_client(days + new_days, fail_commodities={"GCUSD"})
+    argv = ["--store", str(store), "--end", new_days[-1].isoformat()]
+    assert main(argv, client=client, notify=broken_notify) == 0
+    assert "slack notice failed (slack down)" in capsys.readouterr().err
+
+
+def test_main_no_slack_skips_the_notice(tmp_path: Path) -> None:
+    days = weekdays(date(2024, 1, 1), 250)
+    new_days = weekdays(days[-1] + timedelta(days=1), 2)
+    store = market_store(tmp_path, days=days)
+    posted: list[str] = []
+    client = market_client(days + new_days, fail_commodities={"GCUSD"})
+    argv = ["--store", str(store), "--end", new_days[-1].isoformat(), "--no-slack"]
+    assert main(argv, client=client, notify=posted.append) == 0
+    assert posted == []
+
+
+def test_refresh_market_start_introduces_missing_series(tmp_path: Path) -> None:
+    store = two_ticker_store(tmp_path)  # no mkt bins yet
+    # No new equity bars: the introduction alone forces the rebuild.
+    result = refresh_store(store, introduction_client(), end=LAST_OLD, market_start=DAYS[0])
+    assert result.updated is True
+    assert result.new_bars == {}
+    assert result.market_introduced == MARKET_FIELDS
+    assert result.warnings == ()
+    for name in MARKET_FIELDS:
+        for sym in ("aapl", "msft"):
+            assert (store / "features" / sym / f"{name}.day.bin").exists()
+    _, brent = read_bin(store / "features" / "aapl" / "mkt_brent.day.bin")
+    assert brent == pytest.approx([commodity_price("BZUSD", i) for i in range(len(DAYS))])
+    # Equity bins are value-identical through the market-only rebuild.
+    _, closes = read_bin(store / "features" / "aapl" / "close.day.bin")
+    assert closes == pytest.approx([100.0, 101.0, 102.0, 103.0, 104.0])
+
+
+def test_refresh_market_start_partial_outage_skips_that_series(tmp_path: Path) -> None:
+    store = two_ticker_store(tmp_path)
+    client = introduction_client(fail_commodities={"BZUSD"})
+    result = refresh_store(store, client, end=LAST_OLD, market_start=DAYS[0])
+    assert result.updated is True
+    assert set(result.market_introduced) == set(MARKET_FIELDS) - {"mkt_brent"}
+    warning = next(w for w in result.warnings if "mkt_brent" in w)
+    assert "not introduced" in warning
+    assert not (store / "features" / "aapl" / "mkt_brent.day.bin").exists()
+    assert (store / "features" / "aapl" / "mkt_gold.day.bin").exists()
+
+
+def test_refresh_market_start_total_outage_leaves_store_untouched(tmp_path: Path) -> None:
+    store = two_ticker_store(tmp_path)
+    before = store_snapshot(store)
+    client = introduction_client(
+        fail_commodities=set(COMMODITY_SYMBOLS.values()), fail_treasury=True
+    )
+    result = refresh_store(store, client, end=LAST_OLD, market_start=DAYS[0])
+    assert result.updated is False
+    assert len(result.warnings) == len(MARKET_FIELDS)
+    assert store_snapshot(store) == before
+
+
+def test_refresh_without_market_start_never_touches_market_endpoints(
+    tmp_path: Path,
+) -> None:
+    store = two_ticker_store(tmp_path)
+    client = MarketWindowedFakeFmp(
+        bars={
+            "AAPL": make_bars("AAPL", DAYS + NEW_DAYS),
+            "MSFT": make_bars("MSFT", DAYS + NEW_DAYS, close=200.0),
+        }
+    )
+    result = refresh_store(store, client, end=NEW_DAYS[-1])
+    assert result.updated is True
+    assert client.market_windows == []
+    assert not (store / "features" / "aapl" / "mkt_gold.day.bin").exists()
+
+
+def test_main_market_start_flag_introduces_and_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = two_ticker_store(tmp_path)
+    argv = [
+        "--store",
+        str(store),
+        "--end",
+        LAST_OLD.isoformat(),
+        "--market-start",
+        DAYS[0].isoformat(),
+    ]
+    assert main(argv, client=introduction_client()) == 0
+    out = capsys.readouterr().out
+    assert "market series introduced:" in out
+    assert "mkt_brent" in out
+
+
+def test_extend_store_carries_market_fields_to_new_tickers(tmp_path: Path) -> None:
+    store = market_store(tmp_path)
+    fmp = WindowedFakeFmp(bars={"GOOG": make_bars("GOOG", close=50.0)})
+    assert extend_store(store, fmp, ["GOOG"]).added == {"GOOG": 5}
+    _, goog_gold = read_bin(store / "features" / "goog" / "mkt_gold.day.bin")
+    assert goog_gold == pytest.approx([2000.0, 2001.0, 2002.0, 2003.0, 2004.0])
+    _, aapl_gold = read_bin(store / "features" / "aapl" / "mkt_gold.day.bin")
+    assert aapl_gold == pytest.approx(goog_gold)
+
+
+def test_read_market_series_overlays_partial_spans_and_drops_nan_head(
+    tmp_path: Path,
+) -> None:
+    """No single ticker spans the calendar; the overlay still recovers the series."""
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL", DAYS[:3]), (), ()),
+            TickerBundle("LATE", make_bars("LATE", DAYS[2:], close=50.0), (), ()),
+        ],
+        store,
+        market_series={
+            "mkt_gold": [(d, 2000.0 + i) for i, d in enumerate(DAYS[1:], start=1)]
+        },
+    )
+    fields = read_market_fields(store, ["AAPL", "LATE"])
+    assert fields == ("mkt_gold",)
+    series = read_market_series(store, ["AAPL", "LATE"], DAYS, fields)
+    obs = series["mkt_gold"]
+    assert [d for d, _ in obs] == DAYS[1:]  # the NaN head day is dropped
+    assert [v for _, v in obs] == pytest.approx([2000.0 + i for i in range(1, 5)])
+    # A ticker missing a market bin is corruption, reported loud.
+    (store / "features" / "aapl" / "mkt_gold.day.bin").unlink()
+    with pytest.raises(RefreshError, match="missing market bin"):
+        read_market_series(store, ["AAPL", "LATE"], DAYS, fields)
 
 
 def test_extend_store_drops_off_calendar_bars_keeping_calendar_invariant(

@@ -31,9 +31,17 @@
   `MARKET_FIELDS` (= `COMMODITY_SYMBOLS` keys + `TREASURY_FIELD`); `fetch_market_series`
   fetches them all (skipping None year10 rows). CLI: `--market-start` (canonical
   `MARKET_SERIES_START` 2025-01-02).
-- GOTCHA until US-067 lands: `data/refresh.py` rebuilds through `build_store` WITHOUT
-  `market_series`, so a refresh of a store that carries $mkt_* bins silently drops them.
-  Don't ingest market series into the production store before the refresh carries them.
+- Market fields in the refresh (US-067): `data/refresh.py` reads any `mkt_*` bins back as
+  observations (`read_market_series` — ffilled values read back as direct observations,
+  NaN heads dropped, all symbols overlaid since no single ticker need span the calendar)
+  and carries them through every rebuild, including `extend_store`. Stored series advance
+  incrementally under the same yesterday-ET `--end`; a per-series FMP failure degrades to
+  forward-fill + a warning in `RefreshResult.warnings` (the CLI prints them and posts one
+  Slack line via `execution.rebalance.slack_notifier`; `--no-slack` skips) and NEVER fails
+  the run. `--market-start` is the one-time introduction path: it backfills canonical
+  MARKET_FIELDS the store lacks and forces a rebuild even with no new equity bars.
+  GOTCHA: this only covers `mkt_*`-prefixed broadcast bins — any future per-ticker raw
+  field (e.g. US-014's news_ct_1d) needs its own carry-through or a refresh drops it.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's

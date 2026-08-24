@@ -4,7 +4,12 @@
 # `python -m data.refresh` under the rdq-exec-paper OneCLI identity (the
 # proxy injects the FMP key; financialmodelingprep.com is assigned to
 # rdq-exec-paper by ops/setup_onecli.sh). Idempotent: an already-current
-# store is left untouched and the run exits 0.
+# store is left untouched and the run exits 0. Market broadcast fields
+# ($mkt_*, US-067) refresh alongside the equity bars; a market-series FMP
+# outage degrades to forward-fill plus a Slack warning line, never a
+# failure. Slack notices must NOT transit the OneCLI proxy
+# (docs/decisions.md 2026-07-08); onecli preserves a pre-set NO_PROXY and
+# urllib suffix-matches it, covering *.slack.com.
 #
 # Started by rdq-data-refresh.timer (weekday pre-open, America/New_York);
 # no [Install] section on purpose — enable the TIMER, not this service.
@@ -23,4 +28,5 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/rd-agent-q
+Environment="NO_PROXY=slack.com" "no_proxy=slack.com"
 ExecStart=%h/.local/bin/onecli run --agent rdq-exec-paper -- %h/rd-agent-q/.venv/bin/python -m data.refresh
