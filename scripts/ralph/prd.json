@@ -91,8 +91,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "build_store(market_series=) broadcasts raw $mkt_* per instrument (_market_matrix: ffill incl. off-calendar prints, NaN head, >=99% direct-coverage gate naming the series); fetch_market_series + --market-start CLI; menu CURATED_FIELDS + doc regenerated; qlib read-back test. GOTCHA: refresh.py drops mkt bins until US-007 carries them — don't ingest to prod store before US-007."
     },
     {
       "id": "US-007",
