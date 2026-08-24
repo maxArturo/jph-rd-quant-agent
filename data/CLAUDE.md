@@ -16,6 +16,11 @@
   a JSON *object* (`{"Error Message": ...}`) with HTTP 200-family semantics broken — the
   client raises FmpError on non-list payloads. `Retry-After` may be an HTTP-date; the
   client falls back to exponential backoff.
+- Market series (US-065): `get_commodity_eod` (/historical-price-eod/light — price+volume
+  only, no OHLC; commodities trade some NYSE holidays, DXUSD has weekend rows) and
+  `get_treasury_rates` (chunks <=`TREASURY_CHUNK_DAYS`=90 calendar days per request and
+  dedups boundary dates — the endpoint silently truncates wider windows with HTTP 200).
+  Ingestion (US-066/067) must use these, never re-implement the chunking.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's

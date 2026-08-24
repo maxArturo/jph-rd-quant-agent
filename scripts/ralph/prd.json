@@ -75,8 +75,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "CommodityEod/TreasuryCurve dataclasses + get_commodity_eod (/historical-price-eod/light) + get_treasury_rates (chunks <=TREASURY_CHUNK_DAYS=90, dedups boundary dates) sharing _get retry/backoff/typed errors. 15 fixture tests + 2 self-skipping live smokes (both live-verified through OneCLI)."
     },
     {
       "id": "US-006",

@@ -54,3 +54,13 @@ Started: Mon Aug 24 11:24:42 AM UTC 2026
   - onecli lives at ~/.local/bin (not on default non-login PATH — export before running ops scripts by hand).
   - dict.update(kw=..., **extra) collides when extra carries the same key — use a merged dict literal in test helpers with overridable defaults.
 ---
+## 2026-08-24 ~16:00 UTC - US-005
+- FMP client methods for market series: data/fmp.py gains `get_commodity_eod(symbol, start, end)` (/historical-price-eod/light -> CommodityEod rows: date/price/volume, no OHLC on that endpoint, missing volume -> 0.0) and `get_treasury_rates(start, end)` (/treasury-rates -> TreasuryCurve rows with all 12 tenors as float|None). Treasury fetch transparently chunks <=TREASURY_CHUNK_DAYS (90) calendar days per request, merges via a by-date dict (boundary dupes deduped, later chunk wins), returns ascending. Both ride the existing _get retry/backoff (429 Retry-After/exponential) and typed errors (FmpAuthError/FmpRateLimitError/FmpError). Shared `_window()` helper validates start<=end.
+- Files: data/fmp.py, tests/test_fmp.py (15 new unit tests + 2 live smokes), data/CLAUDE.md (US-065 note).
+- Verified: make check green (1404 passed, 5 skipped). Unit tests cover >90-day window -> 2 requests with exact chunk params (2025-01-02..2025-04-01 / 2025-04-02..2025-05-01), contiguous merged ascending result, boundary-date dedup, per-chunk size <=90 across a 366-day window, missing-tenor None, mid-chunk HTTP 500, 429 backoff on both methods. LIVE: `RDQ_LIVE_TESTS=1 onecli run --agent rdq-research -- .venv/bin/pytest tests/test_fmp.py -m live` -> 3 passed (BZUSD month of prices; treasury 2026-01-02..2026-05-01 chunked, ~80 rows, head+tail present, year10 populated).
+- **Learnings for future iterations:**
+  - `TreasuryCurve(date=d, **{tenor: ... for tenor in _TREASURY_TENORS})` dict-expansion into a frozen dataclass passes pyright standard mode fine.
+  - FakeSession/FakeResponse + make_client from tests/test_fmp.py handle multi-request methods naturally (queued responses pop in order — queue one response per expected chunk).
+  - US-006 broadcast fields: use get_commodity_eod/get_treasury_rates; align onto the store calendar with ffill (commodities have >100% NYSE coverage, DXUSD weekend rows; treasury y10 comes from TreasuryCurve.year10).
+  - Live-test pattern cost: the 3 live smokes ran in <1s through the proxy — cheap to extend for future endpoint additions (news probe US-011).
+---

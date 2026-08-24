@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import requests
@@ -21,6 +21,11 @@ BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_RETRIES = 4
 DEFAULT_BACKOFF_BASE_SECONDS = 2.0
+
+# /stable/treasury-rates silently truncates windows wider than ~90 calendar
+# days (HTTP 200, trailing ~3 months only) — proven by ops/probe_market_series.sh
+# (docs/decisions.md 2026-08-24). get_treasury_rates chunks to stay under it.
+TREASURY_CHUNK_DAYS = 90
 
 DateLike = date | str
 
@@ -68,6 +73,51 @@ class Dividend:
     dividend: float
 
 
+@dataclass(frozen=True)
+class CommodityEod:
+    """One /historical-price-eod/light row: price only, no OHLC on this endpoint."""
+
+    symbol: str
+    date: date
+    price: float
+    volume: float
+
+
+@dataclass(frozen=True)
+class TreasuryCurve:
+    """One /treasury-rates row; tenors absent from the response are None."""
+
+    date: date
+    month1: float | None
+    month2: float | None
+    month3: float | None
+    month6: float | None
+    year1: float | None
+    year2: float | None
+    year3: float | None
+    year5: float | None
+    year7: float | None
+    year10: float | None
+    year20: float | None
+    year30: float | None
+
+
+_TREASURY_TENORS = (
+    "month1",
+    "month2",
+    "month3",
+    "month6",
+    "year1",
+    "year2",
+    "year3",
+    "year5",
+    "year7",
+    "year10",
+    "year20",
+    "year30",
+)
+
+
 def _to_iso_date(value: DateLike, name: str) -> str:
     if isinstance(value, date):
         return value.isoformat()
@@ -82,6 +132,20 @@ def _parse_date(value: Any, context: str) -> date:
         return datetime.strptime(str(value), "%Y-%m-%d").date()
     except ValueError as exc:
         raise FmpError(f"unparseable date {value!r} in {context} response") from exc
+
+
+def _window(start: DateLike, end: DateLike) -> tuple[str, str]:
+    """Validate a [start, end] window and return it as ISO strings."""
+    start_iso = _to_iso_date(start, "start")
+    end_iso = _to_iso_date(end, "end")
+    if start_iso > end_iso:
+        raise ValueError(f"start {start_iso} is after end {end_iso}")
+    return start_iso, end_iso
+
+
+def _tenor_value(row: dict[str, Any], tenor: str) -> float | None:
+    value = row.get(tenor)
+    return None if value is None else float(value)
 
 
 class FmpClient:
@@ -155,6 +219,56 @@ class FmpClient:
             for row in rows
         ]
         return sorted(dividends, key=lambda dividend: dividend.date)
+
+    def get_commodity_eod(self, symbol: str, start: DateLike, end: DateLike) -> list[CommodityEod]:
+        """Daily EOD prices for a commodity/index symbol (e.g. BZUSD), ascending by date.
+
+        Uses /historical-price-eod/light — rows carry price only (no OHLC).
+        Commodities trade some NYSE holidays (DXUSD even has weekend rows);
+        callers aligning to the equity calendar must select/forward-fill.
+        """
+        start_iso, end_iso = _window(start, end)
+        rows = self._get_list(
+            "/historical-price-eod/light",
+            {"symbol": symbol, "from": start_iso, "to": end_iso},
+        )
+        points = [
+            CommodityEod(
+                symbol=str(row.get("symbol", symbol)),
+                date=_parse_date(row["date"], "historical-price-eod/light"),
+                price=float(row["price"]),
+                volume=float(row.get("volume") or 0.0),
+            )
+            for row in rows
+        ]
+        return sorted(points, key=lambda point: point.date)
+
+    def get_treasury_rates(self, start: DateLike, end: DateLike) -> list[TreasuryCurve]:
+        """Daily treasury curve rows for [start, end], ascending by date.
+
+        Transparently chunks requests to <=TREASURY_CHUNK_DAYS calendar days —
+        the endpoint silently truncates wider windows (HTTP 200, trailing ~3
+        months only) — and merges the chunks, deduplicating boundary dates.
+        """
+        start_iso, end_iso = _window(start, end)
+        window_start = date.fromisoformat(start_iso)
+        window_end = date.fromisoformat(end_iso)
+        by_date: dict[date, TreasuryCurve] = {}
+        chunk_start = window_start
+        while chunk_start <= window_end:
+            chunk_end = min(chunk_start + timedelta(days=TREASURY_CHUNK_DAYS - 1), window_end)
+            rows = self._get_list(
+                "/treasury-rates",
+                {"from": chunk_start.isoformat(), "to": chunk_end.isoformat()},
+            )
+            for row in rows:
+                row_date = _parse_date(row["date"], "treasury-rates")
+                by_date[row_date] = TreasuryCurve(
+                    date=row_date,
+                    **{tenor: _tenor_value(row, tenor) for tenor in _TREASURY_TENORS},
+                )
+            chunk_start = chunk_end + timedelta(days=1)
+        return [by_date[row_date] for row_date in sorted(by_date)]
 
     def _get_list(self, path: str, params: dict[str, str]) -> list[dict[str, Any]]:
         payload = self._get(path, params)
