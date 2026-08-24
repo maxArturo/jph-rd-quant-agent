@@ -11,6 +11,7 @@ import pytest
 from data.build_store import (
     COMMODITY_SYMBOLS,
     MARKET_FIELDS,
+    NEWS_FIELD,
     BuildError,
     StoreValidationError,
     TickerBundle,
@@ -448,6 +449,106 @@ def test_main_with_market_start_writes_all_mkt_bins(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-ticker raw series ($news_ct_1d, US-073)
+
+
+def test_ticker_series_written_raw_per_instrument_and_span_clipped(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    split = Split("AAPL", DAYS[3], 2.0, 1.0)  # 2:1 split effective on day 4
+    counts = {
+        "AAPL": [(day, float(i)) for i, day in enumerate(DAYS)],
+        # LATE's series covers the whole calendar, but its bars start on day 3:
+        # the observations before its span must be dropped, not written.
+        "LATE": [(day, 7.0 + i) for i, day in enumerate(DAYS)],
+    }
+    bundles = [
+        TickerBundle("AAPL", make_bars("AAPL"), (split,), ()),
+        TickerBundle("LATE", make_bars("LATE", days=DAYS[2:], close=50.0), (), ()),
+    ]
+    build_store(bundles, store, ticker_series={NEWS_FIELD: counts})
+
+    # RAW despite AAPL's split: the count is never factor-adjusted...
+    start_index, aapl = read_bin(store / "features" / "aapl" / f"{NEWS_FIELD}.day.bin")
+    assert start_index == 0
+    np.testing.assert_allclose(aapl, [0.0, 1.0, 2.0, 3.0, 4.0], rtol=1e-6)
+    # ...and per-ticker (NOT broadcast): LATE carries its own values, span-clipped.
+    start_index, late = read_bin(store / "features" / "late" / f"{NEWS_FIELD}.day.bin")
+    assert start_index == 2
+    np.testing.assert_allclose(late, [9.0, 10.0, 11.0], rtol=1e-6)
+    # The equity adjustment math is untouched: the split still adjusts $close.
+    _, closes = read_bin(store / "features" / "aapl" / "close.day.bin")
+    np.testing.assert_allclose(closes, [50.0, 50.5, 51.0, 103.0, 104.0], rtol=1e-6)
+
+
+def test_ticker_series_nan_outside_coverage_zero_inside(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    # Coverage starts on day 3; days 3 and 5 are covered no-news days (0).
+    counts = [(DAYS[2], 0.0), (DAYS[3], 5.0), (DAYS[4], 0.0)]
+    build_store(
+        [TickerBundle("AAPL", make_bars("AAPL"), (), ())],
+        store,
+        ticker_series={NEWS_FIELD: {"AAPL": counts}},
+    )
+    _, values = read_bin(store / "features" / "aapl" / f"{NEWS_FIELD}.day.bin")
+    assert np.isnan(values[:2]).all()  # before coverage: NaN, never 0
+    np.testing.assert_allclose(values[2:], [0.0, 5.0, 0.0], rtol=1e-6)
+
+
+def test_ticker_series_symbol_without_observations_gets_all_nan_bin(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    bundles = [
+        TickerBundle("AAPL", make_bars("AAPL"), (), ()),
+        TickerBundle("MSFT", make_bars("MSFT", close=200.0), (), ()),
+    ]
+    build_store(
+        bundles, store, ticker_series={NEWS_FIELD: {"AAPL": [(day, 1.0) for day in DAYS]}}
+    )
+    # Every instrument gets a bin (validation demands it); no data = all NaN.
+    _, msft = read_bin(store / "features" / "msft" / f"{NEWS_FIELD}.day.bin")
+    assert np.isnan(msft).all()
+
+
+def test_ticker_series_bad_inputs_rejected(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    bundle = TickerBundle("AAPL", make_bars("AAPL"), (), ())
+    good = [(day, 1.0) for day in DAYS]
+    for bad in ("close", "$news_ct_1d", "NEWS_CT_1D"):
+        with pytest.raises(BuildError, match="invalid ticker series name"):
+            build_store([bundle], store, ticker_series={bad: {"AAPL": good}})
+    with pytest.raises(BuildError, match="not in the store"):
+        build_store([bundle], store, ticker_series={NEWS_FIELD: {"MSFT": good}})
+    saturday = date(2024, 1, 6)
+    with pytest.raises(BuildError, match="off-calendar"):
+        build_store(
+            [bundle], store, ticker_series={NEWS_FIELD: {"AAPL": [(saturday, 1.0)]}}
+        )
+    with pytest.raises(BuildError, match="non-finite"):
+        build_store(
+            [bundle], store, ticker_series={NEWS_FIELD: {"AAPL": [(DAYS[0], float("nan"))]}}
+        )
+    with pytest.raises(BuildError, match="both market_series and ticker_series"):
+        build_store(
+            [bundle], store, market_series={"mkt_gold": good},
+            ticker_series={"mkt_gold": {"AAPL": good}},
+        )
+    assert not store.exists()
+    assert leftover_dirs(tmp_path, "us_data") == []
+
+
+def test_validate_store_catches_missing_ticker_bin(tmp_path: Path) -> None:
+    store = tmp_path / "us_data"
+    build_store(
+        [TickerBundle("AAPL", make_bars("AAPL"), (), ())],
+        store,
+        ticker_series={NEWS_FIELD: {"AAPL": [(day, 1.0) for day in DAYS]}},
+    )
+    validate_store(store, ["AAPL"], ticker_fields=(NEWS_FIELD,))  # intact store passes
+    (store / "features" / "aapl" / f"{NEWS_FIELD}.day.bin").unlink()
+    with pytest.raises(StoreValidationError, match="missing feature file"):
+        validate_store(store, ["AAPL"], ticker_fields=(NEWS_FIELD,))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 
 
@@ -483,14 +584,25 @@ def test_main_reports_errors_and_exits_nonzero(capsys: pytest.CaptureFixture) ->
 
 def test_qlib_reads_aapl_ohlcv_and_market_fields(tmp_path: Path) -> None:
     store = tmp_path / "us_data"
-    build_from_fmp(
-        ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"],
+    symbols = ["AAPL", "MSFT", "GOOG", "AMZN", "NVDA"]
+    client = market_five_ticker_client()
+    bundles = backfill(
+        symbols,
+        lambda s: fetch_bundle(client, s, DAYS[0], DAYS[-1]),
+        tmp_path / "ckpt",
         DAYS[0],
         DAYS[-1],
+    )
+    build_store(
+        bundles,
         store,
-        tmp_path / "ckpt",
-        market_five_ticker_client(),
-        market_start=DAYS[0],
+        market_series=fetch_market_series(client, DAYS[0], DAYS[-1]),
+        ticker_series={
+            NEWS_FIELD: {
+                sym: [(day, float(10 * i + j)) for j, day in enumerate(DAYS)]
+                for i, sym in enumerate(symbols)
+            }
+        },
     )
 
     import qlib
@@ -517,3 +629,9 @@ def test_qlib_reads_aapl_ohlcv_and_market_fields(tmp_path: Path) -> None:
     )
     y10 = mkt["$mkt_y10"].unstack(level=0)
     np.testing.assert_allclose(y10["AAPL"].to_numpy(), [4.0, 4.1, 4.2, 4.3, 4.4], rtol=1e-5)
+
+    # Per-ticker news counts read back per instrument/date, DISTINCT per ticker.
+    news = D.features(["AAPL", "NVDA"], [f"${NEWS_FIELD}"], freq="day")
+    counts = news[f"${NEWS_FIELD}"].unstack(level=0)
+    np.testing.assert_allclose(counts["AAPL"].to_numpy(), [0.0, 1.0, 2.0, 3.0, 4.0], rtol=1e-5)
+    np.testing.assert_allclose(counts["NVDA"].to_numpy(), [40.0, 41.0, 42.0, 43.0, 44.0], rtol=1e-5)

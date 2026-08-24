@@ -103,6 +103,16 @@ CURATED_FIELDS: dict[str, CuratedField] = {
         "NOT point-in-time: computed from the full split/dividend history known at "
         "store-build time. Never use $factor itself as a signal.",
     ),
+    "$news_ct_1d": CuratedField(
+        KIND_PER_TICKER,
+        "Daily count of stock-news articles for the ticker (news attention, FMP "
+        "/stable/news/stock). RAW count, never price-adjusted; transformations "
+        "(log, z-score, rolling windows) are the factor's job.",
+        "PIT-safe by construction: an article published after 16:00 ET counts "
+        "toward the NEXT trading day, so each value was knowable at that day's "
+        "close. 0 = covered day with no articles; NaN = outside news coverage "
+        "(the archive starts 2025-01-02, later than the equity history).",
+    ),
     "$mkt_brent": CuratedField(
         KIND_MARKET,
         "Brent crude oil EOD price (FMP symbol BZUSD).",

@@ -19,6 +19,11 @@ plain DatetimeIndex x columns frame (key="data"); it is only written when the
 store actually holds mkt_* bins, and both folders always agree on the file set
 (RD-Agent linking contract: same filenames, README describes them).
 
+daily_news.h5 (US-073) carries the per-ticker $news_ct_1d counts as a
+MultiIndex (datetime, instrument) frame (key="data"), same presence rule:
+written only when the store holds news_ct_1d bins, stale copies removed
+otherwise, debug variant windowed to daily_pv_debug's days AND instruments.
+
 RD-Agent links every file in the data folder into each factor workspace and
 prompts the LLM with descriptions of the DEBUG folder's files, so both folders
 must contain the SAME filename (daily_pv.h5) and the README that tells the
@@ -42,12 +47,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from data.build_store import DEFAULT_STORE_PATH, FREQ
+from data.build_store import DEFAULT_STORE_PATH, FREQ, NEWS_FIELD
 
 ALL_H5 = "daily_pv_all.h5"
 DEBUG_H5 = "daily_pv_debug.h5"
 CONSUMABLE_H5 = "daily_pv.h5"
 MARKET_H5 = "market_series.h5"
+NEWS_H5 = "daily_news.h5"
 HDF_KEY = "data"
 # Column order matches upstream rdagent factor_data_template/generate.py.
 COLUMNS = ("$open", "$close", "$high", "$low", "$volume", "$factor")
@@ -101,6 +107,29 @@ Use these for betas, spreads, or to condition/interact a per-ticker signal.
 NEVER use a market series as a cross-sectional signal on its own: it is identical
 across all instruments on a given date, so alone it carries zero cross-sectional
 information.
+"""
+
+NEWS_README_TEXT = """\
+
+## Daily news-attention counts
+
+| Filename          | Description                                                          |
+| ----------------- | ---------------------------------------------------------------------|
+| "daily_news.h5"   | Per-ticker daily count of news articles (news attention).            |
+
+```Python
+import pandas as pd
+news = pd.read_hdf("daily_news.h5", key="data")
+```
+Index: MultiIndex (datetime, instrument), same shape as daily_pv.h5.
+$news_ct_1d: RAW count of news articles attributed to the ticker on that
+trading day. Point-in-time cutoff: an article published after 16:00 US/Eastern
+counts toward the NEXT trading day, so every value was knowable at that day's
+close.
+0 means the day is covered by news data and no articles ran; NaN means the day
+is OUTSIDE news coverage (missing data, not "no news") — treat the two
+differently. Counts are raw and never price-adjusted; transformations
+(log-scaling, z-scoring, rolling windows) are yours to apply.
 """
 
 
@@ -208,6 +237,42 @@ def load_market_frame(store: Path, symbols: Sequence[str]) -> pd.DataFrame | Non
     return pd.DataFrame(columns, index=calendar)
 
 
+def load_news_frame(store: Path, symbols: Sequence[str]) -> pd.DataFrame | None:
+    """The per-ticker $news_ct_1d counts, indexed (datetime, instrument).
+
+    Returns None when the store carries no news_ct_1d bins (pre-US-073
+    store). Rows cover each instrument's own data span, exactly like
+    daily_pv.h5; values are raw counts — 0 on covered no-news days, NaN
+    outside news coverage (the archive window starts later than the equity
+    history). A store where only part of the universe carries the bin is
+    corrupt and fails loud.
+    """
+    calendar = _read_calendar(store)
+    have = [
+        s
+        for s in symbols
+        if (store / "features" / s.lower() / f"{NEWS_FIELD}.{FREQ}.bin").exists()
+    ]
+    if not have:
+        return None
+    if len(have) != len(symbols):
+        missing = sorted(set(symbols) - set(have))
+        raise FactorSourceError(
+            f"store at {store} carries {NEWS_FIELD} bins for only part of the "
+            f"universe; missing: {missing}"
+        )
+    parts: list[pd.DataFrame] = []
+    for symbol in symbols:
+        start, values = _read_feature(store, symbol, NEWS_FIELD)
+        if start + len(values) > len(calendar):
+            raise FactorSourceError(f"{symbol} news bin exceeds calendar length in {store}")
+        index = pd.MultiIndex.from_product(
+            [calendar[start : start + len(values)], [symbol]], names=["datetime", "instrument"]
+        )
+        parts.append(pd.DataFrame({f"${NEWS_FIELD}": values}, index=index))
+    return pd.concat(parts).sort_index()
+
+
 def debug_subset(
     frame: pd.DataFrame,
     debug_days: int = DEFAULT_DEBUG_DAYS,
@@ -244,23 +309,34 @@ def make_factor_source(
     """Generate the daily_pv h5 files + consumable folders; returns (all, debug) paths."""
     store = store.expanduser()
     output = output.expanduser()
+    symbols = read_universe_symbols(store, universe)
     frame = load_universe_frame(store, universe)
-    market = load_market_frame(store, read_universe_symbols(store, universe))
+    market = load_market_frame(store, symbols)
+    news = load_news_frame(store, symbols)
     output.mkdir(parents=True, exist_ok=True)
 
     all_path = output / ALL_H5
     debug_path = output / DEBUG_H5
     debug_frame = debug_subset(frame, debug_days, debug_instruments)
     debug_dates = debug_frame.index.get_level_values("datetime").unique()
+    debug_symbols = debug_frame.index.get_level_values("instrument").unique()
     _write_h5(frame, all_path)
     _write_h5(debug_frame, debug_path)
 
-    for folder, source, windowed in (
-        ("data_folder", all_path, market),
+    if news is None:
+        debug_news = None
+    else:  # same trading days AND instruments as daily_pv_debug
+        debug_news = news.loc[
+            np.asarray(news.index.get_level_values("datetime").isin(debug_dates))
+            & np.asarray(news.index.get_level_values("instrument").isin(debug_symbols))
+        ]
+    for folder, source, windowed_market, windowed_news in (
+        ("data_folder", all_path, market, news),
         (
             "data_folder_debug",
             debug_path,
             None if market is None else market.loc[market.index.isin(debug_dates)],
+            debug_news,
         ),
     ):
         target_dir = output / folder
@@ -270,10 +346,15 @@ def make_factor_source(
         shutil.copy(source, target)
         market_target = target_dir / MARKET_H5
         market_target.unlink(missing_ok=True)  # drop stale copies when the store has none
+        news_target = target_dir / NEWS_H5
+        news_target.unlink(missing_ok=True)
         readme = README_TEXT
-        if windowed is not None:
-            _write_h5(windowed, market_target)
+        if windowed_market is not None:
+            _write_h5(windowed_market, market_target)
             readme += MARKET_README_TEXT
+        if windowed_news is not None:
+            _write_h5(windowed_news, news_target)
+            readme += NEWS_README_TEXT
         (target_dir / "README.md").write_text(readme)
     return all_path, debug_path
 

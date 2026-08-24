@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from data.build_store import MARKET_FIELDS, TickerBundle, build_store
+from data.build_store import MARKET_FIELDS, NEWS_FIELD, TickerBundle, build_store
 from data.menu import (
     CURATED_FIELDS,
     DOC_PATH,
@@ -24,10 +24,11 @@ from tests.test_build_store import make_bars
 
 
 def fixture_store(tmp_path: Path) -> Path:
-    """Tiny two-ticker store with a PIT-style universe and every $mkt_* series.
+    """Tiny two-ticker store with a PIT-style universe and every curated series.
 
     Carries the same canonical field set as the real store (per-ticker OHLCV +
-    factor plus the market broadcast series) so the doc drift test is hermetic.
+    factor, the market broadcast series, and the news count) so the doc drift
+    test is hermetic.
     """
     store = tmp_path / "us_data"
     bars = make_bars("AAPL")
@@ -47,6 +48,12 @@ def fixture_store(tmp_path: Path) -> Path:
         market_series={
             name: [(bar.date, 10.0 * (i + 1) + j) for j, bar in enumerate(bars)]
             for i, name in enumerate(MARKET_FIELDS)
+        },
+        ticker_series={
+            NEWS_FIELD: {
+                sym: [(bar.date, float(j)) for j, bar in enumerate(bars)]
+                for sym in ("AAPL", "MSFT")
+            }
         },
     )
     return store

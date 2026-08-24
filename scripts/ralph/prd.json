@@ -215,8 +215,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "build_store(ticker_series=) generic per-ticker raw bins (NaN outside coverage, span-clipped, off-calendar fails loud) + build_news.read_news_series (explicit 0.0, checkpoint-coverage enforced) + make_factor_source daily_news.h5 (MultiIndex, both folders, presence rule like market_series.h5) + menu curated entry + gpu_snapshot SUBSTRATE_SERIES manifest (live hash c69cc88c9708 vs 5829fa6fb5c5). PROD STORE NOT INGESTED — US-015's refresh carry must land first."
     },
     {
       "id": "US-015",

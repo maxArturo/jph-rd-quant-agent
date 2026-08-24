@@ -20,6 +20,9 @@ Field conventions (Qlib backward adjustment, see data/adjust.py):
   factor 1, never touched by the ticker's adjustment math. Equity days with
   no market observation forward-fill from the last observation; days before
   a series' first observation are NaN.
+- Per-ticker raw series ($news_ct_1d, US-073) are stored via ticker_series=
+  with the same implicit-factor-1 rule; days a ticker's series does not cover
+  are NaN in the bin (the caller decides what counts as an observation).
 - Bin format matches qlib FileFeatureStorage: little-endian float32 array
   whose first element is the calendar index of the ticker's first bar.
 """
@@ -64,6 +67,10 @@ COMMODITY_SYMBOLS: dict[str, str] = {
 }
 TREASURY_FIELD = "mkt_y10"
 MARKET_FIELDS = (*COMMODITY_SYMBOLS, TREASURY_FIELD)
+# Per-ticker raw series (US-073): daily news-attention count from the US-072
+# archive (data/build_news.py). Stored via ticker_series= — implicit factor 1,
+# never price-adjusted.
+NEWS_FIELD = "news_ct_1d"
 # Canonical backfill start for the market series (probe-verified 2026-08-24,
 # docs/decisions.md US-064) — FMP coverage before this date is unverified.
 MARKET_SERIES_START = date(2025, 1, 2)
@@ -73,6 +80,8 @@ MARKET_SERIES_START = date(2025, 1, 2)
 MARKET_COVERAGE_MIN = 0.99
 
 MarketSeriesMap = Mapping[str, Sequence[tuple[date, float]]]
+# field name (no '$') -> symbol -> (date, value) observations for that ticker.
+TickerSeriesMap = Mapping[str, Mapping[str, Sequence[tuple[date, float]]]]
 
 
 class BuildError(RuntimeError):
@@ -226,6 +235,14 @@ def _feature_series(bundle: TickerBundle) -> dict[str, list[tuple[date, float]]]
     return series
 
 
+def _check_series_name(name: str, kind: str) -> None:
+    if name in FIELDS or not name.isidentifier() or name != name.lower():
+        raise BuildError(
+            f"invalid {kind} series name {name!r}: must be a lowercase identifier "
+            f"(no '$' prefix) and must not collide with the per-ticker fields {FIELDS}"
+        )
+
+
 def _market_matrix(
     calendar: Sequence[date], name: str, observations: Sequence[tuple[date, float]]
 ) -> np.ndarray:
@@ -237,11 +254,7 @@ def _market_matrix(
     coverage below MARKET_COVERAGE_MIN of the trading days since the first
     observation fails the build loudly with the series named.
     """
-    if name in FIELDS or not name.isidentifier() or name != name.lower():
-        raise BuildError(
-            f"invalid market series name {name!r}: must be a lowercase identifier "
-            f"(no '$' prefix) and must not collide with the per-ticker fields {FIELDS}"
-        )
+    _check_series_name(name, "market")
     if not observations:
         raise BuildError(f"market series {name} has no observations")
     by_date: dict[date, float] = {}
@@ -285,6 +298,7 @@ def build_store(
     target: Path,
     extra_instruments: Mapping[str, Sequence[tuple[str, str, str]]] | None = None,
     market_series: MarketSeriesMap | None = None,
+    ticker_series: TickerSeriesMap | None = None,
 ) -> None:
     """Write a Qlib bin store for the bundles: temp dir -> validate -> swap.
 
@@ -300,6 +314,14 @@ def build_store(
     equity calendar (see _market_matrix) and written RAW into every
     instrument's feature dir — identical value across instruments per date,
     never touched by the ticker's $factor adjustment.
+
+    ticker_series maps per-ticker field names (e.g. "news_ct_1d", no '$') to
+    per-symbol (date, value) observations, written RAW (implicit factor 1 —
+    the adjustment math never touches them). Every instrument gets a bin;
+    days inside a ticker's own span with no observation stay NaN (the 0-vs-NaN
+    policy belongs to the caller — data/build_news.py emits explicit zeros on
+    covered no-news days), and observations outside the ticker's span are
+    dropped. Off-calendar observation dates fail loud.
     """
     if not bundles:
         raise BuildError("no tickers to build a store from")
@@ -318,6 +340,16 @@ def build_store(
         name: _market_matrix(calendar, name, observations)
         for name, observations in (market_series or {}).items()
     }
+    ticker_series = dict(ticker_series or {})
+    for name, per_symbol in ticker_series.items():
+        _check_series_name(name, "ticker")
+        if name in market_matrix:
+            raise BuildError(
+                f"series name {name!r} appears in both market_series and ticker_series"
+            )
+        unknown = sorted(set(per_symbol) - seen)
+        if unknown:
+            raise BuildError(f"ticker series {name} references tickers not in the store: {unknown}")
 
     target = target.expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -352,6 +384,23 @@ def build_store(
                     start_index,
                     matrix[start_index : start_index + span],
                 )
+            for name, per_symbol in ticker_series.items():
+                values = np.full(span, np.nan)
+                for day, value in per_symbol.get(bundle.symbol, ()):
+                    if not math.isfinite(value):
+                        raise BuildError(
+                            f"ticker series {name} for {bundle.symbol} has a non-finite "
+                            f"value on {day.isoformat()}"
+                        )
+                    pos = positions.get(day)
+                    if pos is None:
+                        raise BuildError(
+                            f"ticker series {name} for {bundle.symbol} has an "
+                            f"off-calendar date {day.isoformat()}"
+                        )
+                    if start_index <= pos < start_index + span:
+                        values[pos - start_index] = value
+                _write_bin(feature_dir / f"{name}.{FREQ}.bin", start_index, values)
         (tmp / "instruments" / f"{MARKET_ALL}.txt").write_text("".join(instrument_lines))
         for name, universe_rows in (extra_instruments or {}).items():
             if name == MARKET_ALL:
@@ -365,7 +414,10 @@ def build_store(
                 "".join(f"{s}\t{start}\t{end}\n" for s, start, end in universe_rows)
             )
         validate_store(
-            tmp, [bundle.symbol for bundle in bundles], market_fields=tuple(market_matrix)
+            tmp,
+            [bundle.symbol for bundle in bundles],
+            market_fields=tuple(market_matrix),
+            ticker_fields=tuple(ticker_series),
         )
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -389,7 +441,10 @@ def _swap_into_place(tmp: Path, target: Path) -> None:
 
 
 def validate_store(
-    store_dir: Path, symbols: Sequence[str], market_fields: Sequence[str] = ()
+    store_dir: Path,
+    symbols: Sequence[str],
+    market_fields: Sequence[str] = (),
+    ticker_fields: Sequence[str] = (),
 ) -> None:
     """Assert the store at store_dir is complete and readable for symbols.
 
@@ -398,7 +453,9 @@ def validate_store(
     [first, last] span (a mid-series gap means bad source data - fail loudly
     rather than ship a store Qlib will silently propagate NaNs from).
     market_fields lists broadcast series every instrument must also carry a
-    bin for (their NaN heads before the series' first observation are legal).
+    bin for (their NaN heads before the series' first observation are legal);
+    ticker_fields lists per-ticker raw series checked the same way (NaN
+    outside their own coverage window is legal).
     """
     calendar_path = store_dir / "calendars" / f"{FREQ}.txt"
     if not calendar_path.exists():
@@ -424,7 +481,7 @@ def validate_store(
 
     for symbol in symbols:
         feature_dir = store_dir / "features" / symbol.lower()
-        for field in (*FIELDS, *market_fields):
+        for field in (*FIELDS, *market_fields, *ticker_fields):
             bin_path = feature_dir / f"{field}.{FREQ}.bin"
             if not bin_path.exists():
                 raise StoreValidationError(f"missing feature file {bin_path}")

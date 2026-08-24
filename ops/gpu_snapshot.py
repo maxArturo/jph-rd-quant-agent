@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from data.build_store import MARKET_FIELDS
+from data.build_store import MARKET_FIELDS, NEWS_FIELD
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -64,16 +64,21 @@ def qlib_store_path() -> Path:
 # a series is added — the series list is hashed on its own); pre-bump
 # snapshots stop matching and rebake on their next run.
 MARKET_MANIFEST_SCHEMA_VERSION = "market-series-v1"
+# Every data-substrate series the workers must carry: the $mkt_* broadcast
+# family plus the per-ticker news count (US-073). Extending this list changes
+# the worker-inputs hash, so pre-expansion snapshots stop matching.
+SUBSTRATE_SERIES = (*MARKET_FIELDS, NEWS_FIELD)
 
 
 def market_series_manifest(
-    series: Sequence[str] = MARKET_FIELDS,
+    series: Sequence[str] = SUBSTRATE_SERIES,
     schema_version: str = MARKET_MANIFEST_SCHEMA_VERSION,
 ) -> str:
-    """The market-series manifest hashed into the worker-inputs digest: the
-    ordered series names the substrate carries plus a schema version string.
-    Any change (new series, contract bump) invalidates existing snapshots, so
-    a run expecting $mkt_* fields can never select a pre-expansion image."""
+    """The data-substrate series manifest hashed into the worker-inputs
+    digest: the ordered series names the substrate carries plus a schema
+    version string. Any change (new series, contract bump) invalidates
+    existing snapshots, so a run expecting $mkt_*/$news_* fields can never
+    select a pre-expansion image."""
     return json.dumps({"schema_version": schema_version, "series": list(series)})
 
 

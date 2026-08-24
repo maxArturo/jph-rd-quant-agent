@@ -215,9 +215,10 @@ def test_resolve_field_kinds(tmp_path: Path) -> None:
 
 
 def test_resolve_field_unknown_raises_naming_the_field(tmp_path: Path) -> None:
+    # $news_sent stays absent from the fixture store until US-074 (sentiment).
     store = fixture_store(tmp_path)
-    with pytest.raises(ParityError, match=r"\$news_ct_1d is not in the store"):
-        resolve_field(store, "$news_ct_1d")
+    with pytest.raises(ParityError, match=r"\$news_sent is not in the store"):
+        resolve_field(store, "$news_sent")
 
 
 # --- end-to-end with a fake runner ------------------------------------------------

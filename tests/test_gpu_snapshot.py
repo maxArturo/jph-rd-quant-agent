@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from data.build_store import MARKET_FIELDS
+from data.build_store import MARKET_FIELDS, NEWS_FIELD
 from ops.gpu_snapshot import (
     HASH_LEN,
     KEEP_SNAPSHOTS,
@@ -153,7 +153,8 @@ class TestMarketSeriesManifest:
     def test_manifest_carries_ordered_series_and_schema_version(self) -> None:
         data = json.loads(market_series_manifest())
         assert data["schema_version"] == MARKET_MANIFEST_SCHEMA_VERSION
-        assert data["series"] == list(MARKET_FIELDS)
+        # US-073: the substrate manifest now carries the news count too.
+        assert data["series"] == [*MARKET_FIELDS, NEWS_FIELD]
 
     def test_hash_stable_across_runs_with_identical_inputs(self, tmp_path: Path) -> None:
         repo, store = make_repo(tmp_path), make_store(tmp_path)
@@ -172,10 +173,12 @@ class TestMarketSeriesManifest:
         assert old != worker_inputs_hash(repo, store)
 
     def test_added_series_changes_hash(self, tmp_path: Path) -> None:
-        """The US-014 move: adding a series to the manifest must rebake."""
+        """The US-014 move happened: the news-count series joined the manifest,
+        so a pre-news (market-only) manifest must hash differently — that is
+        what makes pre-news snapshots unselectable."""
         repo, store = make_repo(tmp_path), make_store(tmp_path)
-        extended = market_series_manifest(series=(*MARKET_FIELDS, "news_ct_1d"))
-        assert worker_inputs_hash(repo, store, market_manifest=extended) != worker_inputs_hash(
+        pre_news = market_series_manifest(series=MARKET_FIELDS)
+        assert worker_inputs_hash(repo, store, market_manifest=pre_news) != worker_inputs_hash(
             repo, store
         )
 

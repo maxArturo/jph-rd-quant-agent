@@ -8,13 +8,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.build_store import MARKET_FIELDS
+from data.build_store import MARKET_FIELDS, NEWS_FIELD, build_store, fetch_bundle
 from data.make_factor_source import (
     COLUMNS,
     MARKET_H5,
+    NEWS_H5,
     FactorSourceError,
     debug_subset,
     load_market_frame,
+    load_news_frame,
     load_universe_frame,
     main,
     make_factor_source,
@@ -25,12 +27,18 @@ from tests.test_build_store import (
     MarketFakeFmp,
     build_from_fmp,
     commodity_price,
+    fetch_market_series,
     five_ticker_client,
     make_bars,
     market_five_ticker_client,
 )
 
 FIVE = ["AAPL", "AMZN", "GOOG", "MSFT", "NVDA"]
+
+
+def news_count(symbol: str, i: int) -> float:
+    """Deterministic, per-symbol-distinct canned daily news count."""
+    return float(10 * FIVE.index(symbol) + i)
 
 
 @pytest.fixture
@@ -55,6 +63,30 @@ def market_store(tmp_path: Path) -> Path:
         tmp_path / "ckpt_mkt",
         market_five_ticker_client(),
         market_start=DAYS[0],
+    )
+    make_universe("fixture_univ", store, tickers=",".join(FIVE))
+    return store
+
+
+@pytest.fixture
+def news_store(tmp_path: Path) -> Path:
+    """Five-ticker store carrying $mkt_* AND $news_ct_1d (news starts on day 2,
+    so day 1 is a NaN head; NVDA's last-day value is an explicit 0)."""
+    store = tmp_path / "us_data_news"
+    client = market_five_ticker_client()
+    bundles = [fetch_bundle(client, sym, DAYS[0], DAYS[-1]) for sym in FIVE]
+    counts = {
+        sym: [
+            (day, 0.0 if (sym == "NVDA" and j == 3) else news_count(sym, j))
+            for j, day in enumerate(DAYS[1:])
+        ]
+        for sym in FIVE
+    }
+    build_store(
+        bundles,
+        store,
+        market_series=fetch_market_series(client, DAYS[0], DAYS[-1]),
+        ticker_series={NEWS_FIELD: counts},
     )
     make_universe("fixture_univ", store, tickers=",".join(FIVE))
     return store
@@ -221,6 +253,99 @@ def test_store_without_market_bins_writes_no_market_h5(
         readme = (output / folder / "README.md").read_text()
         assert "market_series.h5" not in readme
     assert load_market_frame(store, FIVE) is None
+
+
+# ---------------------------------------------------------------------------
+# daily_news.h5 companion (US-073)
+
+
+def test_news_h5_round_trips_counts_into_both_folders(
+    news_store: Path, tmp_path: Path
+) -> None:
+    """The US-014 round-trip: counts -> store bins -> factor-source read-back."""
+    output = tmp_path / "src"
+    make_factor_source("fixture_univ", news_store, output, debug_days=3)
+    frames: dict[str, pd.DataFrame] = {}
+    for folder in ("data_folder", "data_folder_debug"):
+        path = output / folder / NEWS_H5
+        assert path.exists()
+        frame = pd.read_hdf(path, key="data")
+        assert isinstance(frame, pd.DataFrame)
+        assert isinstance(frame.index, pd.MultiIndex)
+        assert frame.index.names == ["datetime", "instrument"]
+        assert list(frame.columns) == [f"${NEWS_FIELD}"]
+        frames[folder] = frame
+
+    full = frames["data_folder"]
+    assert len(full) == len(DAYS) * len(FIVE)
+    aapl = full.xs("AAPL", level="instrument")[f"${NEWS_FIELD}"]
+    assert np.isnan(aapl.iloc[0])  # day 1 predates news coverage: NaN, not 0
+    np.testing.assert_allclose(
+        aapl.iloc[1:].to_numpy(), [news_count("AAPL", j) for j in range(4)], rtol=1e-6
+    )
+    nvda = full.xs("NVDA", level="instrument")[f"${NEWS_FIELD}"]
+    assert nvda.iloc[-1] == 0.0  # covered no-news day round-trips as explicit 0
+    np.testing.assert_allclose(
+        nvda.iloc[1:-1].to_numpy(), [news_count("NVDA", j) for j in range(3)], rtol=1e-6
+    )
+
+
+def test_debug_news_h5_windowed_like_daily_pv_debug(news_store: Path, tmp_path: Path) -> None:
+    output = tmp_path / "src"
+    make_factor_source(
+        "fixture_univ", news_store, output, debug_days=3, debug_instruments=2
+    )
+    debug_pv = pd.read_hdf(output / "data_folder_debug" / "daily_pv.h5", key="data")
+    debug_news = pd.read_hdf(output / "data_folder_debug" / NEWS_H5, key="data")
+    assert isinstance(debug_pv, pd.DataFrame) and isinstance(debug_news, pd.DataFrame)
+    # Same trading days AND same instrument subset as daily_pv_debug.
+    assert list(debug_news.index.get_level_values("datetime").unique()) == list(
+        debug_pv.index.get_level_values("datetime").unique()
+    )
+    assert sorted(set(debug_news.index.get_level_values("instrument"))) == sorted(
+        set(debug_pv.index.get_level_values("instrument"))
+    )
+    full_news = pd.read_hdf(output / "data_folder" / NEWS_H5, key="data")
+    assert isinstance(full_news, pd.DataFrame)
+    pd.testing.assert_frame_equal(
+        debug_news, full_news.loc[debug_news.index], check_freq=False
+    )
+
+
+def test_news_readme_lines_in_both_folders(news_store: Path, tmp_path: Path) -> None:
+    output = tmp_path / "src"
+    make_factor_source("fixture_univ", news_store, output)
+    for folder in ("data_folder", "data_folder_debug"):
+        readme = (output / folder / "README.md").read_text()
+        assert 'pd.read_hdf("daily_news.h5", key="data")' in readme
+        assert "published after 16:00 US/Eastern" in readme
+        assert "counts toward the NEXT trading day" in readme
+        assert "0 means the day is covered by news data" in readme
+        assert "NaN means the day\nis OUTSIDE news coverage" in readme
+        # market section still present too — both companions coexist
+        assert 'pd.read_hdf("market_series.h5", key="data")' in readme
+
+
+def test_store_without_news_bins_writes_no_news_h5(
+    market_store: Path, news_store: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "src"
+    # Generate from the news-carrying store, then regenerate from the
+    # market-only store into the SAME output: stale news files must disappear.
+    make_factor_source("fixture_univ", news_store, output)
+    make_factor_source("fixture_univ", market_store, output)
+    for folder in ("data_folder", "data_folder_debug"):
+        assert not (output / folder / NEWS_H5).exists()
+        readme = (output / folder / "README.md").read_text()
+        assert "daily_news.h5" not in readme
+        assert (output / folder / MARKET_H5).exists()  # market companion survives
+    assert load_news_frame(market_store, FIVE) is None
+
+
+def test_partial_news_bins_fail_loud(news_store: Path) -> None:
+    (news_store / "features" / "nvda" / f"{NEWS_FIELD}.day.bin").unlink()
+    with pytest.raises(FactorSourceError, match="NVDA"):
+        load_news_frame(news_store, FIVE)
 
 
 # ---------------------------------------------------------------------------

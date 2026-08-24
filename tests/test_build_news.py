@@ -12,14 +12,17 @@ import pytest
 
 from data.build_news import (
     NEWS_BACKFILL_START,
+    NewsBuildError,
     TickerNewsResult,
     archive_dir,
     backfill_news,
     backfill_ticker,
     checkpoint_dir,
+    checkpoint_window,
     daily_counts,
     main,
     pit_bucket,
+    read_news_series,
 )
 from data.build_store import TickerBundle, build_store
 from data.fmp import NewsArticle
@@ -276,6 +279,55 @@ class TestDailyCounts:
         series = daily_counts(tmp_path, "GHOST", TRADING, date(2025, 3, 3), date(2025, 3, 14))
         assert len(series) > 0
         assert all(c == 0 for _d, c in series)
+
+
+class TestReadNewsSeries:
+    """read_news_series: the US-073 bridge from the archive to build_store's
+    ticker_series= — explicit float zeros, checkpoint-coverage enforced."""
+
+    START, END = date(2025, 3, 3), date(2025, 3, 21)
+
+    def _backfill(self, root: Path, symbol: str, articles: list[NewsArticle]) -> None:
+        fetcher = FakeNewsFetcher({symbol: articles})
+        backfill_ticker(
+            fetcher, symbol, self.START, self.END, root, sleep=lambda _s: None
+        )
+
+    def test_observations_are_float_counts_with_explicit_zeros(self, tmp_path: Path) -> None:
+        self._backfill(tmp_path, "AAPL", [art("2025-03-04 10:00:00"), art("2025-03-04 11:00:00")])
+        self._backfill(tmp_path, "MSFT", [art("2025-03-12 09:00:00", symbol="MSFT")])
+        series = read_news_series(tmp_path, ["AAPL", "MSFT"], TRADING, self.START, self.END)
+        assert set(series) == {"AAPL", "MSFT"}
+        window_days = [d for d in TRADING if self.START <= d <= self.END]
+        for symbol in ("AAPL", "MSFT"):
+            assert [d for d, _v in series[symbol]] == window_days  # gapless
+            assert all(isinstance(v, float) for _d, v in series[symbol])
+        counts = dict(series["AAPL"])
+        assert counts[date(2025, 3, 4)] == 2.0
+        assert counts[date(2025, 3, 5)] == 0.0  # covered no-news day: explicit 0
+        assert dict(series["MSFT"])[date(2025, 3, 12)] == 1.0
+
+    def test_narrower_window_than_checkpoint_is_covered(self, tmp_path: Path) -> None:
+        self._backfill(tmp_path, "AAPL", [art("2025-03-04 10:00:00")])
+        series = read_news_series(
+            tmp_path, ["AAPL"], TRADING, date(2025, 3, 4), date(2025, 3, 14)
+        )
+        assert [d for d, _v in series["AAPL"]] == [
+            d for d in TRADING if date(2025, 3, 4) <= d <= date(2025, 3, 14)
+        ]
+
+    def test_never_backfilled_symbol_fails_loud(self, tmp_path: Path) -> None:
+        self._backfill(tmp_path, "AAPL", [art("2025-03-04 10:00:00")])
+        with pytest.raises(NewsBuildError, match="GHOST"):
+            read_news_series(tmp_path, ["AAPL", "GHOST"], TRADING, self.START, self.END)
+
+    def test_checkpoint_not_covering_window_fails_loud(self, tmp_path: Path) -> None:
+        self._backfill(tmp_path, "AAPL", [art("2025-03-04 10:00:00")])
+        assert checkpoint_window(tmp_path, "AAPL") == (self.START, self.END)
+        with pytest.raises(NewsBuildError, match="AAPL"):
+            read_news_series(
+                tmp_path, ["AAPL"], TRADING, self.START, self.END + timedelta(days=1)
+            )
 
 
 @pytest.fixture()

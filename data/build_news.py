@@ -139,6 +139,55 @@ def daily_counts(
     return [(d, counts[d]) for d in window_days]
 
 
+def checkpoint_window(root: Path, symbol: str) -> tuple[date, date] | None:
+    """The (start, end) window the symbol's checkpoint says is fully fetched,
+    or None when there is no usable checkpoint."""
+    path = checkpoint_dir(root) / f"{symbol}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        return (date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"]))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def read_news_series(
+    root: Path,
+    symbols: Sequence[str],
+    trading_days: Sequence[date],
+    start: date,
+    end: date,
+) -> dict[str, list[tuple[date, float]]]:
+    """Per-symbol $news_ct_1d observations for build_store's ticker_series=.
+
+    One (trading day, count) observation per trading day in [start, end], with
+    explicit 0.0 on covered no-news days — the store's 0-vs-NaN convention is
+    decided HERE: NaN in the bins only ever means "outside news coverage",
+    never "no articles". Every symbol's checkpoint must cover [start, end];
+    a never-backfilled ticker fails loud instead of silently becoming an
+    all-zero attention series.
+    """
+    series: dict[str, list[tuple[date, float]]] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        window = checkpoint_window(root, symbol)
+        if window is None or window[0] > start or window[1] < end:
+            missing.append(symbol)
+            continue
+        series[symbol] = [
+            (day, float(count))
+            for day, count in daily_counts(root, symbol, trading_days, start, end)
+        ]
+    if missing:
+        raise NewsBuildError(
+            f"news archive at {root} has no checkpoint covering "
+            f"{start.isoformat()}..{end.isoformat()} for: {', '.join(missing)} — "
+            "run python -m data.build_news for them first"
+        )
+    return series
+
+
 # ---------------------------------------------------------------------------
 # Archive + checkpoints
 

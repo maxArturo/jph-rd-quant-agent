@@ -58,10 +58,24 @@
   published after the window's last close stays archived and counts once a later
   window covers the next trading day. GOTCHA (same trap as mkt_*): US-014's
   news_ct_1d bins will be DROPPED by refresh rebuilds unless US-015 adds a
-  read-back+carry. The full us_liquid backfill (US-013) lives on-box at
+  read-back+carry — so do NOT ingest $news_ct_1d into the prod store before
+  US-015's carry-through lands. The full us_liquid backfill (US-013) lives on-box at
   `~/rdq-data/news/` (outside the repo tree): 589 tickers, window
   2025-01-02..2026-08-23 in every checkpoint — reruns with the same window
   resume for free; a different --end refetches per ticker.
+- $news_ct_1d in the store (US-073): `build_store(..., ticker_series={"news_ct_1d":
+  {sym: [(date, count), ...]}})` writes per-ticker RAW bins (implicit factor 1,
+  NaN on span days the series doesn't cover, observations outside the ticker's
+  span dropped, off-calendar dates fail loud). The archive->store bridge is
+  `build_news.read_news_series(root, symbols, trading_days, start, end)`: emits
+  explicit 0.0 on covered no-news days (so bin NaN only ever means "outside news
+  coverage") and REQUIRES each symbol's checkpoint to cover the window — a
+  never-backfilled ticker fails loud rather than becoming an all-zero series.
+  `make_factor_source` writes the counts as `daily_news.h5` (MultiIndex like
+  daily_pv.h5, single $news_ct_1d column) into both folders under the same
+  presence rule as market_series.h5; `ops/gpu_snapshot.SUBSTRATE_SERIES` carries
+  the field in the worker-inputs manifest (adding the next series family means
+  extending that tuple).
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's
