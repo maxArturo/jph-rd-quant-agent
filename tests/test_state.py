@@ -494,3 +494,48 @@ def test_migration_adds_supervised_to_legacy_db(db_path: Path) -> None:
     assert legacy is not None and legacy.supervised is False
 
 
+def test_directive_data_required_roundtrip_and_default(store: StateStore) -> None:
+    parked = store.create_directive(
+        "111.222",
+        objective="Condition momentum on crude",
+        data_required=["$close", "$mkt_wti"],
+        missing_data=["$mkt_wti"],
+    )
+    assert parked.parked is True
+    fetched = store.get_directive("111.222")
+    assert fetched is not None
+    assert fetched.data_required == ("$close", "$mkt_wti")
+    assert fetched.missing_data == ("$mkt_wti",)
+    assert fetched.parked is True
+
+    bare = store.create_directive("333.444", objective="OHLCV only")
+    assert bare.data_required is None and bare.missing_data == ()
+    fetched_bare = store.get_directive("333.444")
+    assert fetched_bare is not None
+    assert fetched_bare.data_required is None
+    assert fetched_bare.parked is False
+
+
+def test_migration_adds_data_columns_to_legacy_directives(db_path: Path) -> None:
+    """DBs created before US-062 lack the data columns; legacy directives are
+    never parked (NULL data_required/missing_data)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE directives (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " thread_ts TEXT NOT NULL, objective TEXT NOT NULL, universe_hint TEXT,"
+            " constraints TEXT, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO directives (thread_ts, objective, created_at)"
+            " VALUES ('111.222', 'legacy objective', '2026-01-01')"
+        )
+    store = StateStore(db_path)  # migration runs here
+    legacy = store.get_directive("111.222")
+    assert legacy is not None
+    assert legacy.data_required is None
+    assert legacy.missing_data == ()
+    assert legacy.parked is False
+    fresh = store.create_directive(
+        "333.444", objective="x", data_required=["$close"], missing_data=[]
+    )
+    assert fresh.data_required == ("$close",) and fresh.parked is False

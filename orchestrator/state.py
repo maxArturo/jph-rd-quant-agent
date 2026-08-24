@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS directives (
     objective   TEXT NOT NULL,
     universe_hint TEXT,
     constraints TEXT,
+    data_required TEXT,
+    missing_data  TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_directives_thread_ts ON directives (thread_ts);
@@ -122,6 +124,17 @@ class Directive:
     universe_hint: str | None
     constraints: str | None
     created_at: str
+    # Store fields/series the hypothesis relies on (US-062); None = the model
+    # did not declare any (legacy rows and OHLCV-implicit directives).
+    data_required: tuple[str, ...] | None = None
+    # data_required entries NOT present in the store at save time. Non-empty
+    # means the directive is PARKED: saved, but start_research refuses it
+    # until the series are ingested and the directive is saved again.
+    missing_data: tuple[str, ...] = ()
+
+    @property
+    def parked(self) -> bool:
+        return bool(self.missing_data)
 
 
 @dataclass(frozen=True)
@@ -187,6 +200,8 @@ class PendingInteraction:
 
 
 def _directive_from_row(row: sqlite3.Row) -> Directive:
+    required = row["data_required"]
+    missing = row["missing_data"]
     return Directive(
         id=row["id"],
         thread_ts=row["thread_ts"],
@@ -194,6 +209,8 @@ def _directive_from_row(row: sqlite3.Row) -> Directive:
         universe_hint=row["universe_hint"],
         constraints=row["constraints"],
         created_at=row["created_at"],
+        data_required=None if required is None else tuple(json.loads(required)),
+        missing_data=() if missing is None else tuple(json.loads(missing)),
     )
 
 
@@ -282,6 +299,15 @@ class StateStore:
         """Create the schema. Idempotent — safe to run on every startup."""
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Columns added in US-062: legacy directive rows declared no data
+            # requirements (NULL data_required) and are never parked.
+            directive_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(directives)")
+            }
+            if "data_required" not in directive_columns:
+                conn.execute("ALTER TABLE directives ADD COLUMN data_required TEXT")
+            if "missing_data" not in directive_columns:
+                conn.execute("ALTER TABLE directives ADD COLUMN missing_data TEXT")
             # Column added in US-023; CREATE IF NOT EXISTS skips existing DBs,
             # so retrofit them with a guarded ALTER (also idempotent).
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
@@ -332,13 +358,25 @@ class StateStore:
         objective: str,
         universe_hint: str | None = None,
         constraints: str | None = None,
+        data_required: Sequence[str] | None = None,
+        missing_data: Sequence[str] | None = None,
     ) -> Directive:
         now = _utcnow()
+        required = None if data_required is None else tuple(data_required)
+        missing = () if missing_data is None else tuple(missing_data)
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO directives (thread_ts, objective, universe_hint, constraints,"
-                " created_at) VALUES (?, ?, ?, ?, ?)",
-                (thread_ts, objective, universe_hint, constraints, now),
+                " data_required, missing_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    thread_ts,
+                    objective,
+                    universe_hint,
+                    constraints,
+                    None if required is None else json.dumps(list(required)),
+                    None if not missing else json.dumps(list(missing)),
+                    now,
+                ),
             )
             row_id = cur.lastrowid
         assert row_id is not None
@@ -349,6 +387,8 @@ class StateStore:
             universe_hint=universe_hint,
             constraints=constraints,
             created_at=now,
+            data_required=required,
+            missing_data=missing,
         )
 
     def get_directive(self, thread_ts: str) -> Directive | None:

@@ -120,6 +120,19 @@
   into prompt text — render them from data/menu.py, the single source of
   truth.
 
+- Directive data pre-flight (US-062/US-003): save_directive's `data_required`
+  list is verified in ConversationCore via the injected `field_lister`
+  (default `_store_field_lister` reads the REAL store through
+  `data.menu.build_menu().field_names()`; tests inject a fixture-store
+  lister). Any missing entry PARKS the directive — persisted in the
+  `directives.missing_data` JSON column, so start_research's refusal is
+  state-enforced across restarts, and `parked_directive_message()` is the
+  single source of the "parked — needs ingestion: ..." wording (save summary
+  + start refusal). Parking is computed AT SAVE TIME: after ingesting a
+  series the directive must be saved again to unpark (start_research does
+  not re-verify). A field_lister failure fails the save loud (error
+  tool_result, nothing persisted) — never record a silent 'all present'.
+
 - Lifecycle recording into Notion goes through `orchestrator/notion_recorder.py`
   (`NotionRecorder`, US-027) — the single write funnel for Research Ideas /
   Hypothesis Log / Backtest Results. It is best-effort BY DESIGN: every

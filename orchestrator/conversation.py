@@ -14,7 +14,7 @@ never the directive.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -285,18 +285,50 @@ SAVE_DIRECTIVE_SCHEMA: dict[str, Any] = {
                 " ruled in or out."
             ),
         },
+        "data_required": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Store fields/series the hypothesis relies on, copied EXACTLY"
+                ' from the data menu (e.g. ["$close", "$volume"]). List every'
+                " field the factor construction reads. Each entry is verified"
+                " against the store: any entry not present parks the directive"
+                " until that data is ingested."
+            ),
+        },
     },
     "required": ["objective"],
 }
 
 
+def parked_directive_message(missing: Sequence[str]) -> str:
+    """The canonical parked notice (US-062) — used verbatim at save time and by
+    start_research's refusal, so 'parked' means exactly one thing in-thread."""
+    return "parked — needs ingestion: " + ", ".join(missing)
+
+
 def format_directive_summary(directive: Directive) -> str:
     """Slack mrkdwn summary posted to the thread when a directive is saved."""
+    if not directive.data_required:
+        data_line = "*Data required:* _none specified_"
+    elif directive.missing_data:
+        data_line = (
+            f"*Data required:* {', '.join(directive.data_required)}\n"
+            f":no_entry_sign: {parked_directive_message(directive.missing_data)}"
+            " — the directive is saved but cannot start until those series are"
+            " ingested."
+        )
+    else:
+        data_line = (
+            f"*Data required:* {', '.join(directive.data_required)}"
+            " — all present in store"
+        )
     return (
         f"*Research directive saved* (#{directive.id})\n"
         f"*Objective:* {directive.objective}\n"
         f"*Universe:* {directive.universe_hint or '_none given_'}\n"
-        f"*Constraints:* {directive.constraints or '_none given_'}"
+        f"*Constraints:* {directive.constraints or '_none given_'}\n"
+        f"{data_line}"
     )
 
 
@@ -476,6 +508,18 @@ def duplicate_run_message(existing: Run) -> str:
     )
 
 
+def _store_field_lister() -> Collection[str]:
+    """Real-store field names for the directive pre-flight (US-062).
+
+    Lazy import: the store-build stack is heavy and only needed when a
+    directive actually declares data requirements.
+    """
+    from data.build_store import DEFAULT_STORE_PATH
+    from data.menu import build_menu
+
+    return build_menu(Path(DEFAULT_STORE_PATH)).field_names()
+
+
 def _clean_optional(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
@@ -511,7 +555,13 @@ class ConversationCore:
         gpu: GpuRunner | None = None,
         digest_builder: Callable[[], Digest] | None = None,
         menu_builder: Callable[[], str] | None = None,
+        field_lister: Callable[[], Collection[str]] | None = None,
     ) -> None:
+        if field_lister is None:
+            # Directive pre-flight (US-062): data_required entries are string-
+            # matched against the store's real field names via data/menu.py —
+            # never an LLM claim (tests inject a fixture-store lister).
+            field_lister = _store_field_lister
         if universes is None:
             from orchestrator.universe import UniverseService
 
@@ -547,6 +597,7 @@ class ConversationCore:
         # prompts.data_menu_context, which never raises (store unreadable
         # degrades to an explicit 'menu unavailable' line).
         self._menu_builder = menu_builder
+        self._field_lister: Callable[[], Collection[str]] = field_lister
         self._universes: UniverseManager = universes
         self._breaker: TradingBreaker = breaker
         self._broker: BrokerReader = broker
@@ -626,11 +677,14 @@ class ConversationCore:
             objective = str(args.get("objective") or "").strip()
             if not objective:
                 raise ValueError("objective must be a non-empty sentence")
+            data_required, missing = self._verify_data_required(args.get("data_required"))
             directive = self._store.create_directive(
                 thread_ts,
                 objective=objective,
                 universe_hint=_clean_optional(args.get("universe_hint")),
                 constraints=_clean_optional(args.get("constraints")),
+                data_required=data_required,
+                missing_data=missing,
             )
             say(text=format_directive_summary(directive), thread_ts=thread_ts)
             if self._recorder is not None:
@@ -641,6 +695,13 @@ class ConversationCore:
                     universe=self._confirmed_universe_name(thread_ts) or DEFAULT_UNIVERSE,
                 )
             logger.info("saved directive #%s for thread %s", directive.id, thread_ts)
+            if missing:
+                return (
+                    f"Directive #{directive.id} saved but PARKED — the store is"
+                    f" missing: {', '.join(missing)}. It cannot start until those"
+                    " series are ingested (or the hypothesis is reworked onto menu"
+                    " fields and saved again). Tell the operator plainly."
+                )
             return (
                 f"Directive #{directive.id} saved for this thread and the summary"
                 " was posted. Confirm briefly to the operator."
@@ -656,6 +717,35 @@ class ConversationCore:
             input_schema=SAVE_DIRECTIVE_SCHEMA,
             handler=handler,
         )
+
+    def _verify_data_required(
+        self, raw: Any
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+        """Validate the tool's data_required list against the store (US-062).
+
+        Returns (data_required, missing). The check is a programmatic string
+        match against data/menu.py's real field names — never an LLM claim. A
+        store that cannot be read raises (the save fails loud rather than
+        recording an unverified 'all present').
+        """
+        if raw is None:
+            return None, ()
+        if not isinstance(raw, list):
+            raise ValueError("data_required must be a list of store field names")
+        # Dedup while preserving the model's order; drop empty entries.
+        required = tuple(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+        if not required:
+            return None, ()
+        try:
+            known = set(self._field_lister())
+        except Exception as exc:
+            raise ValueError(
+                f"could not verify data_required against the store ({exc}) —"
+                " the directive was NOT saved; try again once the store is"
+                " readable"
+            ) from exc
+        missing = tuple(field for field in required if field not in known)
+        return required, missing
 
     def _start_research_tool(self, thread_ts: str, say: SayFn) -> ToolSpec:
         def handler(args: dict[str, Any]) -> str:
@@ -678,6 +768,14 @@ class ConversationCore:
                 raise ValueError(
                     "no research directive is saved for this thread yet — refine"
                     " the idea with the operator and call save_directive first"
+                )
+            # US-062: a parked directive is state-enforced unstartable — no GPU
+            # budget is spent discovering a data gap the pre-flight already found.
+            if directive.missing_data:
+                raise ValueError(
+                    f"this thread's directive is {parked_directive_message(directive.missing_data)}"
+                    " — it cannot start until those series are ingested, or the"
+                    " hypothesis is reworked onto data-menu fields and saved again"
                 )
             existing = self._store.get_run(thread_ts)
             # US-021: a failed run (crashed pipeline, reaped row) must not

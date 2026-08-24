@@ -45,8 +45,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "directives.data_required/missing_data columns (guarded ALTER); ConversationCore field_lister= (real-store default via data.menu); parked_directive_message shared by save summary + start refusal; parking computed at save time (re-save to unpark)."
     },
     {
       "id": "US-004",

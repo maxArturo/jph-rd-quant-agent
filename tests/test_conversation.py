@@ -102,6 +102,7 @@ def make_core(
     gpu: StubGpu | None = None,
     digest_builder: Any | None = None,
     menu_builder: Any | None = None,
+    field_lister: Any | None = None,
 ) -> tuple[ConversationCore, StateStore]:
     store = StateStore(db_path=tmp_path / "state.sqlite")
     core = ConversationCore(
@@ -111,6 +112,7 @@ def make_core(
         gpu=gpu if gpu is not None else StubGpu(),
         digest_builder=digest_builder,
         menu_builder=menu_builder,
+        field_lister=field_lister,
     )
     return core, store
 
@@ -955,3 +957,158 @@ def test_promotion_tools_offered_when_wired(tmp_path: Path) -> None:
 
     offered = {tool["name"] for tool in client.stream_calls[0]["tools"]}
     assert {"promote_run", "confirm_promotion"} <= offered
+
+
+# --- directive data pre-flight (US-062) ---------------------------------------
+
+
+def save_with_data_script(
+    data_required: list[str], final_reply: str = "Saved."
+) -> list[Any]:
+    """Model turn 1: save_directive declaring data_required; turn 2: text."""
+    return [
+        message(
+            "tool_use",
+            [
+                tool_use_block(
+                    "tu_dr",
+                    "save_directive",
+                    {
+                        "objective": "Condition 12-1 momentum on crude strength",
+                        "data_required": data_required,
+                    },
+                )
+            ],
+        ),
+        message("end_turn", [text_block(final_reply)]),
+    ]
+
+
+def fixture_field_lister(tmp_path: Path) -> Any:
+    """Field names from a real fixture store, through data/menu.py itself."""
+    from data.menu import build_menu
+
+    store = menu_fixture_store(tmp_path)
+    return lambda: build_menu(store).field_names()
+
+
+def last_tool_result(client: FakeClient) -> dict[str, Any]:
+    return client.stream_calls[-1]["messages"][-1]["content"][0]
+
+
+def test_data_required_all_present_renders_line_and_stays_startable(
+    tmp_path: Path,
+) -> None:
+    client = FakeClient(
+        judgment_messages=save_with_data_script(["$close", "$volume"])
+        + start_research_script()
+    )
+    gpu = StubGpu()
+    core, store = make_core(
+        tmp_path, client, gpu=gpu, field_lister=fixture_field_lister(tmp_path)
+    )
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "momentum conditioned on volume?", say)
+
+    directive = store.get_directive(THREAD)
+    assert directive is not None
+    assert directive.data_required == ("$close", "$volume")
+    assert directive.missing_data == ()
+    assert directive.parked is False
+    summary = say.calls[0]["text"]
+    line = next(
+        ln for ln in summary.splitlines() if ln.startswith("*Data required:*")
+    )
+    assert "$close, $volume" in line
+    assert line.endswith("— all present in store")
+    assert "parked" not in summary
+
+    # startable: the pre-flight passed, so start_research launches normally
+    core.handle_message(THREAD, "research it", say)
+    assert len(gpu.launched) == 1
+    run = store.get_run(THREAD)
+    assert run is not None
+    assert run.status == "running"
+
+
+def test_missing_data_parks_directive_and_blocks_start(tmp_path: Path) -> None:
+    client = FakeClient(
+        judgment_messages=save_with_data_script(["$close", "$mkt_brent"], "Parked.")
+        + start_research_script("Can't start — parked.")
+    )
+    gpu = StubGpu()
+    core, store = make_core(
+        tmp_path, client, gpu=gpu, field_lister=fixture_field_lister(tmp_path)
+    )
+    say = RecordingSay()
+
+    core.handle_message(THREAD, "momentum conditioned on brent?", say)
+
+    # saved (objective persisted) ...
+    directive = store.get_directive(THREAD)
+    assert directive is not None
+    assert directive.data_required == ("$close", "$mkt_brent")
+    # ... but parked, and the thread reply names each missing series
+    assert directive.missing_data == ("$mkt_brent",)
+    assert directive.parked is True
+    assert "parked — needs ingestion: $mkt_brent" in say.calls[0]["text"]
+    # the model's tool result states the parked outcome too
+    assert "PARKED" in last_tool_result(client)["content"]
+
+    # NOT startable: start_research refuses with the same parked message
+    core.handle_message(THREAD, "research it anyway", say)
+    tool_result = last_tool_result(client)
+    assert tool_result["type"] == "tool_result"
+    assert tool_result.get("is_error") is True
+    assert "parked — needs ingestion: $mkt_brent" in tool_result["content"]
+    assert gpu.launched == []
+    assert store.get_run(THREAD) is None
+
+
+def test_parked_start_refusal_is_state_enforced_across_restart(
+    tmp_path: Path,
+) -> None:
+    """Parking lives in SQLite: a fresh core (new process) still refuses."""
+    store = StateStore(db_path=tmp_path / "state.sqlite")
+    store.create_directive(
+        THREAD,
+        objective="Trade the crack spread",
+        data_required=["$close", "$mkt_wti"],
+        missing_data=["$mkt_wti"],
+    )
+    client = FakeClient(judgment_messages=start_research_script("Refused."))
+    gpu = StubGpu()
+    core = ConversationCore(
+        store=store, router=ModelRouter(client=client), gpu=gpu
+    )
+
+    core.handle_message(THREAD, "start the run", RecordingSay())
+
+    tool_result = last_tool_result(client)
+    assert tool_result.get("is_error") is True
+    assert "parked — needs ingestion: $mkt_wti" in tool_result["content"]
+    assert gpu.launched == []
+    assert store.get_run(THREAD) is None
+    # the reloaded system prompt carries the parked state for the model
+    assert "PARKED — needs ingestion: $mkt_wti" in client.stream_calls[0]["system"]
+
+
+def test_unverifiable_data_required_fails_the_save_loud(tmp_path: Path) -> None:
+    """Store unreadable at save time: no silent 'all present' — the tool errors
+    and nothing is persisted."""
+
+    def boom() -> list[str]:
+        raise RuntimeError("store offline")
+
+    client = FakeClient(
+        judgment_messages=save_with_data_script(["$close"], "Try again later.")
+    )
+    core, store = make_core(tmp_path, client, field_lister=boom)
+
+    core.handle_message(THREAD, "an idea", RecordingSay())
+
+    assert store.get_directive(THREAD) is None
+    tool_result = last_tool_result(client)
+    assert tool_result.get("is_error") is True
+    assert "could not verify data_required" in tool_result["content"]

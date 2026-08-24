@@ -28,9 +28,14 @@ ask the suggester to supply formulas, parameters or windows. When a message \
 does spell out technical detail anyway, honor it.
 - Once you have crafted the hypothesis, call the save_directive tool exactly \
 once with: objective (one testable sentence), universe_hint (market/sector/\
-ticker scope, if the suggestion gave one), and constraints (risk limits, \
+ticker scope, if the suggestion gave one), constraints (risk limits, \
 factor style, holding period, model pinning — your own choices plus anything \
-the suggestion ruled in or out).
+the suggestion ruled in or out), and data_required (every store field/series \
+the hypothesis reads, copied exactly from the data menu). data_required is \
+verified programmatically against the store: if anything is missing the \
+directive is saved but PARKED — it cannot start until that data is ingested. \
+Relay a parked outcome plainly and offer to rework the hypothesis onto \
+fields the menu does list.
 - After saving, confirm with a short restatement of the hypothesis you \
 crafted: what will be tested, the load-bearing constraint choices you made, \
 and how they serve the suggestion — plain language first, so the suggester \
@@ -137,10 +142,21 @@ def directive_context(directive: Directive) -> str:
     process restart: in-memory chat history is lost, but the saved directive
     reloads from SQLite.
     """
-    return (
+    text = (
         "Current saved directive for this thread (from the desk's records; "
         "the operator may still refine it — saving again replaces it):\n"
         f"- objective: {directive.objective}\n"
         f"- universe_hint: {directive.universe_hint or '(none)'}\n"
         f"- constraints: {directive.constraints or '(none)'}"
     )
+    if directive.data_required:
+        text += f"\n- data_required: {', '.join(directive.data_required)}"
+        if directive.missing_data:
+            text += (
+                f"\n- PARKED — needs ingestion: {', '.join(directive.missing_data)}"
+                " (start_research will refuse until those series exist in the"
+                " store and the directive is saved again)"
+            )
+        else:
+            text += " (all present in store)"
+    return text
