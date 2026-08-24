@@ -135,8 +135,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "market_series_manifest (ordered MARKET_FIELDS + MARKET_MANIFEST_SCHEMA_VERSION) hashed into worker_inputs_hash (live hash changed 5829fa6fb5c5 vs c83c19079199 — old snapshots unselectable); gpu_worker.sh sync-list prints the exact bootstrap rsync file list from shared FACTOR_SOURCE_DIR (filter-free, tests bind both). US-014 extends the manifest series or bumps the version."
     },
     {
       "id": "US-010",
