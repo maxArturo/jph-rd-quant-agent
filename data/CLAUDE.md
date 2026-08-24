@@ -58,7 +58,10 @@
   published after the window's last close stays archived and counts once a later
   window covers the next trading day. GOTCHA (same trap as mkt_*): US-014's
   news_ct_1d bins will be DROPPED by refresh rebuilds unless US-015 adds a
-  read-back+carry.
+  read-back+carry. The full us_liquid backfill (US-013) lives on-box at
+  `~/rdq-data/news/` (outside the repo tree): 589 tickers, window
+  2025-01-02..2026-08-23 in every checkpoint — reruns with the same window
+  resume for free; a different --end refetches per ticker.
 - `data/build_store.py` owns the Qlib bin store. Format facts (verified against qlib
   0.9.7 `FileFeatureStorage`): each `features/<sym_lower>/<field>.day.bin` is a
   little-endian float32 array whose FIRST element is the calendar index of the ticker's

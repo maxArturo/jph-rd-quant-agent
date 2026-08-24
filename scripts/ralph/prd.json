@@ -199,8 +199,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Full backfill executed on-box (onecli, build_news --universe us_liquid --throttle 3): 589/589 ok, 462,236 articles, 2,766 requests, ~16 min wall-clock, 0 failures (118 resumed from an interrupted first attempt, 471 fetched). All 589 checkpoints cover 2025-01-02..2026-08-23 exactly; spot-checks MRNA 08-19=33 / AAPL 07-31=90 / NVDA 07-27=117 match archive recounts. Path ~/rdq-data/news recorded in data/CLAUDE.md."
     },
     {
       "id": "US-014",
