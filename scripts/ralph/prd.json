@@ -184,8 +184,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "data/build_news.py (PIT bucket via pit_bucket on the store calendar; archive/<SYM>/<date>.json wholesale rewrites + checkpoints/<SYM>.json window-keyed) + FmpClient.iter_stock_news_pages/get_stock_news (empty-page-only termination). Live smoke: 5 tickers 2026-07-21..08-21, 2014 articles/16 requests, MRNA 2026-08-19 count 33 (Merck/Moderna Phase 3 news), resume verified live."
     },
     {
       "id": "US-013",
