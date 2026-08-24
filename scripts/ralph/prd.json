@@ -106,8 +106,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "refresh.py reads mkt_* bins back as observations (read_market_series overlay, NaN head dropped), advances each series under the same yesterday-ET --end, carries through refresh_store AND extend_store rebuilds. Per-series FMP outage -> ffill + RefreshResult.warnings + one Slack line (exit 0, --no-slack skips). --market-start = one-time introduction of missing MARKET_FIELDS. Unit gained NO_PROXY=slack.com. Prod store NOT yet rebuilt with mkt fields — operator runs --market-start 2025-01-02 (or US-010 does)."
     },
     {
       "id": "US-008",
