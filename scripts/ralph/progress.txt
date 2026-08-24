@@ -125,3 +125,15 @@ Started: Mon Aug 24 11:24:42 AM UTC 2026
   - Fake-runner tests need the qrun side to write BOTH the "Render the template with the context: {...}" log line (recover_context) and a task pickle that signature-matches the conf, or snapshot_pred_refresh refuses.
   - Python stdout is block-buffered when redirected to a file — a multi-field sweep prints nothing until exit; don't mistake an empty log for a hung run (docker ps shows the live rdq-parity-*/rdq-confirm-* containers).
 ---
+## 2026-08-24 ~22:15 UTC - US-011
+- News probe + backfill budget: ops/probe_news.sh walks full-window pagination on /stable/news/stock for 5 samples (AAPL/NVDA mega, EXPE/DECK mid, ASAN thin), checks second-resolution publishedDate, mega-only strict depth vs 2025-01-02 (thin sparsity only reported), pagination proof (ordered non-empty page 1), wire ET check vs now-ET (/stable/news/stock-latest; future-timestamp = UTC smoking gun, fails loud), and prints articles/day distribution + extrapolated backfill budget. Env overrides RDQ_PROBE_{AGENT,START,END,NOW_ET,UNIVERSE,TICKERS,LIMIT,MAX_PAGES,THROTTLE,DEPTH_DAYS,TZ_MAX_STALE_MIN} for tests.
+- Files: ops/probe_news.sh (new), tests/test_probe_news.py (new, 11 tests incl. shellcheck), docs/decisions.md (US-071 entry), ops/CLAUDE.md (news jitter + ET note).
+- Verified: make check green (1471 passed, 5 skipped). LIVE run through OneCLI exit 0: AAPL 10236 articles/44 requests oldest=2025-01-02 avg/day=17.1; NVDA 19355/81 oldest=2025-01-02 avg/day=32.3 (p90 58, max 171!); EXPE 420/3 oldest=2025-01-08; DECK 602/4 oldest=2025-01-02; ASAN 138/2 oldest=2025-01-22. Wire gap 6m (ET confirmed). Budget: 134 sampled requests, extrapolated <=~15786 for 589 tickers; throttle 3 req/s -> ~88 min upper bound.
+- **Learnings for future iterations:**
+  - CRITICAL for US-012 (build_news): /stable/news/stock pagination has PAGE-SIZE JITTER — mid-stream pages return <limit rows (49 of 134 sampled pages!) with more history behind; ONLY an empty page ends history. First draft stopped on short pages and silently lost AAPL history before 2026-05-15. No window cap exists (full 599-day window paginates to 2025-01-02 fine, AAPL 44 pages) — per-ticker full-window walks are legal, no monthly chunking required.
+  - History depth NOT plan-capped (mega oldest = 2025-01-02 exactly); thin names genuinely sparse (ASAN 138 articles/599d) -> 0-fill convention, backfill start stays 2025-01-02.
+  - Article row fields: symbol, publishedDate ("YYYY-MM-DD HH:MM:SS", US/Eastern), publisher, site, title, text, url, image. US-012's archive wants ts/headline/url/publisher = publishedDate/title/url/publisher.
+  - onecli-proxied request overhead ~5-6s each — 134-request probe took ~9 min wall-clock. The real backfill should NOT shell out per request; use data/fmp.py client under one `onecli run` (env injected once) at 3 req/s.
+  - NVDA is a heavier mega sample than AAPL (32 articles/day avg, max 171/day) — good stress ticker for US-012's count spot-checks.
+  - Bash gotcha: awk float extrapolation (mean*universe) can ceil 14.000000002 -> 15; compute int((r*u+n-1)/n) instead.
+---

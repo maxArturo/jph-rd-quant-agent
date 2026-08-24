@@ -167,8 +167,8 @@
         "make check passes (ruff + pyright + pytest)"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ops/probe_news.sh + tests/test_probe_news.py (stub-onecli, 11 tests) + docs/decisions.md US-071 entry. Live: 5/5 samples clean, history to 2025-01-02 (not plan-capped), wire ET (gap 6m), budget <=~15.8k requests, throttle 3 req/s. KEY FINDING: pagination page-size jitter — only an EMPTY page ends history; US-012's build_news must terminate on empty page, never a short one."
     },
     {
       "id": "US-012",

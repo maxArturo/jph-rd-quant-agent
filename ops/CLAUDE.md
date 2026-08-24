@@ -26,6 +26,12 @@
 - FMP `/stable/treasury-rates` silently truncates windows wider than ~90
   calendar days (HTTP 200, trailing ~3 months only) — always chunk; the cap is
   asserted by ops/probe_market_series.sh (docs/decisions.md 2026-08-24).
+- FMP `/stable/news/stock` pagination has PAGE-SIZE JITTER: a mid-stream page
+  can return fewer than `limit` rows (e.g. 249) with more history behind it —
+  only an EMPTY page marks end-of-history; never stop a walk on a short page
+  or history truncates silently. `publishedDate` is second-resolution
+  US/Eastern (no tz conversion for the 16:00 ET cutoff). Both asserted by
+  ops/probe_news.sh (docs/decisions.md 2026-08-24 US-071).
 
 ## GPU burst worker (ops/gpu_worker/)
 

@@ -1296,3 +1296,53 @@ just silent truncation at ~90 calendar days. The chunked fetch (7 requests,
 ≤90 calendar days each) returned the full 410 rows. `get_treasury_rates`
 (US-065) must therefore chunk to ≤90 calendar days per request and merge;
 the probe fails loud if the cap ever stops being handled.
+
+## 2026-08-24 — US-071: FMP news probe — endpoint pinned, pagination jitter found, backfill budget + throttle chosen
+
+**Problem:** the news-count series (US-072/073) commits to a 589-ticker
+backfill against `/stable/news/stock`. The 2026-08-24 ad-hoc findings
+(history depth, ET timestamps, pagination) needed to be a scripted check,
+and the full-backfill request budget had never been measured.
+
+**Decision:** `ops/probe_news.sh` formalizes the probe (same shape as
+`ops/probe_market_series.sh`: every request through `onecli run --agent
+rdq-research -- curl ...`, FAILURE + nonzero exit on any non-200/non-array
+response). It walks full-window pagination for 5 sample tickers spanning
+coverage regimes, checks second-resolution timestamps, asserts the wire is
+ET, and prints the measured backfill budget.
+
+**Probe outcome (live run 2026-08-24, window 2025-01-02 → 2026-08-23, 599
+calendar days):**
+
+| Sample | Articles | Requests | Oldest | Avg/day | p50 / p90 / max per active day |
+|---|---|---|---|---|---|
+| AAPL (mega) | 10,236 | 44 | 2025-01-02 | 17.1 | 15 / 32 / 86 |
+| NVDA (mega) | 19,355 | 81 | 2025-01-02 | 32.3 | 27 / 58 / 171 |
+| EXPE (mid) | 420 | 3 | 2025-01-08 | 0.7 | 1 / 3 / 15 |
+| DECK (mid) | 602 | 4 | 2025-01-02 | 1.0 | 1 / 3 / 17 |
+| ASAN (thin) | 138 | 2 | 2025-01-22 | 0.2 | 1 / 3 / 6 |
+
+History depth is NOT plan-capped: both mega samples reach the store start
+exactly; mid/thin names' later oldest articles are genuine sparsity (the
+0-for-no-news convention handles them), so the backfill start stays
+2025-01-02. `publishedDate` re-confirmed second-resolution US/Eastern (wire
+newest 6 min behind now-ET; a UTC wire would sit ~4 h in the future).
+
+**New finding — pagination page-size jitter:** a mid-stream page can return
+FEWER than `limit` rows with more history behind it (e.g. AAPL full-window
+page 11 returned 249; 49 of 134 sampled pages were short-but-non-final).
+Only an EMPTY page marks end-of-history. A walk that stops on the first
+short page truncates silently — the probe's own first draft did exactly
+that and lost AAPL's history before 2026-05-15. `data/build_news.py`
+(US-072) must terminate pagination on an empty page only; the probe prints
+a NOTE with the observed jitter count every run.
+
+**Backfill budget + throttle:** measured 134 page-requests over the 5
+samples (mean 26.8/ticker, dominated by the two mega names). Extrapolated
+full backfill (589 tickers, 2025-01-02 → today): ≈ 15,800 requests as a
+mega-skewed UPPER bound; most universe names look mid/thin, so the realistic
+total is a few thousand. Chosen throttle: **3 req/s** (180/min — well under
+the plan limit; neither this probe's ~134-request burst nor the market probe
+drew a 429 through the proxy). Runtime estimate at 3 req/s: **≈ 88 min**
+upper bound, realistically well under an hour. Rerunning is cheap because
+US-072 checkpoints per ticker.
