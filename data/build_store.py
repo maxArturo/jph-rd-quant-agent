@@ -71,9 +71,17 @@ MARKET_FIELDS = (*COMMODITY_SYMBOLS, TREASURY_FIELD)
 # archive (data/build_news.py). Stored via ticker_series= — implicit factor 1,
 # never price-adjusted.
 NEWS_FIELD = "news_ct_1d"
-# Canonical backfill start for the market series (probe-verified 2026-08-24,
-# docs/decisions.md US-064) — FMP coverage before this date is unverified.
-MARKET_SERIES_START = date(2025, 1, 2)
+# Canonical backfill start for the market series — the store's own first
+# calendar day. Probe-verified 2026-08-26 (ops/probe_market_series.sh with
+# RDQ_PROBE_START=2015-01-02): every series clears MARKET_COVERAGE_MIN from
+# here except mkt_dxy, which gets a per-series override below. (The original
+# 2025-01-02 start from US-064 was an unnecessary conservatism that left every
+# $mkt_* factor all-NaN over the model's train/valid windows.)
+MARKET_SERIES_START = date(2015, 1, 2)
+# Per-series starts for feeds whose early FMP history fails the coverage gate.
+# mkt_dxy: DXUSD is missing ~50 NYSE days/year through 2023 (~85% direct
+# coverage); it prints cleanly from 2024 on.
+MARKET_SERIES_START_OVERRIDES: dict[str, date] = {"mkt_dxy": date(2024, 1, 2)}
 # Each series must directly observe at least this share of the trading days
 # since its own first observation, or the build fails loud (forward-fill is
 # for the odd commodity holiday, not for masking a broken feed).
@@ -115,6 +123,18 @@ def fetch_bundle(client: FmpClient, symbol: str, start: DateLike, end: DateLike)
     )
 
 
+def market_series_start(field: str, requested: DateLike) -> date:
+    """Effective fetch start for one $mkt_* series.
+
+    The requested start clamped forward by MARKET_SERIES_START_OVERRIDES —
+    FMP history before an override date fails the MARKET_COVERAGE_MIN gate,
+    so fetching it would only make the build fail loud.
+    """
+    req = date.fromisoformat(_to_iso_date(requested, "start"))
+    override = MARKET_SERIES_START_OVERRIDES.get(field)
+    return req if override is None else max(req, override)
+
+
 def fetch_market_series(
     client: FmpClient, start: DateLike, end: DateLike
 ) -> dict[str, tuple[tuple[date, float], ...]]:
@@ -122,13 +142,14 @@ def fetch_market_series(
 
     Commodity prices come from get_commodity_eod per COMMODITY_SYMBOLS; mkt_y10
     is the year10 tenor of get_treasury_rates (days FMP reports no 10y value for
-    are skipped — the store build forward-fills over them).
+    are skipped — the store build forward-fills over them). Each series' window
+    start is clamped by market_series_start.
     """
     series: dict[str, tuple[tuple[date, float], ...]] = {}
     for field, symbol in COMMODITY_SYMBOLS.items():
-        rows = client.get_commodity_eod(symbol, start, end)
+        rows = client.get_commodity_eod(symbol, market_series_start(field, start), end)
         series[field] = tuple((row.date, row.price) for row in rows)
-    curves = client.get_treasury_rates(start, end)
+    curves = client.get_treasury_rates(market_series_start(TREASURY_FIELD, start), end)
     series[TREASURY_FIELD] = tuple(
         (curve.date, curve.year10) for curve in curves if curve.year10 is not None
     )

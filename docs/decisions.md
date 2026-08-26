@@ -1364,3 +1364,37 @@ Failure containment mirrors the market series: a per-ticker news failure
 degrades to explicit 0 counts for the new day plus one aggregated Slack
 warning, and the ticker's checkpoint stays put so the next refresh refetches
 the gap — the refresh -> predict -> rebalance chain never blocks on news.
+
+## 2026-08-26 — Market series deepened to 2015-01-02; per-series start overrides
+
+**Problem:** the 2026-08-25 "go for fuel" acceptance run promoted nothing and
+burned 6/10 hypotheses on inert factors: every `$mkt_*` series started
+2025-01-02 (US-064's conservative `MARKET_SERIES_START` — "FMP coverage
+before this date is unverified"), so any fuel-beta factor was 100% NaN over
+the train (2016-2022) and valid (2023-2024) segments. A factor with no
+training-window coverage gets zero model weight and reproduces the baseline
+bit-for-bit — the run's loops 0-5 returned byte-identical metrics and the
+agent had no signal telling it why.
+
+**Decision:** re-ran the US-064 probe with `RDQ_PROBE_START=2015-01-02`
+(then verified direct NYSE-day coverage against `MARKET_COVERAGE_MIN`):
+every commodity + the treasury curve passes from the store's first day.
+`MARKET_SERIES_START` is now **2015-01-02**, with per-series exceptions in
+`MARKET_SERIES_START_OVERRIDES` (`market_series_start` clamps every fetch):
+**mkt_dxy → 2024-01-02**, because FMP's DXUSD misses ~50 NYSE days/year
+through 2023 (~85% direct coverage, below the 99% gate). `data/refresh.py
+--market-start` now also DEEPENS stored series whose first observation is
+later than the clamped start (full-window re-fetch replaces the stored
+observations, `RefreshResult.market_deepened`, same per-series outage
+degrade) — executed 2026-08-26 on the live store and the us_liquid factor
+source was regenerated.
+
+**Guardrails against recurrence:** the data menu's `$mkt_*` PIT notes and
+the factor-source README now state each series' actual history start (the
+README computes it from the live frame, the menu from the constants) plus an
+explicit warning that a factor that is all-NaN over the training window is
+invisible to the model. Known residual gaps, deliberately accepted for now:
+`$mkt_dxy` (2024+) and `$news_ct_1d` (2025+) still carry no training-window
+information; FMP's news archive reaches ~2016 but thins to a handful of
+articles/month before ~2018 (coverage-regime change), so deepening news is a
+separate decision.

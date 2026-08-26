@@ -29,7 +29,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from data.build_store import DEFAULT_STORE_PATH, FREQ
+from data.build_store import (
+    DEFAULT_STORE_PATH,
+    FREQ,
+    MARKET_SERIES_START,
+    market_series_start,
+)
 
 SCHEMA_VERSION = 1
 
@@ -57,11 +62,23 @@ class CuratedField:
     pit_note: str
 
 
-_MARKET_PIT_NOTE = (
-    "Raw broadcast series, never touched by $factor. Values are settled daily "
-    "observations; equity days with no market print forward-fill from the last "
-    "observation, and days before the series' first observation are NaN."
-)
+def _market_pit_note(field: str) -> str:
+    """Shared $mkt_* PIT note + the series' own history start.
+
+    The start comes from build_store's canonical constants (clamped per
+    series by market_series_start), so the note can never drift from what
+    the build actually fetches. Factors derived from a $mkt_* series are
+    all-NaN before this date — a training window that ends before it makes
+    the factor invisible to the model (the 2026-08-25 fuel run failed
+    exactly this way).
+    """
+    start = market_series_start(field, MARKET_SERIES_START)
+    return (
+        "Raw broadcast series, never touched by $factor. Values are settled daily "
+        "observations; equity days with no market print forward-fill from the last "
+        f"observation. History starts {start.isoformat()}; earlier days are NaN, so "
+        "anything derived from this series carries no information before that date."
+    )
 
 # Curated semantics, in canonical display order. Every field the store is
 # EXPECTED to carry needs an entry here; new series (e.g. $mkt_*) must be added
@@ -116,42 +133,42 @@ CURATED_FIELDS: dict[str, CuratedField] = {
     "$mkt_brent": CuratedField(
         KIND_MARKET,
         "Brent crude oil EOD price (FMP symbol BZUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_brent"),
     ),
     "$mkt_wti": CuratedField(
         KIND_MARKET,
         "WTI crude oil EOD price (FMP symbol CLUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_wti"),
     ),
     "$mkt_heatoil": CuratedField(
         KIND_MARKET,
         "Heating oil EOD price (FMP symbol HOUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_heatoil"),
     ),
     "$mkt_natgas": CuratedField(
         KIND_MARKET,
         "Natural gas EOD price (FMP symbol NGUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_natgas"),
     ),
     "$mkt_gasoline": CuratedField(
         KIND_MARKET,
         "RBOB gasoline EOD price (FMP symbol RBUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_gasoline"),
     ),
     "$mkt_gold": CuratedField(
         KIND_MARKET,
         "Gold EOD price (FMP symbol GCUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_gold"),
     ),
     "$mkt_dxy": CuratedField(
         KIND_MARKET,
         "US dollar index EOD level (FMP symbol DXUSD).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_dxy"),
     ),
     "$mkt_y10": CuratedField(
         KIND_MARKET,
         "US 10-year treasury yield in percent (FMP treasury-rates year10 tenor).",
-        _MARKET_PIT_NOTE,
+        _market_pit_note("mkt_y10"),
     ),
 }
 

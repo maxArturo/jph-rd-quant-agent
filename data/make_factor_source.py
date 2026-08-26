@@ -102,12 +102,27 @@ market = pd.read_hdf("market_series.h5", key="data")
 Index: DatetimeIndex, one row per trading day (NOT a MultiIndex).
 Columns: $mkt_* series, e.g. $mkt_brent (Brent crude), $mkt_y10 (10-year treasury yield).
 Each column holds ONE value per date shared by ALL instruments (market-level data,
-broadcast to every stock). Values are NaN before a series' first observation.
+broadcast to every stock). Values are NaN before a series' first observation:
+{starts}
+A factor derived from a series is NaN wherever the series is — check the start
+above against your training window, because a factor that is all-NaN over the
+training segment contributes NOTHING to the model (it silently reproduces the
+baseline).
 Use these for betas, spreads, or to condition/interact a per-ticker signal.
 NEVER use a market series as a cross-sectional signal on its own: it is identical
 across all instruments on a given date, so alone it carries zero cross-sectional
 information.
 """
+
+
+def _market_starts_block(market: "pd.DataFrame") -> str:
+    """Per-series first-valid dates for the README, from the FULL market frame
+    (the debug folder's frame is windowed, which would misstate the starts)."""
+    lines = []
+    for column in market.columns:
+        first = market[column].first_valid_index()
+        lines.append(f"  {column}: history starts {first.date().isoformat()}")
+    return "\n".join(lines)
 
 NEWS_README_TEXT = """\
 
@@ -351,7 +366,7 @@ def make_factor_source(
         readme = README_TEXT
         if windowed_market is not None:
             _write_h5(windowed_market, market_target)
-            readme += MARKET_README_TEXT
+            readme += MARKET_README_TEXT.format(starts=_market_starts_block(market))
         if windowed_news is not None:
             _write_h5(windowed_news, news_target)
             readme += NEWS_README_TEXT

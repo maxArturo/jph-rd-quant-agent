@@ -13,6 +13,7 @@ from data.build_news import backfill_ticker, checkpoint_window, read_news_series
 from data.build_store import (
     COMMODITY_SYMBOLS,
     MARKET_FIELDS,
+    TREASURY_FIELD,
     BuildError,
     TickerBundle,
     build_store,
@@ -732,6 +733,93 @@ def test_main_market_start_flag_introduces_and_reports(
     assert main(argv, client=introduction_client()) == 0
     out = capsys.readouterr().out
     assert "market series introduced:" in out
+    assert "mkt_brent" in out
+
+
+def canonical_market_store(tmp_path: Path, first: int = 2) -> Path:
+    """Two-ticker store carrying EVERY canonical market series from DAYS[first].
+
+    The enumerate index stays aligned with introduction_client's full-window
+    values, so a deepened bin must equal the client's prices exactly.
+    """
+    series: dict[str, list[tuple[date, float]]] = {
+        field: [(d, commodity_price(sym, i)) for i, d in enumerate(DAYS) if i >= first]
+        for field, sym in COMMODITY_SYMBOLS.items()
+    }
+    series[TREASURY_FIELD] = [(d, 4.0 + 0.25 * i) for i, d in enumerate(DAYS) if i >= first]
+    store = tmp_path / "us_data"
+    build_store(
+        [
+            TickerBundle("AAPL", make_bars("AAPL"), (), ()),
+            TickerBundle("MSFT", make_bars("MSFT", close=200.0), (), ()),
+        ],
+        store,
+        market_series=series,
+    )
+    return store
+
+
+def test_refresh_market_start_deepens_shallow_series(tmp_path: Path) -> None:
+    store = canonical_market_store(tmp_path)  # every series starts at DAYS[2]
+    client = introduction_client()
+    # No new equity bars: the deepening alone forces the rebuild. The start
+    # predates the mkt_dxy override so the per-series clamp is observable.
+    result = refresh_store(store, client, end=LAST_OLD, market_start=date(2023, 12, 29))
+    assert result.updated is True
+    assert result.new_bars == {}
+    assert result.market_introduced == ()
+    assert set(result.market_deepened) == set(MARKET_FIELDS)
+    assert result.warnings == ()
+    _, brent = read_bin(store / "features" / "aapl" / "mkt_brent.day.bin")
+    assert brent == pytest.approx([commodity_price("BZUSD", i) for i in range(len(DAYS))])
+    windows = {sym: start for sym, start, _ in client.market_windows}
+    assert windows["BZUSD"] == "2023-12-29"  # requested start, no override
+    assert windows["DXUSD"] == "2024-01-02"  # clamped by MARKET_SERIES_START_OVERRIDES
+    # Equity bins are value-identical through the market-only rebuild.
+    _, closes = read_bin(store / "features" / "aapl" / "close.day.bin")
+    assert closes == pytest.approx([100.0, 101.0, 102.0, 103.0, 104.0])
+
+
+def test_refresh_market_start_deepen_outage_keeps_stored_series(tmp_path: Path) -> None:
+    store = canonical_market_store(tmp_path)
+    client = introduction_client(fail_commodities={"BZUSD"})
+    result = refresh_store(store, client, end=LAST_OLD, market_start=DAYS[0])
+    assert result.updated is True
+    assert set(result.market_deepened) == set(MARKET_FIELDS) - {"mkt_brent"}
+    warning = next(w for w in result.warnings if "mkt_brent" in w)
+    assert "not deepened" in warning
+    # The stored shallow series survives untouched: NaN head, then its values.
+    _, brent = read_bin(store / "features" / "aapl" / "mkt_brent.day.bin")
+    assert np.isnan(brent[:2]).all()
+    assert brent[2:] == pytest.approx([commodity_price("BZUSD", i) for i in (2, 3, 4)])
+
+
+def test_refresh_market_start_noop_when_series_already_deep(tmp_path: Path) -> None:
+    store = canonical_market_store(tmp_path, first=0)
+    before = store_snapshot(store)
+    client = introduction_client()
+    result = refresh_store(store, client, end=LAST_OLD, market_start=DAYS[0])
+    assert result.updated is False
+    assert result.market_deepened == ()
+    assert client.market_windows == []
+    assert store_snapshot(store) == before
+
+
+def test_main_market_start_flag_deepens_and_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = canonical_market_store(tmp_path)
+    argv = [
+        "--store",
+        str(store),
+        "--end",
+        LAST_OLD.isoformat(),
+        "--market-start",
+        DAYS[0].isoformat(),
+    ]
+    assert main(argv, client=introduction_client()) == 0
+    out = capsys.readouterr().out
+    assert "market series deepened:" in out
     assert "mkt_brent" in out
 
 

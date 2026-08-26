@@ -27,7 +27,10 @@ and reported as a warning (Slack line from the CLI) — a market-data outage
 must never block the pre-open refresh -> predict -> rebalance chain.
 --market-start backfills any of the canonical MARKET_FIELDS the store does
 not carry yet (one-time introduction; from then on the nightly refresh
-advances them incrementally).
+advances them incrementally) AND deepens any stored series whose first
+observation is later than the requested start (re-fetched over the full
+window and replaced — the one-time history-extension path; per-series
+starts are clamped by build_store.market_series_start).
 
 News counts ($news_ct_1d, US-073): when the store carries news_ct_1d bins,
 each refreshed trading day pulls yesterday's articles per ticker (same --end
@@ -82,6 +85,7 @@ from data.build_store import (
     BuildError,
     TickerBundle,
     build_store,
+    market_series_start,
 )
 from data.fmp import DateLike, EodBar, FmpClient, FmpError, NewsArticle, _to_iso_date
 
@@ -112,6 +116,7 @@ class RefreshResult:
     new_bars: dict[str, int]  # symbol -> number of appended bars
     warnings: tuple[str, ...] = ()  # degraded-but-not-fatal notices (market/news outages)
     market_introduced: tuple[str, ...] = ()  # $mkt_* fields backfilled this run
+    market_deepened: tuple[str, ...] = ()  # stored $mkt_* fields re-backfilled deeper this run
     news_introduced: bool = False  # $news_ct_1d built from the archive this run
 
 
@@ -324,25 +329,35 @@ def _pull_market_series(
     stored: dict[str, list[tuple[date, float]]],
     pull_stored: bool,
     introduce: Sequence[str],
+    deepen: Sequence[str],
     last_before: date,
     end_date: date,
     market_start: date | None,
-) -> tuple[dict[str, list[tuple[date, float]]], list[str], list[str]]:
-    """Advance stored series and backfill introduced ones; degrade per series.
+) -> tuple[dict[str, list[tuple[date, float]]], list[str], list[str], list[str]]:
+    """Advance stored series, backfill introduced ones, deepen shallow ones.
 
-    Returns (merged series map, warnings, fields actually introduced). A
-    series whose fetch fails keeps its stored observations — the rebuild's
-    forward-fill covers the new days — and is reported as a warning instead
-    of raising: a market-data outage must never block the refresh chain.
+    Returns (merged series map, warnings, fields introduced, fields
+    deepened). A deepened series is re-fetched over the FULL window (its
+    per-series effective start through end_date) and REPLACES the stored
+    observations — the full fetch subsumes the incremental advance, so
+    deepened fields skip the pull_stored window. Any series whose fetch
+    fails keeps its stored observations — the rebuild's forward-fill covers
+    the new days — and is reported as a warning instead of raising: a
+    market-data outage must never block the refresh chain.
     """
     merged = {name: list(observations) for name, observations in stored.items()}
     warnings: list[str] = []
     introduced: list[str] = []
+    deepened: list[str] = []
+    deepen_set = set(deepen) if market_start is not None else set()
     windows: list[tuple[str, date]] = []
     if pull_stored:
-        windows += [(name, last_before + timedelta(days=1)) for name in stored]
+        windows += [
+            (name, last_before + timedelta(days=1)) for name in stored if name not in deepen_set
+        ]
     if market_start is not None:
-        windows += [(name, market_start) for name in introduce]
+        windows += [(name, market_series_start(name, market_start)) for name in introduce]
+        windows += [(name, market_series_start(name, market_start)) for name in deepen_set]
     for name, window_start in windows:
         if name not in MARKET_FIELDS:
             warnings.append(
@@ -355,7 +370,12 @@ def _pull_market_series(
         try:
             fetched = _fetch_market_observations(client, name, window_start, end_date)
         except FmpError as exc:
-            if name in stored:
+            if name in deepen_set:
+                warnings.append(
+                    f"market series {name}: FMP fetch failed ({exc}); not deepened — "
+                    "kept the stored observations, forward-filled over any new days"
+                )
+            elif name in stored:
                 warnings.append(
                     f"market series {name}: FMP fetch failed ({exc}); "
                     "forward-filled from the last stored value"
@@ -364,7 +384,17 @@ def _pull_market_series(
                 warnings.append(f"market series {name}: FMP fetch failed ({exc}); not introduced")
             continue
         fresh = sorted((d, v) for d, v in fetched if window_start <= d <= end_date)
-        if name in stored:
+        if name in deepen_set:
+            if fresh and fresh[0][0] < stored[name][0][0]:
+                merged[name] = fresh
+                deepened.append(name)
+            else:
+                warnings.append(
+                    f"market series {name}: FMP returned nothing earlier than the stored "
+                    f"start over {window_start.isoformat()}..{end_date.isoformat()}; "
+                    "not deepened"
+                )
+        elif name in stored:
             merged[name] += fresh
         elif fresh:
             merged[name] = fresh
@@ -374,7 +404,7 @@ def _pull_market_series(
                 f"market series {name}: FMP returned no rows over "
                 f"{window_start.isoformat()}..{end_date.isoformat()}; not introduced"
             )
-    return merged, warnings, introduced
+    return merged, warnings, introduced, deepened
 
 
 # ---------------------------------------------------------------------------
@@ -556,9 +586,12 @@ def refresh_store(
     Any $mkt_* fields the store carries are pulled forward over the same
     window and rebuilt alongside (raw broadcast, implicit factor 1 — the
     adjustment math never sees them). market_start additionally backfills
-    the canonical MARKET_FIELDS the store lacks, from that date — the
-    one-time introduction path; it forces a rebuild even when no equity bar
-    is new.
+    the canonical MARKET_FIELDS the store lacks, from that date (clamped
+    per series by build_store.market_series_start) — the one-time
+    introduction path — and DEEPENS any stored series whose first
+    observation is later than that clamped start (full-window re-fetch
+    replaces the stored observations). Either forces a rebuild even when no
+    equity bar is new.
 
     News counts work the same way per ticker: stored news_ct_1d bins are read
     back, yesterday's articles are pulled into the archive under ``news_root``
@@ -579,10 +612,17 @@ def refresh_store(
         store, symbols, calendar, read_ticker_fields(store, symbols)
     )
     introduce: tuple[str, ...] = ()
+    deepen: tuple[str, ...] = ()
     market_start_date: date | None = None
     if market_start is not None:
         market_start_date = date.fromisoformat(_to_iso_date(market_start, "market-start"))
         introduce = tuple(name for name in MARKET_FIELDS if name not in stored_market)
+        deepen = tuple(
+            name
+            for name in MARKET_FIELDS
+            if name in stored_market
+            and stored_market[name][0][0] > market_series_start(name, market_start_date)
+        )
     news_start_date: date | None = None
     if news_start is not None:
         news_start_date = date.fromisoformat(_to_iso_date(news_start, "news-start"))
@@ -601,16 +641,17 @@ def refresh_store(
         if fresh:
             new_bars[symbol] = fresh
 
-    if not new_bars and not introduce and not introduce_news:
+    if not new_bars and not introduce and not deepen and not introduce_news:
         return RefreshResult(False, last_before, last_before, {})
 
     # Stored series only advance when the equity calendar does: without new
     # bars there is no new trading day to place a market value on.
-    market_series, warnings, introduced = _pull_market_series(
+    market_series, warnings, introduced, deepened = _pull_market_series(
         client,
         stored_market,
         pull_stored=bool(new_bars),
         introduce=introduce,
+        deepen=deepen,
         last_before=last_before,
         end_date=end_date,
         market_start=market_start_date,
@@ -630,9 +671,9 @@ def refresh_store(
         throttle_rps=news_throttle,
     )
     warnings += news_warnings
-    if not new_bars and not introduced and not news_introduced:
-        # Introduction was requested but nothing landed (outage/empty): the
-        # rebuild would be a byte-identical rewrite, so skip it.
+    if not new_bars and not introduced and not deepened and not news_introduced:
+        # Introduction/deepening was requested but nothing landed (outage/
+        # empty): the rebuild would be a byte-identical rewrite, so skip it.
         return RefreshResult(False, last_before, last_before, {}, warnings=tuple(warnings))
 
     bundles = [
@@ -661,6 +702,7 @@ def refresh_store(
         {s: len(bars) for s, bars in new_bars.items()},
         warnings=tuple(warnings),
         market_introduced=tuple(introduced),
+        market_deepened=tuple(deepened),
         news_introduced=news_introduced,
     )
 
@@ -827,9 +869,11 @@ def main(
         "--market-start",
         default=None,
         metavar="YYYY-MM-DD",
-        help="backfill any canonical $mkt_* market series the store does not carry yet, "
-        f"from this date (canonical start {MARKET_SERIES_START.isoformat()}); series "
-        "already in the store always refresh incrementally without this flag",
+        help="backfill any canonical $mkt_* market series the store does not carry yet "
+        "and deepen any stored series whose history starts later than this date "
+        f"(canonical start {MARKET_SERIES_START.isoformat()}, per-series overrides in "
+        "build_store.MARKET_SERIES_START_OVERRIDES); series already at full depth "
+        "always refresh incrementally without this flag",
     )
     parser.add_argument(
         "--news-start",
@@ -905,6 +949,8 @@ def main(
         print(f"store already current (last date {result.last_date_before.isoformat()})")
     if result.market_introduced:
         print(f"market series introduced: {', '.join(result.market_introduced)}")
+    if result.market_deepened:
+        print(f"market series deepened: {', '.join(result.market_deepened)}")
     if result.news_introduced:
         print(f"news series introduced: {NEWS_FIELD}")
     for line in result.warnings:

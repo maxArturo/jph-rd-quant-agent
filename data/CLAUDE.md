@@ -29,8 +29,13 @@
   series' first observation, and direct coverage >= `MARKET_COVERAGE_MIN` (99%) of trading
   days since first observation or the build fails naming the series. The canonical set is
   `MARKET_FIELDS` (= `COMMODITY_SYMBOLS` keys + `TREASURY_FIELD`); `fetch_market_series`
-  fetches them all (skipping None year10 rows). CLI: `--market-start` (canonical
-  `MARKET_SERIES_START` 2025-01-02).
+  fetches them all (skipping None year10 rows), clamping each window start via
+  `market_series_start` (canonical `MARKET_SERIES_START` 2015-01-02 = the store's first
+  day; `MARKET_SERIES_START_OVERRIDES` holds per-series later starts — mkt_dxy 2024-01-02,
+  DXUSD misses ~50 NYSE days/yr through 2023 and would fail the coverage gate). CLI:
+  `--market-start`. A $mkt_*-derived factor is all-NaN before its series start — a
+  training window ending earlier makes it invisible to the model (the 2026-08-25 fuel
+  run's failure mode).
 - Market fields in the refresh (US-067): `data/refresh.py` reads any `mkt_*` bins back as
   observations (`read_market_series` — ffilled values read back as direct observations,
   NaN heads dropped, all symbols overlaid since no single ticker need span the calendar)
@@ -38,8 +43,11 @@
   incrementally under the same yesterday-ET `--end`; a per-series FMP failure degrades to
   forward-fill + a warning in `RefreshResult.warnings` (the CLI prints them and posts one
   Slack line via `execution.rebalance.slack_notifier`; `--no-slack` skips) and NEVER fails
-  the run. `--market-start` is the one-time introduction path: it backfills canonical
-  MARKET_FIELDS the store lacks and forces a rebuild even with no new equity bars.
+  the run. `--market-start` is the one-time introduction/deepening path: it backfills
+  canonical MARKET_FIELDS the store lacks AND re-fetches (full window, replace) any
+  stored series whose first observation is later than the clamped start
+  (`RefreshResult.market_deepened`); either forces a rebuild even with no new equity
+  bars.
   GOTCHA: mkt carry covers only `mkt_*`-prefixed broadcast bins; per-ticker raw bins go
   through `read_ticker_fields`/`read_ticker_series` (news_ct_1d has a full ingest path,
   US-015 below — any OTHER per-ticker field is carried verbatim with new days left NaN

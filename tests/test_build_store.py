@@ -11,6 +11,7 @@ import pytest
 from data.build_store import (
     COMMODITY_SYMBOLS,
     MARKET_FIELDS,
+    MARKET_SERIES_START_OVERRIDES,
     NEWS_FIELD,
     BuildError,
     StoreValidationError,
@@ -21,6 +22,7 @@ from data.build_store import (
     fetch_bundle,
     fetch_market_series,
     main,
+    market_series_start,
     resolve_tickers,
     validate_store,
 )
@@ -134,9 +136,11 @@ class MarketFakeFmp(FakeFmp):
         self.market_days = market_days if market_days is not None else DAYS
         self.y10_none = y10_none or set()
         self.commodity_calls: list[str] = []
+        self.commodity_windows: list[tuple[str, str]] = []
 
     def get_commodity_eod(self, symbol: str, start: object, end: object) -> list[CommodityEod]:
         self.commodity_calls.append(symbol)
+        self.commodity_windows.append((symbol, str(start)))
         return [
             CommodityEod(symbol, day, commodity_price(symbol, i), 100.0)
             for i, day in enumerate(self.market_days)
@@ -409,6 +413,25 @@ def test_validate_store_catches_missing_market_bin(tmp_path: Path) -> None:
     (store / "features" / "aapl" / "mkt_gold.day.bin").unlink()
     with pytest.raises(StoreValidationError, match="missing feature file"):
         validate_store(store, ["AAPL"], market_fields=("mkt_gold",))
+
+
+def test_market_series_start_clamps_per_series_overrides() -> None:
+    assert market_series_start("mkt_brent", date(2015, 1, 2)) == date(2015, 1, 2)
+    assert market_series_start("mkt_dxy", date(2015, 1, 2)) == MARKET_SERIES_START_OVERRIDES[
+        "mkt_dxy"
+    ]
+    # A requested start later than the override wins (incremental advances).
+    assert market_series_start("mkt_dxy", date(2025, 6, 1)) == date(2025, 6, 1)
+    # DateLike strings are accepted, same as the fetch layer.
+    assert market_series_start("mkt_y10", "2015-01-02") == date(2015, 1, 2)
+
+
+def test_fetch_market_series_clamps_overridden_windows() -> None:
+    client = MarketFakeFmp(bars={})
+    fetch_market_series(client, date(2015, 1, 2), DAYS[-1])
+    windows = dict(client.commodity_windows)
+    assert windows["BZUSD"] == "2015-01-02"
+    assert windows["DXUSD"] == MARKET_SERIES_START_OVERRIDES["mkt_dxy"].isoformat()
 
 
 def test_fetch_market_series_covers_every_field_and_skips_none_y10() -> None:

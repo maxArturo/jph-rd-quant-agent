@@ -140,7 +140,10 @@ def test_checked_in_doc_matches_module_output(tmp_path: Path) -> None:
 def test_render_doc_is_schema_only(tmp_path: Path) -> None:
     store = fixture_store(tmp_path)
     doc = render_doc(build_menu(store))
-    assert "2024-01-02" not in doc  # no calendar dates
+    # No live-calendar dates (curated series-start constants like the news
+    # archive's 2025-01-02 or mkt_dxy's 2024-01-02 are fixed semantics and
+    # allowed): the fixture calendar's end must not leak into the doc.
+    assert "2024-01-08" not in doc
     assert "tiny_pit" not in doc  # no universes
     assert str(store) not in doc  # no store path
     for name in CURATED_FIELDS:

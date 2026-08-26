@@ -33,8 +33,10 @@ CPU-only and control-box-local. Entry points::
     python -m ops.parity_check --field '$close'   # OHLCV-only regression guard
 
 The dates default to a 50/25/25 train/valid/test split of the store trading
-days from ``--start`` (default MARKET_SERIES_START, 2025-01-02 — the market
-series carry no data before it), with the last ``TEST_END_LAG_DAYS`` trading
+days from ``--start`` (default MARKET_SERIES_START, 2015-01-02 — the store's
+first day; no series carries data before its own clamped start, and a parity
+run compares two predictions over identical inputs, so per-series NaN heads
+like mkt_dxy's cancel out), with the last ``TEST_END_LAG_DAYS`` trading
 days held out so the training run's PortAnaRecord backtest never indexes past
 the calendar end. Workspaces are recreated from scratch on every run.
 """
